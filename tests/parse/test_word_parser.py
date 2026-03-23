@@ -62,6 +62,49 @@ class FakeVikingFS:
         return f"viking://temp/word_{self._temp_counter}"
 
 
+class FakeImageElement:
+    def __init__(self, attrs: dict[str, str]):
+        self.attrs = attrs
+
+    def get(self, key: str):
+        return self.attrs.get(key)
+
+
+class FakeElement:
+    def __init__(self, blips=None, image_datas=None):
+        self._blips = blips or []
+        self._image_datas = image_datas or []
+
+    def xpath(self, expr: str):
+        if "blip" in expr:
+            return self._blips
+        if "imagedata" in expr:
+            return self._image_datas
+        return []
+
+
+class FakeRel:
+    def __init__(self, is_external: bool = False, target_ref: str = ""):
+        self.is_external = is_external
+        self.target_ref = target_ref
+
+
+class FakePart:
+    def __init__(self, related_parts=None, rels=None):
+        self.related_parts = related_parts or {}
+        self.rels = rels or {}
+
+
+class FakeRun:
+    def __init__(self, text: str = "", element=None, part=None):
+        self.text = text
+        self.bold = False
+        self.italic = False
+        self.underline = False
+        self.element = element or FakeElement()
+        self.part = part or FakePart()
+
+
 @pytest.mark.asyncio
 async def test_word_parser_extracts_embedded_images(tmp_path: Path, monkeypatch) -> None:
     image_path = tmp_path / "tiny.png"
@@ -142,3 +185,51 @@ async def test_word_parser_preserves_inline_image_order(tmp_path: Path, monkeypa
     markdown_content = parser._md_parser.parse_content.await_args.args[0]
     assert markdown_content.index("Click ") < markdown_content.index("ov-asset://")
     assert markdown_content.index("ov-asset://") < markdown_content.index(" to continue")
+
+
+def test_word_parser_strips_includepicture_field_text_but_keeps_following_note() -> None:
+    run = FakeRun(
+        text=(
+            '\x13 INCLUDEPICTURE "C:\\\\Users\\\\ADMINI~1\\\\AppData\\\\Local\\\\Temp\\\\ksohtml\\\\wps7F76.tmp.jpg" '
+            '\\* MERGEFORMATINET \x14\x01\x15注意：扫码登录功能需后台配置。'
+        )
+    )
+
+    assert WordParser._format_run_text(run) == "注意：扫码登录功能需后台配置。"
+
+
+def test_word_parser_extracts_http_includepicture_as_markdown_image() -> None:
+    parser = WordParser()
+    run = FakeRun(
+        text=(
+            '\x13 INCLUDEPICTURE "https://example.com/assets/scan-login.png?token=abc" '
+            '\\* MERGEFORMATINET \x14\x01\x15'
+        )
+    )
+
+    refs = parser._extract_run_image_refs(run, {})
+
+    assert refs == ["![scan-login](https://example.com/assets/scan-login.png?token=abc)"]
+
+
+def test_word_parser_extracts_vml_imagedata_relationship() -> None:
+    parser = WordParser()
+    run = FakeRun(
+        element=FakeElement(
+            image_datas=[
+                FakeImageElement(
+                    {"{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id": "rId9"}
+                )
+            ]
+        ),
+        part=FakePart(
+            related_parts={
+                "rId9": type("ImagePart", (), {"partname": "/word/media/image1.png"})(),
+            },
+            rels={"rId9": FakeRel()},
+        ),
+    )
+
+    refs = parser._extract_run_image_refs(run, {"/word/media/image1.png": "image1.png"})
+
+    assert refs == ["![image1](ov-asset://image1.png)"]

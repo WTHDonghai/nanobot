@@ -5,6 +5,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import unquote, urlparse
 
 from loguru import logger
 
@@ -17,6 +18,11 @@ viking_resource_prefix = "viking://resources/"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff"}
 READABLE_TEXT_EXTENSIONS = {".md", ".markdown", ".mdown", ".mkd", ".txt"}
 WORD_IMAGE_PLACEHOLDER_RE = re.compile(r"!\[([^\]]*)\]\(ov-asset://([^)]+)\)")
+WORD_INCLUDEPICTURE_RE = re.compile(
+    r"[\x01\x13\x14\x15]*INCLUDEPICTURE(?:\s+\\d)?\s+\"([^\"]+)\"(?:\s+\\\*\s+MERGEFORMATINET)?[\x01\x13\x14\x15]*",
+    re.IGNORECASE,
+)
+WORD_CONTROL_CHAR_RE = re.compile(r"[\x01\x13\x14\x15]")
 
 
 class VikingClient:
@@ -130,12 +136,22 @@ class VikingClient:
             level: 读取级别 ("abstract" - L0摘要, "overview" - L1概览, "read" - L2完整内容)
         """
         try:
+            normalized_uri = uri.rstrip("/")
+            if level == "abstract" and normalized_uri.endswith("/.abstract.md"):
+                normalized_uri = normalized_uri[: -len("/.abstract.md")]
+            elif level == "overview" and normalized_uri.endswith("/.overview.md"):
+                normalized_uri = normalized_uri[: -len("/.overview.md")]
+            elif level in {"abstract", "overview"} and normalized_uri.endswith(
+                ("/.abstract.md", "/.overview.md")
+            ):
+                normalized_uri = normalized_uri.rsplit("/", 1)[0]
+
             if level == "abstract":
-                return await self.client.abstract(uri)
+                return await self.client.abstract(normalized_uri)
             elif level == "overview":
-                return await self.client.overview(uri)
+                return await self.client.overview(normalized_uri)
             elif level == "read":
-                return await self.client.read(uri)
+                return await self.client.read(normalized_uri)
             else:
                 raise ValueError(f"Unsupported level: {level}")
         except FileNotFoundError:
@@ -239,40 +255,39 @@ class VikingClient:
 
     async def materialize_inline_image_refs(self, content: str, source_uri: str) -> str:
         """Replace Word inline asset placeholders with sendable image references."""
-        if "ov-asset://" not in content:
-            return content
-
         rendered = content
         replacement_cache: dict[str, str] = {}
 
-        for match in WORD_IMAGE_PLACEHOLDER_RE.finditer(content):
-            alt_text = match.group(1)
-            asset_name = match.group(2)
-            placeholder = match.group(0)
+        if "ov-asset://" in content:
+            for match in WORD_IMAGE_PLACEHOLDER_RE.finditer(content):
+                alt_text = match.group(1)
+                asset_name = match.group(2)
+                placeholder = match.group(0)
 
-            if asset_name not in replacement_cache:
-                resolved_uri = await self._resolve_image_asset_uri(source_uri, asset_name)
-                if not resolved_uri:
-                    raise ValueError(
-                        f"Unable to resolve inline image asset '{asset_name}' from {source_uri}"
-                    )
+                if asset_name not in replacement_cache:
+                    resolved_uri = await self._resolve_image_asset_uri(source_uri, asset_name)
+                    if not resolved_uri:
+                        raise ValueError(
+                            f"Unable to resolve inline image asset '{asset_name}' from {source_uri}"
+                        )
 
-                exported = await self._export_image_uris_for_send([resolved_uri])
-                if not exported:
-                    raise ValueError(
-                        f"Unable to export inline image asset '{resolved_uri}' for send"
-                    )
+                    exported = await self._export_image_uris_for_send([resolved_uri])
+                    if not exported:
+                        raise ValueError(
+                            f"Unable to export inline image asset '{resolved_uri}' for send"
+                        )
 
-                send_match = re.search(r"!\[[^\]]*\]\((send://[^)\s]+)\)", exported[0])
-                if not send_match:
-                    raise ValueError(
-                        f"Inline image asset '{resolved_uri}' did not produce a send:// reference"
-                    )
-                replacement_cache[asset_name] = f"![{alt_text}]({send_match.group(1)})"
+                    send_match = re.search(r"!\[[^\]]*\]\((send://[^)\s]+)\)", exported[0])
+                    if not send_match:
+                        raise ValueError(
+                            f"Inline image asset '{resolved_uri}' did not produce a send:// reference"
+                        )
+                    replacement_cache[asset_name] = f"![{alt_text}]({send_match.group(1)})"
 
-            rendered = rendered.replace(placeholder, replacement_cache[asset_name], 1)
+                rendered = rendered.replace(placeholder, replacement_cache[asset_name], 1)
 
-        return rendered
+        rendered = self._materialize_word_field_images(rendered)
+        return self._strip_word_control_chars(rendered)
 
     async def _export_image_uris_for_send(self, image_uris: list[str]) -> list[str]:
         """Persist image URIs into bot send:// staging files."""
@@ -408,6 +423,10 @@ class VikingClient:
                 image_uris.sort(key=self._image_sort_key)
                 return image_uris[:max_images]
 
+            # Parsed document roots already own their sibling _images directory.
+            if Path(self._uri_name(current_dir)).suffix:
+                break
+
             parent_dir = self._parent_uri(current_dir)
             if not parent_dir or parent_dir == current_dir:
                 break
@@ -466,6 +485,28 @@ class VikingClient:
         match = re.search(r"(\d+)", name)
         number = int(match.group(1)) if match else 10**9
         return number, name
+
+    @classmethod
+    def _materialize_word_field_images(cls, content: str) -> str:
+        """Convert Word INCLUDEPICTURE field codes into markdown images when possible."""
+        if "INCLUDEPICTURE" not in content:
+            return content
+
+        def replace(match: re.Match[str]) -> str:
+            ref = match.group(1).strip()
+            if ref.startswith(("http://", "https://")):
+                parsed = urlparse(ref)
+                filename = Path(unquote(parsed.path)).name
+                alt_text = Path(filename).stem or "image"
+                return f"![{alt_text}]({ref})"
+            return ""
+
+        return WORD_INCLUDEPICTURE_RE.sub(replace, content)
+
+    @staticmethod
+    def _strip_word_control_chars(content: str) -> str:
+        """Remove Word field control characters that leak into parsed markdown."""
+        return WORD_CONTROL_CHAR_RE.sub("", content)
 
     @staticmethod
     def _uri_name(uri: str) -> str:

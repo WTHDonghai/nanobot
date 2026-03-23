@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+import unicodedata
 from typing import Any
 
 import httpx
@@ -32,6 +33,17 @@ except ImportError:
     CallbackMessage = None  # type: ignore[assignment,misc]
     AckMessage = None  # type: ignore[assignment,misc]
     ChatbotMessage = None  # type: ignore[assignment,misc]
+
+
+DINGTALK_TEXT_SOFT_LIMIT = 420
+DINGTALK_MARKDOWN_TITLE = "XR Support Reply"
+DINGTALK_MARKDOWN_TITLE_LIMIT = 100
+MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+MARKDOWN_DECORATION_PATTERN = re.compile(r"(\*\*|__|\*|_|~~|`)(.+?)\1")
+MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
+LIST_ITEM_PATTERN = re.compile(r"^\s*(?:[-*+]\s+|\d+\.\s+)")
+FLOW_LINE_PATTERN = re.compile(r"[→←↑↓]|->|<-|=>|<=|↔")
 
 
 class NanobotDingTalkHandler(CallbackHandler):
@@ -262,8 +274,286 @@ class DingTalkChannel(BaseChannel):
 
         return rendered
 
+    def _contains_inline_image(self, content: str) -> bool:
+        """Return whether the content contains inline images that require markdown rendering."""
+        return bool(MARKDOWN_IMAGE_PATTERN.search(content.strip()))
+
+    def _display_units(self, text: str) -> int:
+        """Approximate how much vertical space a chunk will take in DingTalk."""
+        units = 0
+        for char in text:
+            if char == "\n":
+                units += 2
+                continue
+            units += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+        return units
+
+    def _normalize_text_for_sample_text(self, content: str) -> str:
+        """Degrade simple markdown to plain text for better DingTalk mobile rendering."""
+        text = content.replace("\r\n", "\n").strip()
+        if not text:
+            return ""
+
+        normalized_blocks: list[str] = []
+        for raw_block in re.split(r"\n\s*\n", text):
+            block = raw_block.strip()
+            if not block:
+                continue
+            table_block = self._convert_markdown_table_block(block)
+            if table_block:
+                normalized_blocks.append(table_block)
+                continue
+
+            cleaned = MARKDOWN_LINK_PATTERN.sub(r"\1 (\2)", block)
+            cleaned = MARKDOWN_DECORATION_PATTERN.sub(r"\2", cleaned)
+            cleaned = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", cleaned)
+            cleaned = re.sub(r"(?m)^\s*>\s?", "", cleaned)
+            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+            normalized_blocks.append(cleaned.strip())
+
+        return "\n\n".join(block for block in normalized_blocks if block).strip()
+
+    @staticmethod
+    def _split_table_row(line: str) -> list[str]:
+        """Split a markdown table row into cells."""
+        stripped = line.strip().strip("|")
+        if not stripped:
+            return []
+        return [cell.strip() for cell in stripped.split("|")]
+
+    def _convert_markdown_table_block(self, block: str) -> str | None:
+        """Convert a markdown table block into a DingTalk-friendly bullet list."""
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if len(lines) < 3 or "|" not in lines[0]:
+            return None
+        if not MARKDOWN_TABLE_SEPARATOR_PATTERN.match(lines[1]):
+            return None
+
+        headers = self._split_table_row(lines[0])
+        if not headers:
+            return None
+
+        bullet_lines: list[str] = []
+        for line in lines[2:]:
+            if "|" not in line:
+                return None
+            row = self._split_table_row(line)
+            if not row:
+                continue
+            cells = row + [""] * max(0, len(headers) - len(row))
+            pairs = [
+                f"{header}: {cells[index]}"
+                for index, header in enumerate(headers)
+                if header and index < len(cells) and cells[index]
+            ]
+            if pairs:
+                bullet_lines.append(f"- {'；'.join(pairs)}")
+
+        return "\n".join(bullet_lines).strip() or None
+
+    def _classify_text_block(self, block: str) -> str:
+        """Classify a block so we can split it without breaking its structure."""
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            return "empty"
+        if all(LIST_ITEM_PATTERN.match(line) for line in lines):
+            return "list"
+        if len(lines) >= 2 and any(FLOW_LINE_PATTERN.search(line) for line in lines):
+            return "flow"
+        return "paragraph"
+
+    def _split_list_block(self, block: str, max_chars: int) -> list[str]:
+        """Split a list block by list item, keeping each item intact when possible."""
+        items = [line.strip() for line in block.splitlines() if line.strip()]
+        chunks: list[str] = []
+        current = ""
+        for item in items:
+            if self._display_units(item) > max_chars:
+                oversized_items = self._split_long_line(item, max_chars)
+            else:
+                oversized_items = [item]
+            for piece in oversized_items:
+                candidate = piece if not current else f"{current}\n{piece}"
+                if self._display_units(candidate) <= max_chars:
+                    current = candidate
+                else:
+                    if current:
+                        chunks.append(current)
+                    current = piece
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _split_flow_block(self, block: str, max_chars: int) -> list[str]:
+        """Split a compact flow/diagram block by lines instead of by sentences."""
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        chunks: list[str] = []
+        current = ""
+        for line in lines:
+            line_chunks = [line] if self._display_units(line) <= max_chars else self._split_long_line(line, max_chars)
+            for piece in line_chunks:
+                candidate = piece if not current else f"{current}\n{piece}"
+                if self._display_units(candidate) <= max_chars:
+                    current = candidate
+                else:
+                    if current:
+                        chunks.append(current)
+                    current = piece
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _split_text_block(self, block: str, max_chars: int) -> list[str]:
+        """Split a normalized block while preserving structure as much as possible."""
+        if self._display_units(block) <= max_chars:
+            return [block]
+
+        block_type = self._classify_text_block(block)
+        if block_type == "list":
+            return self._split_list_block(block, max_chars)
+        if block_type == "flow":
+            return self._split_flow_block(block, max_chars)
+        return self._split_paragraph(block, max_chars)
+
+    def _hard_wrap_text(self, text: str, max_chars: int) -> list[str]:
+        """Fallback splitter for text without natural breakpoints."""
+        chunks: list[str] = []
+        current = ""
+        for char in text:
+            candidate = f"{current}{char}"
+            if current and self._display_units(candidate) > max_chars:
+                chunks.append(current)
+                current = char
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _split_long_line(self, line: str, max_chars: int) -> list[str]:
+        """Split a long line by sentence punctuation before falling back to hard wraps."""
+        text = line.strip()
+        if self._display_units(text) <= max_chars:
+            return [text]
+
+        sentences = [fragment for fragment in re.split(r"(?<=[。！？!?；;])", text) if fragment]
+        if len(sentences) <= 1:
+            return self._hard_wrap_text(text, max_chars)
+
+        chunks: list[str] = []
+        current = ""
+        for sentence in sentences:
+            fragment = sentence.strip()
+            if not fragment:
+                continue
+            candidate = fragment if not current else f"{current}{fragment}"
+            if self._display_units(candidate) <= max_chars:
+                current = candidate
+                continue
+            if current:
+                chunks.append(current)
+            if self._display_units(fragment) <= max_chars:
+                current = fragment
+            else:
+                chunks.extend(self._hard_wrap_text(fragment, max_chars))
+                current = ""
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _split_paragraph(self, paragraph: str, max_chars: int) -> list[str]:
+        """Split a paragraph while preserving line breaks when possible."""
+        text = paragraph.strip()
+        if self._display_units(text) <= max_chars:
+            return [text]
+
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if len(lines) <= 1:
+            return self._split_long_line(text, max_chars)
+
+        chunks: list[str] = []
+        current = ""
+        for line in lines:
+            for piece in self._split_long_line(line, max_chars):
+                candidate = piece if not current else f"{current}\n{piece}"
+                if self._display_units(candidate) <= max_chars:
+                    current = candidate
+                else:
+                    if current:
+                        chunks.append(current)
+                    current = piece
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _split_dingtalk_content(self, content: str, max_chars: int = DINGTALK_TEXT_SOFT_LIMIT) -> list[str]:
+        """Split a DingTalk reply into chunks that stay within the template's safe length."""
+        text = content.replace("\r\n", "\n").strip()
+        if not text:
+            return []
+
+        paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text) if paragraph.strip()]
+        chunks: list[str] = []
+        current = ""
+
+        for paragraph in paragraphs:
+            for piece in self._split_text_block(paragraph, max_chars):
+                candidate = piece if not current else f"{current}\n\n{piece}"
+                if self._display_units(candidate) <= max_chars:
+                    current = candidate
+                else:
+                    if current:
+                        chunks.append(current)
+                    current = piece
+
+        if current:
+            chunks.append(current)
+
+        return chunks or self._hard_wrap_text(text, max_chars)
+
+    def _build_message_payloads(self, content: str) -> list[dict[str, str]]:
+        """Build one or more DingTalk payload fragments for a reply."""
+        use_markdown = self._contains_inline_image(content)
+        normalized_content = content if use_markdown else self._normalize_text_for_sample_text(content)
+        chunks = self._split_dingtalk_content(normalized_content)
+        if not chunks:
+            return []
+
+        total = len(chunks)
+        payloads: list[dict[str, str]] = []
+
+        for index, chunk in enumerate(chunks, start=1):
+            if use_markdown:
+                title = DINGTALK_MARKDOWN_TITLE
+                if total > 1:
+                    title = f"{title} ({index}/{total})"
+                payloads.append(
+                    {
+                        "msgKey": "sampleMarkdown",
+                        "msgParam": json.dumps(
+                            {
+                                "text": chunk,
+                                "title": title[:DINGTALK_MARKDOWN_TITLE_LIMIT],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
+            else:
+                payloads.append(
+                    {
+                        "msgKey": "sampleText",
+                        "msgParam": json.dumps({"content": chunk}, ensure_ascii=False),
+                    }
+                )
+
+        return payloads
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through DingTalk."""
+        if await super().send(msg):
+            return
+
         # Only send normal response messages, skip thinking/tool_call/etc.
         if not msg.is_normal_message:
             return
@@ -274,6 +564,10 @@ class DingTalkChannel(BaseChannel):
 
         try:
             rendered_content = await self._replace_inline_images(msg.content, token)
+            payloads = self._build_message_payloads(rendered_content)
+            if not payloads:
+                logger.warning("DingTalk rendered content is empty, skipping send")
+                return
 
             # oToMessages/batchSend: sends to individual users (private chat)
             # https://open.dingtalk.com/document/orgapp/robot-batch-send-messages
@@ -281,28 +575,28 @@ class DingTalkChannel(BaseChannel):
 
             headers = {"x-acs-dingtalk-access-token": token}
 
-            data = {
-                "robotCode": self.config.client_id,
-                "userIds": [msg.session_key.chat_id],  # chat_id is the user's staffId
-                "msgKey": "sampleMarkdown",
-                "msgParam": json.dumps(
-                    {
-                        "text": rendered_content,
-                        "title": "Nanobot Reply",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-
             if not self._http:
                 logger.warning("DingTalk HTTP client not initialized, cannot send")
                 return
 
-            resp = await self._http.post(url, json=data, headers=headers)
-            if resp.status_code != 200:
-                logger.exception(f"DingTalk send failed: {resp.text}")
+            for index, payload in enumerate(payloads, start=1):
+                data = {
+                    "robotCode": self.config.client_id,
+                    "userIds": [msg.session_key.chat_id],  # chat_id is the user's staffId
+                    **payload,
+                }
+
+                resp = await self._http.post(url, json=data, headers=headers)
+                if resp.status_code != 200:
+                    logger.exception(
+                        f"DingTalk send failed on chunk {index}/{len(payloads)}: {resp.text}"
+                    )
+                    break
+
             else:
-                logger.debug(f"DingTalk message sent to {msg.session_key.chat_id}")
+                logger.debug(
+                    f"DingTalk message sent to {msg.session_key.chat_id} in {len(payloads)} chunk(s)"
+                )
         except Exception as e:
             logger.exception(f"Error sending DingTalk message: {e}")
 

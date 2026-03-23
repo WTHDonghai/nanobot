@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from vikingbot.agent.tools.base import ToolContext
-from vikingbot.agent.tools.ov_file import VikingReadTool, VikingSearchTool
+from vikingbot.agent.tools.ov_file import VikingGrepTool, VikingReadTool, VikingSearchTool
 from vikingbot.config.schema import SessionKey
 
 
@@ -87,6 +87,30 @@ async def test_viking_read_tool_keeps_inline_image_positions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_viking_read_tool_keeps_http_inline_images_without_probing_for_related_dirs() -> None:
+    tool = VikingReadTool()
+    mock_client = AsyncMock()
+    mock_client.stat.return_value = {"isDir": False, "name": "manual.md"}
+    mock_client.read_content.return_value = "步骤一\nINCLUDEPICTURE"
+    mock_client.materialize_inline_image_refs.return_value = (
+        "步骤一\n![login](https://example.com/assets/login.png)"
+    )
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        uri="viking://resources/demo/manual.md",
+        level="read",
+    )
+
+    assert result == "步骤一\n![login](https://example.com/assets/login.png)"
+    mock_client.export_related_images_for_send.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_viking_read_tool_resolves_directory_to_named_text_leaf() -> None:
     tool = VikingReadTool()
     mock_client = AsyncMock()
@@ -152,6 +176,54 @@ async def test_viking_read_tool_requires_explicit_text_leaf_for_ambiguous_direct
 
 
 @pytest.mark.asyncio
+async def test_viking_read_tool_normalizes_summary_uri_for_non_read_levels() -> None:
+    tool = VikingReadTool()
+    mock_client = AsyncMock()
+    mock_client.read_content.return_value = "目录摘要"
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        uri="viking://resources/.abstract.md",
+        level="abstract",
+    )
+
+    assert result == "目录摘要"
+    mock_client.read_content.assert_awaited_once_with(
+        "viking://resources",
+        level="abstract",
+    )
+
+
+@pytest.mark.asyncio
+async def test_viking_read_tool_marks_generic_scope_summary_as_non_evidence() -> None:
+    tool = VikingReadTool()
+    mock_client = AsyncMock()
+    mock_client.read_content.return_value = "Resources scope summary."
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        uri="viking://resources/.abstract.md",
+        level="read",
+    )
+
+    assert "这是作用域级摘要" in result
+    assert "不要直接根据这段摘要回答用户问题" in result
+    assert "Resources scope summary." in result
+    mock_client.read_content.assert_awaited_once_with(
+        "viking://resources/.abstract.md",
+        level="read",
+    )
+
+
+@pytest.mark.asyncio
 async def test_viking_search_tool_prioritizes_documents_over_image_assets() -> None:
     tool = VikingSearchTool()
     mock_client = AsyncMock()
@@ -189,6 +261,106 @@ async def test_viking_search_tool_prioritizes_documents_over_image_assets() -> N
     )
     assert "viking://resources/demo/_images/image14.png" not in result
     assert "only use the returned Markdown image lines" in result
+
+
+@pytest.mark.asyncio
+async def test_viking_search_tool_demotes_generic_scope_summaries() -> None:
+    tool = VikingSearchTool()
+    mock_client = AsyncMock()
+    mock_client.search.return_value = {
+        "total": 2,
+        "query": "XMS 系统基础",
+        "resources": [
+            {
+                "uri": "viking://resources/.abstract.md",
+                "abstract": "Resources scope summary",
+                "score": 0.95,
+            },
+            {
+                "uri": "viking://resources/xms-support/01-base.docx",
+                "abstract": "XMS foundational documentation",
+                "score": 0.72,
+            },
+        ],
+        "memories": [],
+        "skills": [],
+    }
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        query="XMS 系统基础",
+        target_uri="viking://resources/",
+    )
+
+    assert result.index("viking://resources/xms-support/01-base.docx") < result.index(
+        "viking://resources/.abstract.md"
+    )
+
+
+@pytest.mark.asyncio
+async def test_viking_search_tool_warns_when_only_generic_scope_summaries_are_found() -> None:
+    tool = VikingSearchTool()
+    mock_client = AsyncMock()
+    mock_client.search.return_value = {
+        "total": 1,
+        "query": "宾客有哪些状态",
+        "resources": [
+            {
+                "uri": "viking://resources/.abstract.md",
+                "abstract": "Resources scope summary",
+                "score": 0.95,
+            },
+        ],
+        "memories": [],
+        "skills": [],
+    }
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        query="宾客有哪些状态",
+        target_uri="viking://resources/",
+    )
+
+    assert "Generic scope summary only. Not a concrete document." in result
+    assert "only generic scope summaries were found" in result
+    assert "use openviking_glob to locate concrete files" in result
+
+
+@pytest.mark.asyncio
+async def test_viking_grep_tool_reports_actual_match_count_when_backend_count_is_zero() -> None:
+    tool = VikingGrepTool()
+    mock_client = AsyncMock()
+    mock_client.grep.return_value = {
+        "count": 0,
+        "matches": [
+            {
+                "uri": "viking://resources/xms-support/01-base/01-base_1.md",
+                "line": 98,
+                "content": "**2.1宾客状态**",
+            }
+        ],
+    }
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        uri="viking://resources/xms-support/01-base/",
+        pattern="宾客.*状态",
+    )
+
+    assert result.startswith("Found 1 match:")
+    assert "**2.1宾客状态**" in result
 
 
 @pytest.mark.asyncio

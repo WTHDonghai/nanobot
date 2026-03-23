@@ -11,6 +11,7 @@ import re
 import zipfile
 from pathlib import Path
 from typing import List, Optional, Union
+from urllib.parse import unquote, urlparse
 
 from openviking.parse.base import ParseResult
 from openviking.parse.parsers.base_parser import BaseParser
@@ -32,6 +33,11 @@ class WordParser(BaseParser):
 
     EMBEDDED_IMAGES_DIR = "_images"
     IMAGE_PLACEHOLDER_SCHEME = "ov-asset://"
+    WORD_CONTROL_CHAR_RE = re.compile(r"[\x01\x13\x14\x15]")
+    INCLUDEPICTURE_RE = re.compile(
+        r'INCLUDEPICTURE(?:\s+\\d)?\s+"([^"]+)"(?:\s+\\\*\s+MERGEFORMATINET)?',
+        re.IGNORECASE,
+    )
 
     def __init__(self, config: Optional[ParserConfig] = None):
         """Initialize Word parser."""
@@ -155,7 +161,8 @@ class WordParser(BaseParser):
     @staticmethod
     def _format_run_text(run) -> str:
         """Convert a run's text formatting into markdown."""
-        text = run.text or ""
+        text = WordParser.WORD_CONTROL_CHAR_RE.sub("", run.text or "")
+        text = WordParser.INCLUDEPICTURE_RE.sub("", text).strip()
         if not text:
             return ""
         if run.bold:
@@ -220,25 +227,81 @@ class WordParser(BaseParser):
     def _extract_run_image_refs(self, run, image_map: dict[str, str]) -> list[str]:
         """Extract Markdown image placeholders from a run's drawing elements."""
         refs = []
+        seen: set[str] = set()
         blips = run.element.xpath('.//*[local-name()="blip"]')
         for blip in blips:
             rel_id = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
-            if not rel_id:
-                continue
+            ref = self._render_relationship_image_ref(run, rel_id, image_map)
+            if ref and ref not in seen:
+                refs.append(ref)
+                seen.add(ref)
 
-            image_part = run.part.related_parts.get(rel_id)
-            if not image_part:
-                continue
+            link_rel_id = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}link")
+            ref = self._render_relationship_image_ref(run, link_rel_id, image_map)
+            if ref and ref not in seen:
+                refs.append(ref)
+                seen.add(ref)
 
-            partname = str(getattr(image_part, "partname", ""))
-            filename = image_map.get(partname)
-            if not filename:
-                continue
+        image_datas = run.element.xpath('.//*[local-name()="imagedata"]')
+        for image_data in image_datas:
+            rel_id = (
+                image_data.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+                or image_data.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+                or image_data.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}link")
+                or image_data.get("{urn:schemas-microsoft-com:office:office}relid")
+            )
+            ref = self._render_relationship_image_ref(run, rel_id, image_map)
+            if ref and ref not in seen:
+                refs.append(ref)
+                seen.add(ref)
 
-            alt_text = Path(filename).stem or "image"
-            refs.append(f"![{alt_text}]({self.IMAGE_PLACEHOLDER_SCHEME}{filename})")
+        for target in self._extract_includepicture_targets(run.text or ""):
+            if not target.startswith(("http://", "https://")):
+                continue
+            alt_text = self._image_alt_text_from_target(target)
+            ref = f"![{alt_text}]({target})"
+            if ref not in seen:
+                refs.append(ref)
+                seen.add(ref)
 
         return refs
+
+    def _render_relationship_image_ref(self, run, rel_id: Optional[str], image_map: dict[str, str]) -> Optional[str]:
+        """Render one image relationship into a markdown image ref."""
+        if not rel_id:
+            return None
+
+        rel = run.part.rels.get(rel_id)
+        if rel is not None and getattr(rel, "is_external", False):
+            target_ref = getattr(rel, "target_ref", "")
+            if target_ref.startswith(("http://", "https://")):
+                alt_text = self._image_alt_text_from_target(target_ref)
+                return f"![{alt_text}]({target_ref})"
+
+        image_part = run.part.related_parts.get(rel_id)
+        if not image_part:
+            return None
+
+        partname = str(getattr(image_part, "partname", ""))
+        filename = image_map.get(partname)
+        if not filename:
+            return None
+
+        alt_text = Path(filename).stem or "image"
+        return f"![{alt_text}]({self.IMAGE_PLACEHOLDER_SCHEME}{filename})"
+
+    @classmethod
+    def _extract_includepicture_targets(cls, text: str) -> list[str]:
+        """Extract INCLUDEPICTURE targets from raw Word field text."""
+        cleaned = cls.WORD_CONTROL_CHAR_RE.sub("", text or "")
+        return [match.group(1).strip() for match in cls.INCLUDEPICTURE_RE.finditer(cleaned)]
+
+    @staticmethod
+    def _image_alt_text_from_target(target: str) -> str:
+        """Build a stable alt text from an external image target."""
+        parsed = urlparse(target)
+        filename = Path(unquote(parsed.path)).name
+        return Path(filename).stem or "image"
 
     async def _write_embedded_images(
         self, temp_uri: Optional[str], image_entries: list[tuple[str, bytes]]

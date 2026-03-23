@@ -2,13 +2,18 @@
 
 from abc import ABC
 from pathlib import Path
+import re
 from typing import Any, Optional
 
 import httpx
 from loguru import logger
 
 from vikingbot.agent.tools.base import Tool, ToolContext
+from vikingbot.openviking_mount.uri_utils import is_generic_scope_summary_uri, is_summary_uri
 from vikingbot.openviking_mount.ov_server import VikingClient
+
+MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+WORD_IMAGE_ARTIFACT_RE = re.compile(r"ov-asset://|INCLUDEPICTURE", re.IGNORECASE)
 
 
 class OVFileTool(Tool, ABC):
@@ -68,6 +73,18 @@ class VikingReadTool(OVFileTool):
             "required": ["uri"],
         }
 
+    @staticmethod
+    def _normalize_non_read_uri(uri: str, level: str) -> str:
+        """Map summary file URIs back to their parent directory for L0/L1 reads."""
+        normalized_uri = uri.rstrip("/")
+        if level == "abstract" and normalized_uri.endswith("/.abstract.md"):
+            return normalized_uri[: -len("/.abstract.md")]
+        if level == "overview" and normalized_uri.endswith("/.overview.md"):
+            return normalized_uri[: -len("/.overview.md")]
+        if normalized_uri.endswith("/.abstract.md") or normalized_uri.endswith("/.overview.md"):
+            return normalized_uri.rsplit("/", 1)[0]
+        return normalized_uri
+
     async def execute(
         self,
         tool_context: ToolContext,
@@ -80,7 +97,17 @@ class VikingReadTool(OVFileTool):
         try:
             client = await self._get_client(tool_context)
             if level != "read":
-                return await client.read_content(uri, level=level)
+                normalized_uri = self._normalize_non_read_uri(uri, level)
+                return await client.read_content(normalized_uri, level=level)
+
+            if is_generic_scope_summary_uri(uri):
+                content = await client.read_content(uri, level="read")
+                return (
+                    f"这是作用域级摘要，不是具体文档正文：{uri}\n"
+                    "不要直接根据这段摘要回答用户问题。请先用 openviking_glob 查找具体文件，"
+                    "或缩小 target_uri 后重新 search，再对具体文档 URI 调用 openviking_read。\n\n"
+                    f"{content}"
+                )
 
             stat = await client.stat(uri)
             if self._is_image_like_target(uri, stat):
@@ -115,8 +142,12 @@ class VikingReadTool(OVFileTool):
             if not include_images or max_images <= 0 or not content:
                 return content
 
+            raw_content = content
             content = await client.materialize_inline_image_refs(content, read_uri)
-            if "send://" in content:
+            if MARKDOWN_IMAGE_RE.search(content):
+                return content
+
+            if not WORD_IMAGE_ARTIFACT_RE.search(raw_content):
                 return content
 
             image_refs = await client.export_related_images_for_send(read_uri, max_images=max_images)
@@ -268,6 +299,21 @@ class VikingSearchTool(OVFileTool):
             ".tiff",
         }
 
+    @staticmethod
+    def _is_summary_uri(uri: str) -> bool:
+        return is_summary_uri(uri)
+
+    @classmethod
+    def _is_generic_scope_summary_uri(cls, uri: str) -> bool:
+        return is_generic_scope_summary_uri(uri)
+
+    @staticmethod
+    def _resource_score(resource: dict[str, Any]) -> float:
+        try:
+            return float(resource.get("score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     @classmethod
     def _format_search_results(
         cls, query: str, results: dict[str, Any], target_uri: Optional[str] = ""
@@ -279,11 +325,27 @@ class VikingSearchTool(OVFileTool):
             resource
             for _, resource in sorted(
                 enumerate(resources),
-                key=lambda item: (cls._is_image_uri(item[1].get("uri", "")), item[0]),
+                key=lambda item: (
+                    cls._is_image_uri(item[1].get("uri", "")),
+                    cls._is_generic_scope_summary_uri(item[1].get("uri", "")),
+                    cls._is_summary_uri(item[1].get("uri", "")),
+                    -cls._resource_score(item[1]),
+                    item[0],
+                ),
             )
         ]
         document_resources = [
             resource for resource in ordered_resources if not cls._is_image_uri(resource.get("uri", ""))
+        ]
+        concrete_document_resources = [
+            resource
+            for resource in document_resources
+            if not cls._is_generic_scope_summary_uri(resource.get("uri", ""))
+        ]
+        generic_scope_summaries = [
+            resource
+            for resource in document_resources
+            if cls._is_generic_scope_summary_uri(resource.get("uri", ""))
         ]
         image_resources = [
             resource for resource in ordered_resources if cls._is_image_uri(resource.get("uri", ""))
@@ -306,7 +368,11 @@ class VikingSearchTool(OVFileTool):
                 lines.append(f"{idx}. [{resource_type}] {uri}")
                 if match_reason:
                     lines.append(f"   Match reason: {match_reason}")
-                lines.append("   Content preview omitted. Use openviking_read for evidence.")
+                if cls._is_generic_scope_summary_uri(uri):
+                    lines.append("   Generic scope summary only. Not a concrete document.")
+                    lines.append("   Do not answer from this alone; locate a concrete file first.")
+                else:
+                    lines.append("   Content preview omitted. Use openviking_read for evidence.")
 
         if document_resources and image_resources:
             lines.append("")
@@ -339,7 +405,7 @@ class VikingSearchTool(OVFileTool):
                 if abstract:
                     lines.append(f"   Abstract: {abstract}")
 
-        if document_resources:
+        if concrete_document_resources:
             lines.append("")
             lines.append(
                 "Important: search results are retrieval metadata only. Before answering, call "
@@ -354,6 +420,19 @@ class VikingSearchTool(OVFileTool):
                 lines.append(
                     "Never place raw viking:// image URIs directly inside Markdown image syntax."
                 )
+        elif generic_scope_summaries:
+            lines.append("")
+            lines.append(
+                "Important: only generic scope summaries were found. They are not concrete "
+                "document evidence and should not be used directly for answering."
+            )
+            lines.append(
+                "Next step: use openviking_glob to locate concrete files under the target URI, "
+                "or narrow target_uri and search again."
+            )
+            lines.append(
+                "After finding a concrete document URI, call openviking_read on that URI."
+            )
         elif image_resources:
             lines.append("")
             lines.append(
@@ -479,7 +558,8 @@ class VikingGrepTool(OVFileTool):
             if not matches:
                 return f"No matches found for pattern: {pattern}"
 
-            result_lines = [f"Found {count} match{'es' if count != 1 else ''}:"]
+            display_count = len(matches)
+            result_lines = [f"Found {display_count} match{'es' if display_count != 1 else ''}:"]
             for match in matches:
                 if isinstance(match, dict):
                     match_uri = match.get("uri", "unknown")

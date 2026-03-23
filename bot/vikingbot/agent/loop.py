@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import json
 import re
 import time
@@ -28,6 +29,7 @@ from vikingbot.config.schema import BotMode, CapabilityProfile, Config, SessionK
 from vikingbot.hooks import HookContext
 from vikingbot.hooks.manager import hook_manager
 from vikingbot.providers.base import LLMProvider
+from vikingbot.openviking_mount.uri_utils import is_generic_scope_summary_uri, is_summary_uri
 from vikingbot.sandbox import SandboxManager
 from vikingbot.session.manager import SessionManager
 from vikingbot.utils.helpers import cal_str_tokens
@@ -36,6 +38,29 @@ from vikingbot.utils.tracing import trace
 if TYPE_CHECKING:
     from vikingbot.config.schema import ExecToolConfig
     from vikingbot.cron.service import CronService
+
+MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+
+
+@dataclass
+class KBSearchProgress:
+    searched_queries: list[str]
+    globbed_file_uris: list[str]
+    generic_summary_reads: list[str]
+    concrete_read_uris: list[str]
+    relevant_evidence_blocks: list[str]
+
+    @property
+    def has_concrete_read(self) -> bool:
+        return bool(self.concrete_read_uris)
+
+    @property
+    def has_relevant_evidence(self) -> bool:
+        return bool(self.relevant_evidence_blocks)
+
+    @property
+    def answer_ready(self) -> bool:
+        return self.has_concrete_read and self.has_relevant_evidence
 
 
 class AgentLoop:
@@ -192,19 +217,500 @@ class AgentLoop:
         """Whether the agent is restricted to knowledge-base QA mode."""
         return self.config.agents.capability_profile == CapabilityProfile.KNOWLEDGE_BASE
 
-    @staticmethod
-    def _has_document_evidence(tools_used: list[dict]) -> bool:
+    @classmethod
+    def _has_document_evidence(cls, tools_used: list[dict]) -> bool:
         """Whether tool results contain document-backed evidence for answering."""
         evidence_tools = {"openviking_read", "openviking_grep"}
         for tool_used in tools_used:
-            if tool_used.get("tool_name") not in evidence_tools:
+            tool_name = tool_used.get("tool_name")
+            if tool_name not in evidence_tools:
                 continue
             if not tool_used.get("execute_success"):
                 continue
             result = tool_used.get("result")
-            if isinstance(result, str) and result.strip():
-                return True
+            if not isinstance(result, str) or not result.strip():
+                continue
+
+            if tool_name == "openviking_read":
+                args = cls._parse_tool_args(tool_used)
+                uri = str(args.get("uri") or args.get("target_uri") or "")
+                if is_generic_scope_summary_uri(uri):
+                    continue
+
+            return True
         return False
+
+    @staticmethod
+    def _normalize_kb_prefetch_query(user_request: str | None) -> str:
+        """Prepare the original user question for deterministic KB prefetch."""
+        if not isinstance(user_request, str):
+            return ""
+
+        normalized = user_request.strip()
+        normalized = re.sub(r"^[\s，,。.!！？?：:;；]+|[\s，,。.!！？?：:;；]+$", "", normalized)
+        return normalized or user_request.strip()
+
+    @staticmethod
+    def _extract_search_result_uris(search_result: str) -> list[str]:
+        """Extract candidate document URIs from formatted openviking_search output."""
+        if not isinstance(search_result, str):
+            return []
+
+        preferred: list[str] = []
+        summary_candidates: list[str] = []
+        seen: set[str] = set()
+        pattern = re.compile(r"(?m)^\d+\.\s+\[(?P<resource_type>[^\]]+)\]\s+(?P<uri>\S+)\s*$")
+        for match in pattern.finditer(search_result):
+            resource_type = match.group("resource_type").strip().lower()
+            uri = match.group("uri").strip()
+            if not uri or uri in seen or resource_type == "image asset":
+                continue
+            seen.add(uri)
+            if is_generic_scope_summary_uri(uri):
+                continue
+            if is_summary_uri(uri):
+                summary_candidates.append(uri)
+            else:
+                preferred.append(uri)
+
+        return preferred + summary_candidates
+
+    @staticmethod
+    def _extract_glob_result_uris(glob_result: str) -> list[str]:
+        """Extract concrete file URIs from formatted openviking_glob output."""
+        if not isinstance(glob_result, str):
+            return []
+        uris: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"(?m)^📄\s+(?P<uri>\S+)\s*$", glob_result):
+            uri = match.group("uri").strip()
+            if not uri or uri in seen:
+                continue
+            seen.add(uri)
+            uris.append(uri)
+        return uris
+
+    async def _execute_prefetched_tool(
+        self,
+        tool_name: str,
+        tool_args: dict[str, object],
+        session_key: SessionKey,
+        sender_id: str | None,
+        publish_events: bool,
+    ) -> dict:
+        """Execute a deterministic KB prefetch tool call and record it like normal tool usage."""
+        started_at = time.time()
+        result = await self.tools.execute(
+            tool_name,
+            tool_args,
+            session_key=session_key,
+            sandbox_manager=self.sandbox_manager,
+            sender_id=sender_id,
+        )
+        duration = (time.time() - started_at) * 1000
+        args_str = json.dumps(tool_args, ensure_ascii=False)
+        logger.info(f"[KB_PREFETCH_TOOL]: {tool_name}({args_str[:200]})")
+        logger.info(f"[KB_PREFETCH_RESULT]: {str(result)[:600]}")
+
+        if publish_events:
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    session_key=session_key,
+                    content=f"{tool_name}({args_str})",
+                    event_type=OutboundEventType.TOOL_CALL,
+                )
+            )
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    session_key=session_key,
+                    content=str(result),
+                    event_type=OutboundEventType.TOOL_RESULT,
+                )
+            )
+
+        return {
+            "tool_name": tool_name,
+            "args": args_str,
+            "result": result,
+            "duration": duration,
+            "execute_success": True if result and "Error executing" not in result else False,
+            "input_token": cal_str_tokens(args_str, text_type="mixed"),
+            "output_token": cal_str_tokens(result, text_type="mixed"),
+        }
+
+    async def _prefetch_knowledge_base_evidence(
+        self,
+        messages: list[dict],
+        session_key: SessionKey,
+        sender_id: str | None,
+        user_request: str | None,
+        publish_events: bool,
+    ) -> tuple[list[dict], list[dict]]:
+        """Run deterministic retrieval before the first KB model turn."""
+        if not self._is_knowledge_base_mode():
+            return messages, []
+
+        query = self._normalize_kb_prefetch_query(user_request)
+        if not query:
+            return messages, []
+
+        prefetched_tools: list[dict] = []
+        search_tool = await self._execute_prefetched_tool(
+            tool_name="openviking_search",
+            tool_args={"query": query, "target_uri": "viking://resources/"},
+            session_key=session_key,
+            sender_id=sender_id,
+            publish_events=publish_events,
+        )
+        prefetched_tools.append(search_tool)
+
+        candidate_uris = self._extract_search_result_uris(str(search_tool["result"]))
+        for uri in candidate_uris[:3]:
+            read_tool = await self._execute_prefetched_tool(
+                tool_name="openviking_read",
+                tool_args={"uri": uri, "level": "read"},
+                session_key=session_key,
+                sender_id=sender_id,
+                publish_events=publish_events,
+            )
+            prefetched_tools.append(read_tool)
+
+        tool_call_dicts = [
+            {
+                "id": f"kb_prefetch_call_{index}",
+                "type": "function",
+                "function": {
+                    "name": tool_used["tool_name"],
+                    "arguments": tool_used["args"],
+                },
+            }
+            for index, tool_used in enumerate(prefetched_tools, start=1)
+        ]
+        messages = self.context.add_assistant_message(
+            messages,
+            content=None,
+            tool_calls=tool_call_dicts,
+        )
+        for tool_call, tool_used in zip(tool_call_dicts, prefetched_tools):
+            messages = self.context.add_tool_result(
+                messages,
+                tool_call["id"],
+                tool_used["tool_name"],
+                str(tool_used["result"]),
+            )
+
+        return messages, prefetched_tools
+
+    @staticmethod
+    def _parse_tool_args(tool_used: dict) -> dict:
+        """Parse serialized tool args from the session trace."""
+        raw_args = tool_used.get("args")
+        if isinstance(raw_args, dict):
+            return raw_args
+        if isinstance(raw_args, str):
+            try:
+                parsed = json.loads(raw_args)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
+    def _split_numbered_sections(content: str) -> list[dict[str, str | int]]:
+        """Split plain text by numbered section headings like 2.1宾客状态."""
+        heading_re = re.compile(r"(?m)^(?P<title>\d+(?:\.\d+)+\s*[^\n]{1,80})\s*$")
+        matches = list(heading_re.finditer(content))
+        if not matches:
+            return []
+
+        sections: list[dict[str, str | int]] = []
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+            section_text = content[match.start() : end].strip()
+            if not section_text:
+                continue
+            sections.append(
+                {
+                    "title": match.group("title").strip(),
+                    "level": 1,
+                    "content": section_text,
+                }
+            )
+        return sections
+
+    @classmethod
+    def _split_evidence_sections(cls, content: str) -> list[dict[str, str | int]]:
+        """Split evidence content into semantic sections when possible."""
+        markdown_sections = cls._split_markdown_sections(content)
+        if markdown_sections:
+            return markdown_sections
+        return cls._split_numbered_sections(content)
+
+    @classmethod
+    def _score_tool_evidence(cls, user_request: str | None, tool_used: dict) -> tuple[int, str]:
+        """Score one tool result as documentation evidence."""
+        result = tool_used.get("result")
+        if not isinstance(result, str) or not result.strip():
+            return 0, ""
+
+        args = cls._parse_tool_args(tool_used)
+        uri = str(args.get("uri") or args.get("target_uri") or "")
+        sections = cls._split_evidence_sections(result)
+        if sections:
+            scored_sections = [
+                (
+                    cls._score_evidence_block(
+                        user_request,
+                        str(section["title"]),
+                        str(section["content"]),
+                        uri,
+                    ),
+                    cls._truncate_evidence_block(str(section["content"])),
+                )
+                for section in sections
+            ]
+            return max(scored_sections, key=lambda item: item[0], default=(0, ""))
+
+        excerpt = cls._truncate_evidence_block(result)
+        return cls._score_evidence_block(user_request, "", excerpt, uri), excerpt
+
+    @classmethod
+    def _analyze_kb_search_progress(
+        cls, user_request: str | None, tools_used: list[dict]
+    ) -> KBSearchProgress:
+        """Summarize current KB search progress for continue/stop decisions."""
+        searched_queries: list[str] = []
+        globbed_file_uris: list[str] = []
+        generic_summary_reads: list[str] = []
+        concrete_read_uris: list[str] = []
+
+        for tool_used in tools_used:
+            if not tool_used.get("execute_success"):
+                continue
+
+            tool_name = tool_used.get("tool_name")
+            args = cls._parse_tool_args(tool_used)
+            result = tool_used.get("result")
+
+            if tool_name == "openviking_search":
+                query = str(args.get("query") or "").strip()
+                if query and query not in searched_queries:
+                    searched_queries.append(query)
+            elif tool_name == "openviking_glob":
+                for uri in cls._extract_glob_result_uris(str(result)):
+                    if uri not in globbed_file_uris:
+                        globbed_file_uris.append(uri)
+            elif tool_name == "openviking_read":
+                uri = str(args.get("uri") or "").strip()
+                if not uri:
+                    continue
+                if is_generic_scope_summary_uri(uri):
+                    if uri not in generic_summary_reads:
+                        generic_summary_reads.append(uri)
+                else:
+                    if uri not in concrete_read_uris:
+                        concrete_read_uris.append(uri)
+
+        relevant_evidence_blocks = cls._collect_document_evidence_blocks(user_request, tools_used, limit=2)
+        if relevant_evidence_blocks:
+            concrete_relevant_found = False
+            for tool_used in tools_used:
+                if tool_used.get("tool_name") != "openviking_read" or not tool_used.get("execute_success"):
+                    continue
+                args = cls._parse_tool_args(tool_used)
+                uri = str(args.get("uri") or "").strip()
+                if not uri or is_generic_scope_summary_uri(uri):
+                    continue
+                score, _excerpt = cls._score_tool_evidence(user_request, tool_used)
+                if score > 0:
+                    concrete_relevant_found = True
+                    break
+            if not concrete_relevant_found:
+                relevant_evidence_blocks = []
+
+        return KBSearchProgress(
+            searched_queries=searched_queries,
+            globbed_file_uris=globbed_file_uris,
+            generic_summary_reads=generic_summary_reads,
+            concrete_read_uris=concrete_read_uris,
+            relevant_evidence_blocks=relevant_evidence_blocks,
+        )
+
+    @staticmethod
+    def _format_kb_search_progress(progress: KBSearchProgress) -> str:
+        """Render KB search progress into a concise prompt summary."""
+        lines: list[str] = []
+        if progress.searched_queries:
+            lines.append("Queries tried:")
+            lines.extend(f"- {query}" for query in progress.searched_queries[:5])
+        if progress.generic_summary_reads:
+            lines.append("Generic scope summaries already read (non-evidence):")
+            lines.extend(f"- {uri}" for uri in progress.generic_summary_reads[:3])
+        if progress.globbed_file_uris:
+            lines.append("Concrete files already discovered:")
+            lines.extend(f"- {uri}" for uri in progress.globbed_file_uris[:5])
+        if progress.concrete_read_uris:
+            lines.append("Concrete documents already read:")
+            lines.extend(f"- {uri}" for uri in progress.concrete_read_uris[:5])
+        if progress.relevant_evidence_blocks:
+            lines.append("Relevant evidence already found:")
+            for block in progress.relevant_evidence_blocks[:1]:
+                preview = block.strip().splitlines()[0][:120]
+                lines.append(f"- {preview}")
+
+        if not progress.has_concrete_read and progress.globbed_file_uris:
+            lines.append("Next step: read one or more concrete files from the discovered file list.")
+        elif not progress.has_concrete_read:
+            lines.append("Next step: find concrete files first; do not stop at scope summaries.")
+        elif not progress.has_relevant_evidence:
+            lines.append("Next step: continue narrowing to the directly relevant section before answering.")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _truncate_evidence_block(block: str, limit: int = 1800) -> str:
+        """Trim large evidence blocks while keeping a natural boundary when possible."""
+        normalized = block.strip()
+        if len(normalized) <= limit:
+            return normalized
+
+        truncated = normalized[:limit]
+        cut_points = [
+            truncated.rfind("\n\n"),
+            truncated.rfind("\n"),
+            truncated.rfind("。"),
+            truncated.rfind("；"),
+        ]
+        cut_at = max(cut_points)
+        if cut_at >= int(limit * 0.6):
+            truncated = truncated[: cut_at + 1]
+
+        return f"{truncated.strip()}\n\n[文档节选]"
+
+    @classmethod
+    def _score_evidence_block(cls, user_request: str | None, title: str, content: str, uri: str) -> int:
+        """Score a candidate evidence block against the user request."""
+        query_terms = cls._extract_query_terms(user_request or "")
+        title_lower = title.lower()
+        content_lower = content.lower()
+        uri_lower = uri.lower()
+
+        title_hits = sum(1 for term in query_terms if term in title_lower)
+        content_hits = sum(1 for term in query_terms if term in content_lower)
+        uri_hits = sum(1 for term in query_terms if term in uri_lower)
+
+        score = title_hits * 6 + content_hits * 2 + uri_hits
+        if uri_lower.endswith("/.abstract.md"):
+            score -= 6
+        elif uri_lower.endswith("/.overview.md"):
+            score -= 3
+        if score > 0 and cls._contains_markdown_image(content):
+            score += 2
+        return score
+
+    @classmethod
+    def _collect_document_evidence_blocks(
+        cls, user_request: str | None, tools_used: list[dict], limit: int = 3
+    ) -> list[str]:
+        """Collect the most relevant documentation evidence blocks for final answer generation."""
+        candidates: list[tuple[int, str]] = []
+
+        for tool_used in tools_used:
+            if tool_used.get("tool_name") not in {"openviking_read", "openviking_grep"}:
+                continue
+            if not tool_used.get("execute_success"):
+                continue
+
+            result = tool_used.get("result")
+            if not isinstance(result, str) or not result.strip():
+                continue
+
+            args = cls._parse_tool_args(tool_used)
+            uri = str(args.get("uri") or args.get("target_uri") or "")
+            if tool_used.get("tool_name") == "openviking_read" and is_generic_scope_summary_uri(uri):
+                continue
+
+            sections = cls._split_evidence_sections(result)
+            if sections:
+                scored_sections = sorted(
+                    sections,
+                    key=lambda section: cls._score_evidence_block(
+                        user_request,
+                        str(section["title"]),
+                        str(section["content"]),
+                        uri,
+                    ),
+                    reverse=True,
+                )
+                best_section = scored_sections[0]
+                excerpt = cls._truncate_evidence_block(str(best_section["content"]))
+                score = cls._score_evidence_block(
+                    user_request,
+                    str(best_section["title"]),
+                    excerpt,
+                    uri,
+                )
+            else:
+                excerpt = cls._truncate_evidence_block(result)
+                score = cls._score_evidence_block(user_request, "", excerpt, uri)
+
+            if excerpt:
+                candidates.append((score, excerpt))
+
+        ranked_blocks: list[str] = []
+        seen: set[str] = set()
+        for _score, block in sorted(candidates, key=lambda item: item[0], reverse=True):
+            normalized = cls._prepare_text_block_for_rewrite(block)
+            if not normalized or normalized in seen:
+                continue
+            ranked_blocks.append(normalized)
+            seen.add(normalized)
+            if len(ranked_blocks) >= limit:
+                break
+
+        return ranked_blocks
+
+    async def _build_document_grounded_text_reply(
+        self,
+        user_request: str | None,
+        tools_used: list[dict],
+        session_id: str | None = None,
+    ) -> tuple[str | None, dict[str, int]]:
+        """Generate the final user-facing KB reply from documentation evidence only."""
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        evidence_blocks = self._collect_document_evidence_blocks(user_request, tools_used)
+        if not user_request or not evidence_blocks:
+            return None, usage
+
+        evidence_text = "\n\n".join(
+            f"证据 {index}:\n{block}" for index, block in enumerate(evidence_blocks, start=1)
+        )
+        response = await self.provider.chat(
+            messages=[
+                {"role": "system", "content": self.context.build_kb_final_response_system_prompt()},
+                {
+                    "role": "user",
+                    "content": (
+                        f"用户问题：{user_request}\n\n"
+                        f"文档证据：\n{evidence_text}\n\n"
+                        "请基于这些证据直接写最终用户答复。"
+                    ),
+                },
+            ],
+            tools=None,
+            model=self.model,
+            max_tokens=900,
+            temperature=0,
+            session_id=f"{session_id}::kb-final" if session_id else None,
+        )
+
+        if response.usage:
+            usage.update(response.usage)
+
+        final_reply = (response.content or "").strip()
+        if not final_reply:
+            raise ValueError("KB final responder returned empty content.")
+        return final_reply, usage
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -262,33 +768,88 @@ class AgentLoop:
     @staticmethod
     def _split_markdown_sections(content: str) -> list[dict[str, str | int]]:
         """Split markdown into heading-based sections."""
-        heading_re = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
-        matches = list(heading_re.finditer(content))
+        hash_heading_re = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+        bold_heading_re = re.compile(r"(?m)^\*\*(?P<title>[^*\n][^*\n]{0,78}?)\*\*\s*$")
+
+        matches: list[dict[str, str | int]] = []
+        for match in hash_heading_re.finditer(content):
+            matches.append(
+                {
+                    "start": match.start(),
+                    "level": len(match.group(1)),
+                    "title": match.group(2).strip(),
+                }
+            )
+
+        for match in bold_heading_re.finditer(content):
+            title = match.group("title").strip()
+            if not title:
+                continue
+            matches.append(
+                {
+                    "start": match.start(),
+                    "level": 1,
+                    "title": title,
+                }
+            )
+
+        matches.sort(key=lambda item: int(item["start"]))
+        deduped_matches: list[dict[str, str | int]] = []
+        seen_starts: set[int] = set()
+        for match in matches:
+            start = int(match["start"])
+            if start in seen_starts:
+                continue
+            seen_starts.add(start)
+            deduped_matches.append(match)
+        matches = deduped_matches
+
         if not matches:
             return []
 
         sections: list[dict[str, str | int]] = []
         for index, match in enumerate(matches):
-            level = len(match.group(1))
+            level = int(match["level"])
             end = len(content)
             for next_match in matches[index + 1 :]:
-                if len(next_match.group(1)) <= level:
-                    end = next_match.start()
+                if int(next_match["level"]) <= level:
+                    end = int(next_match["start"])
                     break
 
-            section_text = content[match.start() : end].strip()
+            section_text = content[int(match["start"]) : end].strip()
             if not section_text:
                 continue
 
             sections.append(
                 {
-                    "title": match.group(2).strip(),
+                    "title": str(match["title"]).strip(),
                     "level": level,
                     "content": section_text,
                 }
             )
 
         return sections
+
+    @classmethod
+    def _format_selected_evidence_section(cls, section: dict[str, str | int]) -> str:
+        """Normalize a selected evidence section into markdown-like form for rendering."""
+        content = str(section.get("content", "")).strip()
+        title = str(section.get("title", "")).strip()
+        if not content:
+            return ""
+        if content.startswith("#") or not title:
+            return content
+
+        lines = content.splitlines()
+        first_line = lines[0].strip() if lines else ""
+        normalized_first_line = re.sub(r"^\*\*(.+)\*\*$", r"\1", first_line)
+        if normalized_first_line != title:
+            return content
+
+        body = "\n".join(lines[1:]).strip()
+        if not body:
+            return f"# {title}"
+        return f"# {title}\n\n{body}"
 
     @classmethod
     def _score_markdown_section(cls, section: dict[str, str | int], query_terms: list[str]) -> int:
@@ -298,78 +859,165 @@ class AgentLoop:
 
         title_hits = sum(1 for term in query_terms if term in title)
         content_hits = sum(1 for term in query_terms if term in content)
-        image_bonus = 2 if "send://" in content else 0
+        image_bonus = 2 if (title_hits or content_hits) and cls._contains_markdown_image(content) else 0
 
         return title_hits * 6 + content_hits * 2 + image_bonus
 
     @classmethod
     def _select_relevant_markdown_section(cls, user_request: str, content: str) -> str | None:
         """Select the most relevant heading-based section from a markdown document."""
-        query_terms = cls._extract_query_terms(user_request)
-        if not query_terms:
+        selected_sections = cls._select_relevant_markdown_sections(user_request, content)
+        if len(selected_sections) != 1:
             return None
+        return selected_sections[0]
 
-        sections = cls._split_markdown_sections(content)
+    @staticmethod
+    def _extract_draft_heading_hints(draft_reply: str | None) -> list[str]:
+        """Extract section-heading hints from the agent draft reply."""
+        if not isinstance(draft_reply, str) or not draft_reply.strip():
+            return []
+        return [
+            line.strip()
+            for line in re.findall(r"(?m)^#{1,6}\s+(.+)$", draft_reply)
+            if line.strip()
+        ]
+
+    @classmethod
+    def _score_section_against_heading_hint(cls, section_title: str, heading_hint: str) -> int:
+        """Score how well a section title matches a heading hinted in the draft reply."""
+        normalized_title = cls._normalize_section_title(section_title).lower()
+        normalized_hint = cls._normalize_section_title(heading_hint).lower()
+        if not normalized_title or not normalized_hint:
+            return 0
+        if normalized_title == normalized_hint:
+            return 12
+        if normalized_title in normalized_hint or normalized_hint in normalized_title:
+            return 8
+
+        title_terms = cls._extract_query_terms(normalized_title)
+        hint_terms = cls._extract_query_terms(normalized_hint)
+        overlap = len(set(title_terms) & set(hint_terms))
+        return overlap * 3
+
+    @classmethod
+    def _select_relevant_markdown_sections(
+        cls, user_request: str, content: str, draft_reply: str | None = None
+    ) -> list[str]:
+        """Select one or more relevant image-backed sections from parsed evidence content."""
+        query_terms = cls._extract_query_terms(user_request)
+        heading_hints = cls._extract_draft_heading_hints(draft_reply)
+        if not query_terms and not heading_hints:
+            return []
+
+        sections = cls._split_evidence_sections(content)
         if not sections:
-            return None
+            return []
+
+        eligible_sections = [
+            section
+            for section in sections
+            if cls._contains_markdown_image(str(section.get("content", "")).strip())
+        ]
+        if not eligible_sections:
+            return []
+
+        selected: list[str] = []
+        seen: set[str] = set()
+
+        if heading_hints:
+            for heading_hint in heading_hints:
+                best_section: dict[str, str | int] | None = None
+                best_score = 0
+                for section in eligible_sections:
+                    section_content = str(section["content"]).strip()
+                    if section_content in seen:
+                        continue
+                    score = cls._score_section_against_heading_hint(str(section["title"]), heading_hint)
+                    if query_terms:
+                        score += cls._score_markdown_section(section, query_terms)
+                    if score > best_score:
+                        best_section = section
+                        best_score = score
+                if best_section and best_score > 0:
+                    section_content = cls._format_selected_evidence_section(best_section)
+                    selected.append(section_content)
+                    seen.add(section_content)
+
+        if selected:
+            return selected
+
+        best_overall_score = 0
+        for section in sections:
+            best_overall_score = max(best_overall_score, cls._score_markdown_section(section, query_terms))
 
         best_section: dict[str, str | int] | None = None
         best_score = 0
-        for section in sections:
+        for section in eligible_sections:
             score = cls._score_markdown_section(section, query_terms)
             if score > best_score:
                 best_section = section
                 best_score = score
 
         if not best_section or best_score <= 0:
-            return None
+            return []
 
-        selected = str(best_section["content"]).strip()
-        if "send://" not in selected:
-            return None
-        return selected
+        # Only keep image-grounded sections when they are close to the best textual match.
+        if best_overall_score > 0 and best_score * 2 < best_overall_score:
+            return []
+
+        selected = cls._format_selected_evidence_section(best_section)
+        if not cls._contains_markdown_image(selected):
+            return []
+        return [selected]
 
     @classmethod
     def _select_relevant_openviking_section(
         cls, user_request: str | None, tools_used: list[dict]
     ) -> str | None:
         """Select one unambiguous image-backed OpenViking section for final formatting."""
-        if not user_request:
+        selected_sections = cls._select_relevant_openviking_sections(user_request, tools_used)
+        if len(selected_sections) != 1:
             return None
+        return selected_sections[0]
+
+    @classmethod
+    def _select_relevant_openviking_sections(
+        cls, user_request: str | None, tools_used: list[dict], draft_reply: str | None = None
+    ) -> list[str]:
+        """Select one or more image-backed OpenViking sections for final formatting."""
+        if not user_request:
+            return []
 
         query_terms = cls._extract_query_terms(user_request)
-        if not query_terms:
-            return None
+        heading_hints = cls._extract_draft_heading_hints(draft_reply)
+        if not query_terms and not heading_hints:
+            return []
 
-        section_scores: dict[str, int] = {}
+        candidate_groups: list[list[str]] = []
         for tool_used in tools_used:
             if tool_used.get("tool_name") != "openviking_read":
                 continue
 
             result = tool_used.get("result")
-            if not isinstance(result, str) or "send://" not in result:
+            if not isinstance(result, str) or not cls._contains_markdown_image(result):
                 continue
 
-            selected = cls._select_relevant_markdown_section(user_request, result)
+            selected = cls._select_relevant_markdown_sections(user_request, result, draft_reply=draft_reply)
             if not selected:
                 continue
+            candidate_groups.append(selected)
 
-            score = sum(1 for term in query_terms if term in selected.lower())
-            section_scores[selected] = max(section_scores.get(selected, 0), score)
-
-        if len(section_scores) != 1:
-            return None
-
-        selected, score = next(iter(section_scores.items()))
-        if score <= 0:
-            return None
-        return selected
+        if len(candidate_groups) != 1:
+            return []
+        return candidate_groups[0]
 
     @staticmethod
     def _normalize_section_title(section: str) -> str:
         """Normalize a markdown heading into a user-facing title."""
         title = re.sub(r"^#{1,6}\s+", "", section.strip(), flags=re.MULTILINE)
+        title = re.sub(r"^\*\*(.+)\*\*$", r"\1", title)
         title = title.splitlines()[0].strip() if title else ""
+        title = re.sub(r"^\d+(?:\.\d+)+\s*", "", title)
         title = re.sub(r"^[一二三四五六七八九十0-9]+[、.\s]+", "", title)
         return title.strip()
 
@@ -384,9 +1032,14 @@ class AgentLoop:
         return normalized.strip()
 
     @staticmethod
-    def _is_send_image_line(line: str) -> bool:
-        """Return whether a line is a standalone sendable image markdown line."""
-        return bool(re.match(r"^!\[[^\]]*\]\((send://[^)\s]+)\)\s*$", line.strip()))
+    def _contains_markdown_image(text: str) -> bool:
+        """Return whether a text block contains markdown image syntax."""
+        return bool(MARKDOWN_IMAGE_RE.search(text))
+
+    @staticmethod
+    def _is_markdown_image_line(line: str) -> bool:
+        """Return whether a line is a standalone markdown image line."""
+        return bool(re.match(r"^!\[[^\]]*\]\([^)]+\)\s*$", line.strip()))
 
     @classmethod
     def _is_step_start(cls, line: str) -> bool:
@@ -436,7 +1089,7 @@ class AgentLoop:
                     target_segments[-1]["content"] += "\n"
                 continue
 
-            if cls._is_send_image_line(stripped):
+            if cls._is_markdown_image_line(stripped):
                 target_segments = intro_segments if current_step is None else current_step["segments"]
                 cls._append_image_segment(target_segments, stripped)
                 continue
@@ -483,9 +1136,11 @@ class AgentLoop:
                 candidate = paragraph.strip()
                 if not candidate:
                     continue
-                if candidate.startswith("#") or candidate.startswith("![") or "send://" in candidate:
+                if candidate.startswith("#") or cls._contains_markdown_image(candidate):
                     continue
                 if re.match(r"^(\d+\.\s+|[-*]\s+)", candidate):
+                    continue
+                if re.fullmatch(r"(总结如下|如下|说明如下|答复如下)\s*[：:]?", candidate):
                     continue
                 if AgentLoop._contains_internal_reply_language(candidate):
                     continue
@@ -511,7 +1166,51 @@ class AgentLoop:
             "检索结果",
             "生成交付物",
         ]
-        return any(marker in normalized for marker in internal_markers)
+        if any(marker in normalized for marker in internal_markers):
+            return True
+
+        internal_patterns = [
+            r"已从\s+.+\.(?:md|markdown|docx?|pdf|txt)\s+中?获取",
+            r"(?:在|从)\s+[`\"']?[^`\"'\s]+\.(?:md|markdown|docx?|pdf|txt)[`\"']?\s+中(?:找到|检索到|读取到|定位到)",
+            r"我已确认",
+            r"可以直接用于回答",
+            r"现在可给出最终答案",
+            r"接下来(?:给出|提供)最终答案",
+            r"现在我可以基于.+给用户",
+            r"文档原文",
+            r"根据.+文档",
+            r"根据.+资料",
+            r"已获取到.+完整",
+            r"信息明确[，,、 ]+权威",
+            r"以下(?:内容|结论).+来自",
+        ]
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in internal_patterns)
+
+    @classmethod
+    def _render_grounded_section(cls, section: str) -> list[str]:
+        """Render one grounded section into readable reply parts."""
+        title_line, intro_segments, steps = cls._extract_structured_section(section)
+        section_title = cls._normalize_section_title(title_line) if title_line else ""
+        rendered_intro = cls._render_segments(intro_segments)
+        rendered_steps = [
+            cls._render_segments(step["segments"])
+            for step in steps
+            if isinstance(step.get("segments"), list)
+        ]
+        rendered_steps = [step for step in rendered_steps if step]
+
+        parts: list[str] = []
+        if section_title:
+            parts.append(f"## {section_title}")
+        if rendered_intro:
+            parts.append(rendered_intro)
+        if rendered_steps:
+            parts.extend(rendered_steps)
+        elif not rendered_intro:
+            rendered_body = cls._prepare_text_block_for_rewrite(section)
+            if rendered_body:
+                parts.append(rendered_body)
+        return parts
 
     async def _build_rewritten_openviking_reply(
         self,
@@ -524,41 +1223,19 @@ class AgentLoop:
         if not user_request:
             return None, usage
 
-        best_section = self._select_relevant_openviking_section(user_request, tools_used)
-        if not best_section:
+        best_sections = self._select_relevant_openviking_sections(
+            user_request, tools_used, draft_reply=draft_reply
+        )
+        if not best_sections:
             return None, usage
-
-        title_line, intro_segments, steps = self._extract_structured_section(best_section)
-        section_title = self._normalize_section_title(title_line) if title_line else ""
-        rendered_intro = self._render_segments(intro_segments)
-        rendered_steps = [
-            self._render_segments(step["segments"])
-            for step in steps
-            if isinstance(step.get("segments"), list)
-        ]
-        rendered_steps = [step for step in rendered_steps if step]
 
         parts: list[str] = []
         intro = self._extract_grounded_intro(draft_reply)
         if intro:
             parts.append(intro)
-        elif section_title:
-            parts.append(f"## {section_title}")
 
-        if section_title and intro:
-            parts.append(f"## {section_title}")
-
-        if rendered_intro:
-            parts.append(rendered_intro)
-
-        if rendered_steps:
-            parts.extend(rendered_steps)
-        elif rendered_intro:
-            pass
-        else:
-            rendered_body = self._prepare_text_block_for_rewrite(best_section)
-            if rendered_body:
-                parts.append(rendered_body)
+        for section in best_sections:
+            parts.extend(self._render_grounded_section(section))
 
         return "\n\n".join(part for part in parts if part).strip(), usage
 
@@ -570,6 +1247,7 @@ class AgentLoop:
         sender_id: str | None = None,
         user_request: str | None = None,
         require_document_evidence: bool = False,
+        initial_tools_used: list[dict] | None = None,
     ) -> tuple[str | None, list[dict], dict[str, int]]:
         """
         Run the core agent loop: call LLM, execute tools, repeat until done.
@@ -584,7 +1262,7 @@ class AgentLoop:
         """
         iteration = 0
         final_content = None
-        tools_used: list[dict] = []
+        tools_used: list[dict] = list(initial_tools_used or [])
         token_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -705,20 +1383,59 @@ class AgentLoop:
                 messages.append(
                     {
                         "role": "system",
-                        "content": "Reflect on the results and decide next steps.",
+                        "content": self.context.build_tool_reflection_prompt(),
                     }
                 )
             else:
+                if require_document_evidence and self._is_knowledge_base_mode():
+                    progress = self._analyze_kb_search_progress(user_request, tools_used)
+                    if not progress.answer_ready and iteration < self.max_iterations:
+                        if response.content or response.reasoning_content:
+                            messages = self.context.add_assistant_message(
+                                messages,
+                                response.content,
+                                reasoning_content=response.reasoning_content,
+                            )
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": self.context.build_kb_continue_search_prompt(
+                                    self._format_kb_search_progress(progress)
+                                ),
+                            }
+                        )
+                        continue
+
                 final_content = response.content
-                grounded_reply, rewrite_usage = await self._build_rewritten_openviking_reply(
-                    user_request=user_request,
-                    tools_used=tools_used,
-                    draft_reply=final_content,
-                )
-                if grounded_reply:
-                    for key in token_usage:
-                        token_usage[key] += rewrite_usage.get(key, 0)
-                    final_content = grounded_reply
+                if self._is_knowledge_base_mode() and self._has_document_evidence(tools_used):
+                    grounded_reply, rewrite_usage = await self._build_rewritten_openviking_reply(
+                        user_request=user_request,
+                        tools_used=tools_used,
+                    )
+                    if grounded_reply:
+                        for key in token_usage:
+                            token_usage[key] += rewrite_usage.get(key, 0)
+                        final_content = grounded_reply
+                    else:
+                        grounded_text_reply, rewrite_usage = await self._build_document_grounded_text_reply(
+                            user_request=user_request,
+                            tools_used=tools_used,
+                            session_id=session_key.safe_name(),
+                        )
+                        if grounded_text_reply:
+                            for key in token_usage:
+                                token_usage[key] += rewrite_usage.get(key, 0)
+                            final_content = grounded_text_reply
+                else:
+                    grounded_reply, rewrite_usage = await self._build_rewritten_openviking_reply(
+                        user_request=user_request,
+                        tools_used=tools_used,
+                        draft_reply=final_content,
+                    )
+                    if grounded_reply:
+                        for key in token_usage:
+                            token_usage[key] += rewrite_usage.get(key, 0)
+                        final_content = grounded_reply
                 break
 
         if final_content is None:
@@ -955,6 +1672,16 @@ class AgentLoop:
             )
             # logger.info(f"New messages: {messages}")
 
+            prefetched_tools_used: list[dict] = []
+            if self._is_knowledge_base_mode():
+                messages, prefetched_tools_used = await self._prefetch_knowledge_base_evidence(
+                    messages=messages,
+                    session_key=session_key,
+                    sender_id=msg.sender_id,
+                    user_request=msg.content,
+                    publish_events=True,
+                )
+
             # Run agent loop
             final_content, tools_used, token_usage = await self._run_agent_loop(
                 messages=messages,
@@ -963,6 +1690,7 @@ class AgentLoop:
                 sender_id=msg.sender_id,
                 user_request=msg.content,
                 require_document_evidence=self._is_knowledge_base_mode(),
+                initial_tools_used=prefetched_tools_used,
             )
 
             # Log response preview
