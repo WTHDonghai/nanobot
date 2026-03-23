@@ -1,6 +1,9 @@
 import asyncio
 import hashlib
+import re
 import time
+import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -8,8 +11,12 @@ from loguru import logger
 import openviking as ov
 from vikingbot.config.loader import load_config
 from vikingbot.openviking_mount.user_apikey_manager import UserApiKeyManager
+from vikingbot.utils.helpers import get_images_path
 
 viking_resource_prefix = "viking://resources/"
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff"}
+READABLE_TEXT_EXTENSIONS = {".md", ".markdown", ".mdown", ".mkd", ".txt"}
+WORD_IMAGE_PLACEHOLDER_RE = re.compile(r"!\[([^\]]*)\]\(ov-asset://([^)]+)\)")
 
 
 class VikingClient:
@@ -137,6 +144,161 @@ class VikingClient:
             logger.warning(f"Failed to read content from {uri}: {e}")
             return ""
 
+    async def stat(self, uri: str) -> Dict[str, Any]:
+        """Return filesystem metadata for a Viking URI."""
+        try:
+            return await self.client.stat(uri)
+        except Exception as e:
+            logger.warning(f"Failed to stat {uri}: {e}")
+            return {}
+
+    async def download_content(self, uri: str) -> bytes:
+        """Download raw file bytes for images and other binary resources."""
+        http_client = getattr(self.client, "_http", None)
+        if http_client is None:
+            return b""
+
+        try:
+            response = await http_client.get("/api/v1/content/download", params={"uri": uri})
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            logger.warning(f"Failed to download content from {uri}: {e}")
+            return b""
+
+    async def export_related_images_for_send(self, uri: str, max_images: int = 4) -> list[str]:
+        """Export nearby resource images into send:// references for bot channels."""
+        image_uris = await self._find_related_image_uris(uri, max_images=max_images)
+        return await self._export_image_uris_for_send(image_uris)
+
+    async def export_uri_for_send(self, uri: str, max_images: int = 4) -> list[str]:
+        """Export one image URI or an image directory to send:// references."""
+        stat = await self.stat(uri)
+        if not stat:
+            return []
+
+        normalized_uri = uri.rstrip("/")
+        if stat.get("isDir"):
+            try:
+                entries = await self.list_resources(path=normalized_uri, recursive=True)
+            except Exception as e:
+                logger.warning(f"Failed to list image directory {normalized_uri}: {e}")
+                return []
+
+            image_uris = [
+                entry["uri"]
+                for entry in entries
+                if not entry.get("isDir") and Path(entry.get("name", "")).suffix.lower() in IMAGE_EXTENSIONS
+            ]
+            image_uris.sort(key=self._image_sort_key)
+            return await self._export_image_uris_for_send(image_uris[:max_images])
+
+        if Path(normalized_uri).suffix.lower() in IMAGE_EXTENSIONS:
+            return await self._export_image_uris_for_send([normalized_uri])
+
+        return []
+
+    async def resolve_read_uri(self, uri: str) -> tuple[Optional[str], list[str]]:
+        """Resolve a level='read' target to a concrete text leaf when possible."""
+        stat = await self.stat(uri)
+        if not stat:
+            return None, []
+
+        normalized_uri = uri.rstrip("/")
+        if not stat.get("isDir") or normalized_uri.endswith("/_images") or normalized_uri.endswith(
+            "_images"
+        ):
+            return normalized_uri, []
+
+        try:
+            entries = await self.list_resources(path=normalized_uri, recursive=True)
+        except Exception as e:
+            logger.warning(f"Failed to list read candidates under {normalized_uri}: {e}")
+            return None, []
+
+        candidates = sorted(
+            [
+                entry["uri"]
+                for entry in entries
+                if self._is_readable_text_entry(entry)
+            ],
+            key=self._text_read_sort_key,
+        )
+        if not candidates:
+            return None, []
+
+        dir_name = self._uri_name(normalized_uri)
+        same_name_candidates = [
+            candidate for candidate in candidates if Path(self._uri_name(candidate)).stem == dir_name
+        ]
+        if len(same_name_candidates) == 1:
+            return same_name_candidates[0], candidates
+        if len(candidates) == 1:
+            return candidates[0], candidates
+        return None, candidates
+
+    async def materialize_inline_image_refs(self, content: str, source_uri: str) -> str:
+        """Replace Word inline asset placeholders with sendable image references."""
+        if "ov-asset://" not in content:
+            return content
+
+        rendered = content
+        replacement_cache: dict[str, str] = {}
+
+        for match in WORD_IMAGE_PLACEHOLDER_RE.finditer(content):
+            alt_text = match.group(1)
+            asset_name = match.group(2)
+            placeholder = match.group(0)
+
+            if asset_name not in replacement_cache:
+                resolved_uri = await self._resolve_image_asset_uri(source_uri, asset_name)
+                if not resolved_uri:
+                    raise ValueError(
+                        f"Unable to resolve inline image asset '{asset_name}' from {source_uri}"
+                    )
+
+                exported = await self._export_image_uris_for_send([resolved_uri])
+                if not exported:
+                    raise ValueError(
+                        f"Unable to export inline image asset '{resolved_uri}' for send"
+                    )
+
+                send_match = re.search(r"!\[[^\]]*\]\((send://[^)\s]+)\)", exported[0])
+                if not send_match:
+                    raise ValueError(
+                        f"Inline image asset '{resolved_uri}' did not produce a send:// reference"
+                    )
+                replacement_cache[asset_name] = f"![{alt_text}]({send_match.group(1)})"
+
+            rendered = rendered.replace(placeholder, replacement_cache[asset_name], 1)
+
+        return rendered
+
+    async def _export_image_uris_for_send(self, image_uris: list[str]) -> list[str]:
+        """Persist image URIs into bot send:// staging files."""
+        if not image_uris:
+            return []
+
+        images_dir = get_images_path()
+        exported_refs: list[str] = []
+
+        for idx, image_uri in enumerate(image_uris, start=1):
+            image_bytes = await self.download_content(image_uri)
+            if not image_bytes:
+                continue
+
+            suffix = Path(image_uri).suffix.lower()
+            if suffix not in IMAGE_EXTENSIONS:
+                suffix = ".png"
+            filename = f"{uuid.uuid4().hex}{suffix}"
+            image_path = images_dir / filename
+            image_path.write_bytes(image_bytes)
+
+            label = Path(image_uri).stem or f"image_{idx}"
+            exported_refs.append(f"![{label}](send://{filename})")
+
+        return exported_refs
+
     async def read_user_profile(self, user_id: str) -> str:
         """读取用户 profile。
 
@@ -214,6 +376,118 @@ class VikingClient:
         except Exception as e:
             logger.warning(f"Failed to check user existence: {e}")
             return False
+
+    async def _find_related_image_uris(self, uri: str, max_images: int = 4) -> list[str]:
+        """Find extracted document images near a content URI."""
+        current_dir = await self._resolve_start_directory(uri)
+        checked_dirs: set[str] = set()
+
+        for _ in range(4):
+            if not current_dir or current_dir in checked_dirs:
+                break
+            checked_dirs.add(current_dir)
+
+            images_dir = f"{current_dir.rstrip('/')}/_images"
+            try:
+                stat = await self.client.stat(images_dir)
+            except Exception:
+                stat = {}
+
+            if stat.get("isDir"):
+                try:
+                    entries = await self.list_resources(path=images_dir, recursive=False)
+                except Exception as e:
+                    logger.warning(f"Failed to list image directory {images_dir}: {e}")
+                    entries = []
+
+                image_uris = [
+                    entry["uri"]
+                    for entry in entries
+                    if not entry.get("isDir") and Path(entry.get("name", "")).suffix.lower() in IMAGE_EXTENSIONS
+                ]
+                image_uris.sort(key=self._image_sort_key)
+                return image_uris[:max_images]
+
+            parent_dir = self._parent_uri(current_dir)
+            if not parent_dir or parent_dir == current_dir:
+                break
+            current_dir = parent_dir
+
+        return []
+
+    async def _resolve_image_asset_uri(self, source_uri: str, asset_name: str) -> Optional[str]:
+        """Resolve an inline Word asset placeholder to the nearest extracted image URI."""
+        current_dir = await self._resolve_start_directory(source_uri)
+        checked_dirs: set[str] = set()
+
+        for _ in range(6):
+            if not current_dir or current_dir in checked_dirs:
+                break
+            checked_dirs.add(current_dir)
+
+            candidate = f"{current_dir.rstrip('/')}/_images/{asset_name}"
+            stat = await self.stat(candidate)
+            if stat and not stat.get("isDir"):
+                return candidate
+
+            parent_dir = self._parent_uri(current_dir)
+            if not parent_dir or parent_dir == current_dir:
+                break
+            current_dir = parent_dir
+
+        return None
+
+    async def _resolve_start_directory(self, uri: str) -> str:
+        """Resolve the best starting directory for sibling image lookup."""
+        try:
+            stat = await self.client.stat(uri)
+        except Exception:
+            stat = {}
+
+        if stat.get("isDir"):
+            return uri.rstrip("/")
+        return self._parent_uri(uri)
+
+    @staticmethod
+    def _parent_uri(uri: str) -> str:
+        normalized = uri.rstrip("/")
+        if "://" not in normalized:
+            return normalized
+
+        scheme, path = normalized.split("://", 1)
+        parts = [segment for segment in path.split("/") if segment]
+        if len(parts) <= 1:
+            return f"{scheme}://{parts[0]}" if parts else f"{scheme}://"
+        return f"{scheme}://{'/'.join(parts[:-1])}"
+
+    @staticmethod
+    def _image_sort_key(uri: str) -> tuple[int, str]:
+        name = Path(uri).name.lower()
+        match = re.search(r"(\d+)", name)
+        number = int(match.group(1)) if match else 10**9
+        return number, name
+
+    @staticmethod
+    def _uri_name(uri: str) -> str:
+        return uri.rstrip("/").rsplit("/", 1)[-1]
+
+    @classmethod
+    def _is_readable_text_entry(cls, entry: Dict[str, Any]) -> bool:
+        if entry.get("isDir"):
+            return False
+
+        uri = str(entry.get("uri", "")).rstrip("/")
+        name = str(entry.get("name", "") or cls._uri_name(uri))
+        if not uri or name.startswith(".") or "/_images/" in uri:
+            return False
+
+        return Path(name).suffix.lower() in READABLE_TEXT_EXTENSIONS
+
+    @classmethod
+    def _text_read_sort_key(cls, uri: str) -> tuple[int, str]:
+        normalized = uri.rstrip("/")
+        path = normalized.split("://", 1)[-1]
+        return path.count("/"), cls._uri_name(normalized)
 
     async def _initialize_user(self, user_id: str, role: str = "user") -> bool:
         """初始化用户。
