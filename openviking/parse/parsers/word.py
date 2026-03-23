@@ -7,6 +7,8 @@ Converts Word documents to Markdown then parses using MarkdownParser.
 Inspired by microsoft/markitdown approach.
 """
 
+import re
+import zipfile
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -28,6 +30,9 @@ class WordParser(BaseParser):
     then delegates to MarkdownParser for tree structure creation.
     """
 
+    EMBEDDED_IMAGES_DIR = "_images"
+    IMAGE_PLACEHOLDER_SCHEME = "ov-asset://"
+
     def __init__(self, config: Optional[ParserConfig] = None):
         """Initialize Word parser."""
         from openviking.parse.parsers.markdown import MarkdownParser
@@ -46,10 +51,18 @@ class WordParser(BaseParser):
         if path.exists():
             import docx
 
-            markdown_content = self._convert_to_markdown(path, docx)
+            doc = docx.Document(path)
+            image_map = self._build_image_reference_map(doc)
+            markdown_content = self._convert_to_markdown(doc, image_map)
             result = await self._md_parser.parse_content(
                 markdown_content, source_path=str(path), instruction=instruction, **kwargs
             )
+            embedded_images = self._extract_embedded_images(path, image_map)
+            written_images = await self._write_embedded_images(result.temp_dir_path, embedded_images)
+            result.meta = result.meta or {}
+            result.meta["embedded_image_count"] = len(written_images)
+            if written_images:
+                result.meta["embedded_images_dir"] = self.EMBEDDED_IMAGES_DIR
         else:
             result = await self._md_parser.parse_content(
                 str(source), instruction=instruction, **kwargs
@@ -67,13 +80,12 @@ class WordParser(BaseParser):
         result.parser_name = "WordParser"
         return result
 
-    def _convert_to_markdown(self, path: Path, docx) -> str:
+    def _convert_to_markdown(self, doc, image_map: dict[str, str]) -> str:
         """Convert Word document to Markdown string.
 
         Iterates the document body in order so that tables appear in their
         original position rather than being appended at the end.
         """
-        doc = docx.Document(path)
         markdown_parts = []
 
         # Map XML table elements to python-docx Table objects for O(1) lookup
@@ -88,17 +100,24 @@ class WordParser(BaseParser):
                 from docx.text.paragraph import Paragraph
 
                 paragraph = Paragraph(child, doc)
-                if not paragraph.text.strip():
+                paragraph_parts = self._build_paragraph_parts(paragraph, image_map)
+                paragraph_content = "".join(paragraph_parts).strip()
+                if not paragraph_content:
                     continue
 
                 style_name = paragraph.style.name if paragraph.style else "Normal"
 
-                if style_name.startswith("Heading"):
+                if style_name.startswith("Heading") and paragraph.text.strip():
                     level = self._extract_heading_level(style_name)
                     markdown_parts.append(f"{'#' * level} {paragraph.text}")
+                    trailing_images = [
+                        part
+                        for part in paragraph_parts
+                        if part.startswith("![") and self.IMAGE_PLACEHOLDER_SCHEME in part
+                    ]
+                    markdown_parts.extend(trailing_images)
                 else:
-                    text = self._convert_formatted_text(paragraph)
-                    markdown_parts.append(text)
+                    markdown_parts.append(paragraph_content)
 
             elif child.tag == qn("w:tbl"):
                 # It's a table
@@ -119,21 +138,33 @@ class WordParser(BaseParser):
             pass
         return 1
 
-    def _convert_formatted_text(self, paragraph) -> str:
-        """Convert paragraph with formatting to markdown."""
-        text_parts = []
+    def _convert_paragraph(self, paragraph, image_map: dict[str, str]) -> str:
+        """Convert a paragraph into markdown, preserving embedded image positions."""
+        return "".join(self._build_paragraph_parts(paragraph, image_map)).strip()
+
+    def _build_paragraph_parts(self, paragraph, image_map: dict[str, str]) -> list[str]:
+        """Build paragraph markdown parts in the original run order."""
+        parts = []
         for run in paragraph.runs:
-            text = run.text
-            if not text:
-                continue
-            if run.bold:
-                text = f"**{text}**"
-            if run.italic:
-                text = f"*{text}*"
-            if run.underline:
-                text = f"<ins>{text}</ins>"
-            text_parts.append(text)
-        return "".join(text_parts)
+            formatted_text = self._format_run_text(run)
+            if formatted_text:
+                parts.append(formatted_text)
+            parts.extend(self._extract_run_image_refs(run, image_map))
+        return parts
+
+    @staticmethod
+    def _format_run_text(run) -> str:
+        """Convert a run's text formatting into markdown."""
+        text = run.text or ""
+        if not text:
+            return ""
+        if run.bold:
+            text = f"**{text}**"
+        if run.italic:
+            text = f"*{text}*"
+        if run.underline:
+            text = f"<ins>{text}</ins>"
+        return text
 
     def _convert_table(self, table) -> str:
         """Convert Word table to markdown format."""
@@ -148,3 +179,119 @@ class WordParser(BaseParser):
         from openviking.parse.base import format_table_to_markdown
 
         return format_table_to_markdown(rows, has_header=True)
+
+    def _extract_embedded_images(
+        self, path: Path, image_map: dict[str, str]
+    ) -> list[tuple[str, bytes]]:
+        """Extract embedded DOCX images from the ZIP package."""
+        image_entries: list[tuple[str, bytes]] = []
+        known_parts = set(image_map.keys())
+
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                if not name.startswith("word/media/") or name.endswith("/"):
+                    continue
+
+                partname = f"/{name}"
+                filename = image_map.get(partname)
+                if not filename:
+                    if known_parts:
+                        continue
+                    filename = self._sanitize_asset_name(Path(name).name)
+                image_entries.append((filename, archive.read(name)))
+
+        return image_entries
+
+    def _build_image_reference_map(self, doc) -> dict[str, str]:
+        """Map DOCX relationship targets to stable extracted filenames."""
+        image_map: dict[str, str] = {}
+        seen_names: set[str] = set()
+
+        for rel_id, part in doc.part.related_parts.items():
+            partname = str(getattr(part, "partname", ""))
+            content_type = getattr(part, "content_type", "")
+            if not partname.startswith("/word/media/") and not content_type.startswith("image/"):
+                continue
+
+            image_map[partname] = self._dedupe_asset_name(Path(partname).name, seen_names)
+
+        return image_map
+
+    def _extract_run_image_refs(self, run, image_map: dict[str, str]) -> list[str]:
+        """Extract Markdown image placeholders from a run's drawing elements."""
+        refs = []
+        blips = run.element.xpath('.//*[local-name()="blip"]')
+        for blip in blips:
+            rel_id = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+            if not rel_id:
+                continue
+
+            image_part = run.part.related_parts.get(rel_id)
+            if not image_part:
+                continue
+
+            partname = str(getattr(image_part, "partname", ""))
+            filename = image_map.get(partname)
+            if not filename:
+                continue
+
+            alt_text = Path(filename).stem or "image"
+            refs.append(f"![{alt_text}]({self.IMAGE_PLACEHOLDER_SCHEME}{filename})")
+
+        return refs
+
+    async def _write_embedded_images(
+        self, temp_uri: Optional[str], image_entries: list[tuple[str, bytes]]
+    ) -> list[str]:
+        """Persist extracted images under the parsed document root."""
+        if not temp_uri or not image_entries:
+            return []
+
+        viking_fs = self._get_viking_fs()
+        entries = await viking_fs.ls(temp_uri)
+        doc_dirs = [e for e in entries if e.get("isDir") and e["name"] not in {".", ".."}]
+
+        if len(doc_dirs) != 1:
+            logger.warning(
+                f"[WordParser] Expected 1 document directory in {temp_uri}, found {len(doc_dirs)}"
+            )
+            return []
+
+        doc_root_uri = f"{temp_uri}/{doc_dirs[0]['name']}"
+        images_dir_uri = f"{doc_root_uri}/{self.EMBEDDED_IMAGES_DIR}"
+        await viking_fs.mkdir(images_dir_uri, exist_ok=True)
+
+        written_images: list[str] = []
+        for filename, image_data in image_entries:
+            await viking_fs.write(f"{images_dir_uri}/{filename}", image_data)
+            written_images.append(filename)
+
+        return written_images
+
+    def _dedupe_asset_name(self, filename: str, seen_names: set[str]) -> str:
+        """Create a filesystem-safe unique asset filename."""
+        sanitized = self._sanitize_asset_name(filename)
+        if sanitized not in seen_names:
+            seen_names.add(sanitized)
+            return sanitized
+
+        stem = Path(sanitized).stem or "image"
+        suffix = Path(sanitized).suffix
+        index = 1
+        while True:
+            candidate = f"{stem}_{index}{suffix}"
+            if candidate not in seen_names:
+                seen_names.add(candidate)
+                return candidate
+            index += 1
+
+    def _sanitize_asset_name(self, filename: str) -> str:
+        """Normalize embedded asset filenames for VikingFS paths."""
+        basename = Path(filename).name
+        sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", basename).strip("._")
+        suffix = Path(basename).suffix.lower()
+        if not sanitized:
+            sanitized = f"image{suffix or '.bin'}"
+        elif suffix and not sanitized.endswith(suffix):
+            sanitized = f"{sanitized}{suffix}"
+        return sanitized

@@ -15,7 +15,7 @@ Resources are external knowledge that agents can reference. This guide covers ho
 | Images | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` | VLM description |
 | Video | `.mp4`, `.mov`, `.avi` | Frame extraction + VLM |
 | Audio | `.mp3`, `.wav`, `.m4a` | Transcription |
-| Documents | `.docx` | Text extraction |
+| Documents | `.docx` | Text and embedded image extraction |
 
 ## Processing Pipeline
 
