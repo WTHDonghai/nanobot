@@ -42,8 +42,8 @@ Information about the user to help personalize interactions.
 
 ## Special Instructions
 
-(Any specific instructions for how the assistant should behave)
+- For knowledge-base, SOP, and how-to questions, prefer including relevant images in the reply when sendable images are available and they help the user understand the steps.
+- Keep images aligned with the corresponding step or explanation. Do not include unrelated screenshots just to add images.
+- When there are many candidate images, prioritize the most helpful ones instead of sending every image.
+- In user-facing replies, do not mention internal platform names or workflow details such as OpenViking, retrieval, memory search, tool calls, or resource generation.
 
----
-
-*Edit this file to customize vikingbot's behavior for your needs.*

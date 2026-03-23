@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -211,12 +212,336 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
+    @staticmethod
+    def _extract_query_terms(user_request: str) -> list[str]:
+        """Extract stable query terms for section matching."""
+        stop_terms = {"如何", "怎么", "怎样", "一下", "一个", "这个", "那个", "请问"}
+        normalized = user_request.lower()
+        terms: set[str] = set()
+
+        for match in re.finditer(r"[a-z0-9][a-z0-9._-]{1,}", normalized):
+            terms.add(match.group(0))
+
+        for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+            if len(chunk) <= 4 and chunk not in stop_terms:
+                terms.add(chunk)
+            for index in range(len(chunk) - 1):
+                term = chunk[index : index + 2]
+                if term not in stop_terms:
+                    terms.add(term)
+
+        return sorted(terms, key=len, reverse=True)
+
+    @staticmethod
+    def _split_markdown_sections(content: str) -> list[dict[str, str | int]]:
+        """Split markdown into heading-based sections."""
+        heading_re = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+        matches = list(heading_re.finditer(content))
+        if not matches:
+            return []
+
+        sections: list[dict[str, str | int]] = []
+        for index, match in enumerate(matches):
+            level = len(match.group(1))
+            end = len(content)
+            for next_match in matches[index + 1 :]:
+                if len(next_match.group(1)) <= level:
+                    end = next_match.start()
+                    break
+
+            section_text = content[match.start() : end].strip()
+            if not section_text:
+                continue
+
+            sections.append(
+                {
+                    "title": match.group(2).strip(),
+                    "level": level,
+                    "content": section_text,
+                }
+            )
+
+        return sections
+
+    @classmethod
+    def _score_markdown_section(cls, section: dict[str, str | int], query_terms: list[str]) -> int:
+        """Score a markdown section against the user request."""
+        title = str(section["title"]).lower()
+        content = str(section["content"]).lower()
+
+        title_hits = sum(1 for term in query_terms if term in title)
+        content_hits = sum(1 for term in query_terms if term in content)
+        image_bonus = 2 if "send://" in content else 0
+
+        return title_hits * 6 + content_hits * 2 + image_bonus
+
+    @classmethod
+    def _select_relevant_markdown_section(cls, user_request: str, content: str) -> str | None:
+        """Select the most relevant heading-based section from a markdown document."""
+        query_terms = cls._extract_query_terms(user_request)
+        if not query_terms:
+            return None
+
+        sections = cls._split_markdown_sections(content)
+        if not sections:
+            return None
+
+        best_section: dict[str, str | int] | None = None
+        best_score = 0
+        for section in sections:
+            score = cls._score_markdown_section(section, query_terms)
+            if score > best_score:
+                best_section = section
+                best_score = score
+
+        if not best_section or best_score <= 0:
+            return None
+
+        selected = str(best_section["content"]).strip()
+        if "send://" not in selected:
+            return None
+        return selected
+
+    @classmethod
+    def _select_relevant_openviking_section(
+        cls, user_request: str | None, tools_used: list[dict]
+    ) -> str | None:
+        """Select one unambiguous image-backed OpenViking section for final formatting."""
+        if not user_request:
+            return None
+
+        query_terms = cls._extract_query_terms(user_request)
+        if not query_terms:
+            return None
+
+        section_scores: dict[str, int] = {}
+        for tool_used in tools_used:
+            if tool_used.get("tool_name") != "openviking_read":
+                continue
+
+            result = tool_used.get("result")
+            if not isinstance(result, str) or "send://" not in result:
+                continue
+
+            selected = cls._select_relevant_markdown_section(user_request, result)
+            if not selected:
+                continue
+
+            score = sum(1 for term in query_terms if term in selected.lower())
+            section_scores[selected] = max(section_scores.get(selected, 0), score)
+
+        if len(section_scores) != 1:
+            return None
+
+        selected, score = next(iter(section_scores.items()))
+        if score <= 0:
+            return None
+        return selected
+
+    @staticmethod
+    def _normalize_section_title(section: str) -> str:
+        """Normalize a markdown heading into a user-facing title."""
+        title = re.sub(r"^#{1,6}\s+", "", section.strip(), flags=re.MULTILINE)
+        title = title.splitlines()[0].strip() if title else ""
+        title = re.sub(r"^[一二三四五六七八九十0-9]+[、.\s]+", "", title)
+        return title.strip()
+
+    @staticmethod
+    def _prepare_text_block_for_rewrite(text_block: str) -> str:
+        """Normalize parser artifacts before rendering grounded evidence."""
+        normalized = text_block.replace("\xa0", " ")
+        normalized = re.sub(r"\*{2,}", "", normalized)
+        normalized = re.sub(r"[ \t]{2,}", " ", normalized)
+        normalized = re.sub(r"(?m)^\s*(\d+)[）)]\s*", r"\1. ", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
+
+    @staticmethod
+    def _is_send_image_line(line: str) -> bool:
+        """Return whether a line is a standalone sendable image markdown line."""
+        return bool(re.match(r"^!\[[^\]]*\]\((send://[^)\s]+)\)\s*$", line.strip()))
+
+    @classmethod
+    def _is_step_start(cls, line: str) -> bool:
+        """Return whether a normalized line starts a numbered step."""
+        normalized = cls._prepare_text_block_for_rewrite(line)
+        return bool(re.match(r"^\d+\.\s+\S", normalized))
+
+    @classmethod
+    def _append_segment_line(cls, segments: list[dict[str, str]], line: str) -> None:
+        """Append a line into the current text segment, creating one when needed."""
+        if segments and segments[-1]["type"] == "text":
+            segments[-1]["content"] += f"\n{line}"
+            return
+        segments.append({"type": "text", "content": line})
+
+    @classmethod
+    def _append_image_segment(cls, segments: list[dict[str, str]], image_line: str) -> None:
+        """Append an image segment while preserving its original relative order."""
+        segments.append({"type": "image", "content": image_line.strip()})
+
+    @classmethod
+    def _extract_structured_section(
+        cls, section: str
+    ) -> tuple[str, list[dict[str, str]], list[dict[str, object]]]:
+        """Split a section into intro segments and numbered step units."""
+        lines = [line.rstrip() for line in section.strip().splitlines()]
+        if not lines:
+            return "", [], []
+
+        title_line = lines[0].strip()
+        body_lines = lines[1:] if title_line.startswith("#") else lines
+        intro_segments: list[dict[str, str]] = []
+        steps: list[dict[str, object]] = []
+        current_step: dict[str, object] | None = None
+
+        def flush_step() -> None:
+            nonlocal current_step
+            if current_step and current_step["segments"]:
+                steps.append(current_step)
+            current_step = None
+
+        for line in body_lines:
+            stripped = line.strip()
+            if not stripped:
+                target_segments = intro_segments if current_step is None else current_step["segments"]
+                if target_segments and target_segments[-1]["type"] == "text":
+                    target_segments[-1]["content"] += "\n"
+                continue
+
+            if cls._is_send_image_line(stripped):
+                target_segments = intro_segments if current_step is None else current_step["segments"]
+                cls._append_image_segment(target_segments, stripped)
+                continue
+
+            if cls._is_step_start(stripped):
+                flush_step()
+                normalized = cls._prepare_text_block_for_rewrite(stripped)
+                step_number_match = re.match(r"^(\d+)\.\s+", normalized)
+                step_number = step_number_match.group(1) if step_number_match else None
+                current_step = {
+                    "number": step_number,
+                    "segments": [{"type": "text", "content": stripped}],
+                }
+                continue
+
+            if current_step is None:
+                cls._append_segment_line(intro_segments, stripped)
+            else:
+                cls._append_segment_line(current_step["segments"], stripped)
+        flush_step()
+
+        return title_line if title_line.startswith("#") else "", intro_segments, steps
+
+    @classmethod
+    def _render_segments(cls, segments: list[dict[str, str]]) -> str:
+        """Render structured text/image segments deterministically."""
+        parts: list[str] = []
+        for segment in segments:
+            if segment["type"] == "image":
+                parts.append(segment["content"].strip())
+                continue
+
+            normalized = cls._prepare_text_block_for_rewrite(segment["content"])
+            if normalized:
+                parts.append(normalized)
+
+        return "\n\n".join(parts).strip()
+
+    @staticmethod
+    def _extract_grounded_intro(draft_reply: str | None) -> str | None:
+        """Keep only a short natural lead-in from the agent draft reply."""
+        if isinstance(draft_reply, str) and draft_reply.strip():
+            for paragraph in re.split(r"\n\s*\n", draft_reply.strip()):
+                candidate = paragraph.strip()
+                if not candidate:
+                    continue
+                if candidate.startswith("#") or candidate.startswith("![") or "send://" in candidate:
+                    continue
+                if re.match(r"^(\d+\.\s+|[-*]\s+)", candidate):
+                    continue
+                if AgentLoop._contains_internal_reply_language(candidate):
+                    continue
+                return candidate
+        return None
+
+    @staticmethod
+    def _contains_internal_reply_language(text: str) -> bool:
+        """Return whether a paragraph exposes internal systems or retrieval workflow."""
+        normalized = text.lower()
+        internal_markers = [
+            "openviking",
+            "openviking_read",
+            "openviking_search",
+            "user_memory_search",
+            "retrieval",
+            "tool result",
+            "tool call",
+            "上下文数据库",
+            "内部工具",
+            "工具调用",
+            "工具结果",
+            "检索结果",
+            "生成交付物",
+        ]
+        return any(marker in normalized for marker in internal_markers)
+
+    async def _build_rewritten_openviking_reply(
+        self,
+        user_request: str | None,
+        tools_used: list[dict],
+        draft_reply: str | None = None,
+    ) -> tuple[str | None, dict[str, int]]:
+        """Build a readable grounded reply without rewriting evidence structure."""
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        if not user_request:
+            return None, usage
+
+        best_section = self._select_relevant_openviking_section(user_request, tools_used)
+        if not best_section:
+            return None, usage
+
+        title_line, intro_segments, steps = self._extract_structured_section(best_section)
+        section_title = self._normalize_section_title(title_line) if title_line else ""
+        rendered_intro = self._render_segments(intro_segments)
+        rendered_steps = [
+            self._render_segments(step["segments"])
+            for step in steps
+            if isinstance(step.get("segments"), list)
+        ]
+        rendered_steps = [step for step in rendered_steps if step]
+
+        parts: list[str] = []
+        intro = self._extract_grounded_intro(draft_reply)
+        if intro:
+            parts.append(intro)
+        elif section_title:
+            parts.append(f"## {section_title}")
+
+        if section_title and intro:
+            parts.append(f"## {section_title}")
+
+        if rendered_intro:
+            parts.append(rendered_intro)
+
+        if rendered_steps:
+            parts.extend(rendered_steps)
+        elif rendered_intro:
+            pass
+        else:
+            rendered_body = self._prepare_text_block_for_rewrite(best_section)
+            if rendered_body:
+                parts.append(rendered_body)
+
+        return "\n\n".join(part for part in parts if part).strip(), usage
+
     async def _run_agent_loop(
         self,
         messages: list[dict],
         session_key: SessionKey,
         publish_events: bool = True,
         sender_id: str | None = None,
+        user_request: str | None = None,
     ) -> tuple[str | None, list[dict], dict[str, int]]:
         """
         Run the core agent loop: call LLM, execute tools, repeat until done.
@@ -237,7 +562,6 @@ class AgentLoop:
             "completion_tokens": 0,
             "total_tokens": 0,
         }
-
         while iteration < self.max_iterations:
             iteration += 1
 
@@ -351,10 +675,22 @@ class AgentLoop:
                     tools_used.append(tool_used_dict)
 
                 messages.append(
-                    {"role": "system", "content": "Reflect on the results and decide next steps."}
+                    {
+                        "role": "system",
+                        "content": "Reflect on the results and decide next steps.",
+                    }
                 )
             else:
                 final_content = response.content
+                grounded_reply, rewrite_usage = await self._build_rewritten_openviking_reply(
+                    user_request=user_request,
+                    tools_used=tools_used,
+                    draft_reply=final_content,
+                )
+                if grounded_reply:
+                    for key in token_usage:
+                        token_usage[key] += rewrite_usage.get(key, 0)
+                    final_content = grounded_reply
                 break
 
         if final_content is None:
@@ -517,6 +853,7 @@ class AgentLoop:
                 session_key=session_key,
                 publish_events=True,
                 sender_id=msg.sender_id,
+                user_request=msg.content,
             )
 
             # Log response preview
@@ -569,6 +906,7 @@ class AgentLoop:
             messages=messages,
             session_key=msg.session_key,
             publish_events=False,
+            user_request=msg.content,
         )
 
         if final_content is None:

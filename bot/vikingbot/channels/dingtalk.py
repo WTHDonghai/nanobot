@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from typing import Any
 
@@ -187,6 +188,80 @@ class DingTalkChannel(BaseChannel):
             logger.exception(f"Failed to get DingTalk access token: {e}")
             return None
 
+    async def _upload_image_to_dingtalk(
+        self, image_data: bytes, token: str, filename: str = "image.png"
+    ) -> str:
+        """Upload an image to DingTalk and return its media_id."""
+        if not self._http:
+            raise RuntimeError("DingTalk HTTP client not initialized")
+
+        url = "https://oapi.dingtalk.com/media/upload"
+        response = await self._http.post(
+            url,
+            params={"access_token": token, "type": "image"},
+            files={"media": (filename, image_data, "application/octet-stream")},
+        )
+        response.raise_for_status()
+        result = response.json()
+        media_id = result.get("media_id") or result.get("mediaId")
+        if not media_id:
+            raise ValueError(f"Unexpected DingTalk media upload response: {result}")
+        return media_id
+
+    async def _replace_inline_images(self, content: str, token: str) -> str:
+        """Replace send:// and Markdown image references with DingTalk media IDs."""
+        markdown_pattern = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
+        standalone_pattern = re.compile(r"(send://[^\s)]+\.(?:png|jpe?g|gif|bmp|webp|svg|tiff))")
+
+        async def _replace_markdown(match: re.Match[str]) -> str:
+            alt_text = match.group(1)
+            image_ref = match.group(2)
+
+            if not (
+                image_ref.startswith("send://")
+                or image_ref.startswith("data:")
+                or image_ref.startswith("http://")
+                or image_ref.startswith("https://")
+            ):
+                return match.group(0)
+
+            try:
+                is_content, parsed = await self._parse_data_uri(image_ref)
+                if is_content or not isinstance(parsed, bytes):
+                    raise ValueError(
+                        f"DingTalk inline image ref {image_ref[:120]} did not resolve to image bytes"
+                    )
+                filename = image_ref.rsplit("/", 1)[-1] or "image.png"
+                media_id = await self._upload_image_to_dingtalk(parsed, token, filename=filename)
+                return f"![{alt_text}]({media_id})"
+            except Exception as e:
+                logger.exception(f"Failed to upload DingTalk markdown image {image_ref[:120]}: {e}")
+                raise
+
+        async def _replace_standalone(match: re.Match[str]) -> str:
+            image_ref = match.group(1)
+            try:
+                is_content, parsed = await self._parse_data_uri(image_ref)
+                if is_content or not isinstance(parsed, bytes):
+                    raise ValueError(
+                        f"DingTalk image ref {image_ref[:120]} did not resolve to image bytes"
+                    )
+                filename = image_ref.rsplit("/", 1)[-1] or "image.png"
+                media_id = await self._upload_image_to_dingtalk(parsed, token, filename=filename)
+                alt_text = filename.rsplit(".", 1)[0] or "image"
+                return f"![{alt_text}]({media_id})"
+            except Exception as e:
+                logger.exception(f"Failed to upload DingTalk image {image_ref[:120]}: {e}")
+                raise
+
+        rendered = content
+        for match in list(markdown_pattern.finditer(content)):
+            rendered = rendered.replace(match.group(0), await _replace_markdown(match), 1)
+        for match in list(standalone_pattern.finditer(rendered)):
+            rendered = rendered.replace(match.group(1), await _replace_standalone(match), 1)
+
+        return rendered
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through DingTalk."""
         # Only send normal response messages, skip thinking/tool_call/etc.
@@ -197,29 +272,32 @@ class DingTalkChannel(BaseChannel):
         if not token:
             return
 
-        # oToMessages/batchSend: sends to individual users (private chat)
-        # https://open.dingtalk.com/document/orgapp/robot-batch-send-messages
-        url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
-
-        headers = {"x-acs-dingtalk-access-token": token}
-
-        data = {
-            "robotCode": self.config.client_id,
-            "userIds": [msg.session_key.chat_id],  # chat_id is the user's staffId
-            "msgKey": "sampleMarkdown",
-            "msgParam": json.dumps(
-                {
-                    "text": msg.content,
-                    "title": "Nanobot Reply",
-                }
-            ),
-        }
-
-        if not self._http:
-            logger.warning("DingTalk HTTP client not initialized, cannot send")
-            return
-
         try:
+            rendered_content = await self._replace_inline_images(msg.content, token)
+
+            # oToMessages/batchSend: sends to individual users (private chat)
+            # https://open.dingtalk.com/document/orgapp/robot-batch-send-messages
+            url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+
+            headers = {"x-acs-dingtalk-access-token": token}
+
+            data = {
+                "robotCode": self.config.client_id,
+                "userIds": [msg.session_key.chat_id],  # chat_id is the user's staffId
+                "msgKey": "sampleMarkdown",
+                "msgParam": json.dumps(
+                    {
+                        "text": rendered_content,
+                        "title": "Nanobot Reply",
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+
+            if not self._http:
+                logger.warning("DingTalk HTTP client not initialized, cannot send")
+                return
+
             resp = await self._http.post(url, json=data, headers=headers)
             if resp.status_code != 200:
                 logger.exception(f"DingTalk send failed: {resp.text}")
