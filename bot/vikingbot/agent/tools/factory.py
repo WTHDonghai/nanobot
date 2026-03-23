@@ -21,6 +21,7 @@ from vikingbot.agent.tools.shell import ExecTool
 from vikingbot.agent.tools.web import WebFetchTool
 from vikingbot.agent.tools.websearch import WebSearchTool
 from vikingbot.config.loader import load_config
+from vikingbot.config.schema import CapabilityProfile
 
 if TYPE_CHECKING:
     from vikingbot.agent.tools.spawn import SpawnTool
@@ -53,19 +54,22 @@ def register_default_tools(
         include_image_tool: Whether to include image tool
         include_viking_tools: Whether to include Viking tools
     """
-    # Derive all parameters from config
-    workspace = config.workspace_path
+    capability_profile = config.agents.capability_profile
+
+    if capability_profile == CapabilityProfile.KNOWLEDGE_BASE:
+        if include_viking_tools:
+            registry.register(VikingReadTool())
+            registry.register(VikingListTool())
+            registry.register(VikingSearchTool())
+            registry.register(VikingGrepTool())
+            registry.register(VikingGlobTool())
+        return
+
     exec_config = config.tools.exec
     brave_api_key = config.tools.web.search.api_key if config.tools.web.search else None
     exa_api_key = None  # TODO: Add to config if needed
     tavily_api_key = config.tools.web.search.tavily_api_key if config.tools.web.search else None
 
-    # Get provider API key and base from config
-
-    agent_config = load_config().agents
-    provider_api_key = agent_config.api_key if agent_config else None
-    provider_api_base = agent_config.api_base if agent_config else None
-    gen_image_model = agent_config.gen_image_model
     # File tools
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())
@@ -81,7 +85,12 @@ def register_default_tools(
 
     # Web tools
     registry.register(
-        WebSearchTool(backend="auto", brave_api_key=brave_api_key, exa_api_key=exa_api_key, tavily_api_key=tavily_api_key)
+        WebSearchTool(
+            backend="auto",
+            brave_api_key=brave_api_key,
+            exa_api_key=exa_api_key,
+            tavily_api_key=tavily_api_key,
+        )
     )
     registry.register(WebFetchTool())
 
@@ -97,10 +106,12 @@ def register_default_tools(
         if not config.read_only:
             registry.register(VikingAddResourceTool())
 
-
-
     # Image generation tool
     if include_image_tool:
+        agent_config = load_config().agents
+        provider_api_key = agent_config.api_key if agent_config else None
+        provider_api_base = agent_config.api_base if agent_config else None
+        gen_image_model = agent_config.gen_image_model
         registry.register(
             ImageGenerationTool(
                 gen_image_model=gen_image_model,

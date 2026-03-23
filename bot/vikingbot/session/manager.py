@@ -51,8 +51,11 @@ class Session:
             List of messages in LLM format.
         """
         # Get recent messages
+        visible_messages = [m for m in self.messages if not m.get("skip_history")]
         recent = (
-            self.messages[-max_messages:] if len(self.messages) > max_messages else self.messages
+            visible_messages[-max_messages:]
+            if len(visible_messages) > max_messages
+            else visible_messages
         )
 
         # Convert to LLM format (just role and content)

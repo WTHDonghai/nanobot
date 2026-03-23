@@ -54,6 +54,13 @@ class BotMode(str, Enum):
     DEBUG = "debug"
 
 
+class CapabilityProfile(str, Enum):
+    """Agent capability profile."""
+
+    KNOWLEDGE_BASE = "knowledge-base"
+    FULL = "full"
+
+
 class BaseChannelConfig(BaseModel):
     """Base channel configuration."""
 
@@ -391,6 +398,7 @@ class AgentsConfig(BaseModel):
     model: str = "openai/doubao-seed-2-0-pro-260215"
     max_tool_iterations: int = 50
     memory_window: int = 50
+    capability_profile: CapabilityProfile = CapabilityProfile.KNOWLEDGE_BASE
     gen_image_model: str = "openai/doubao-seedream-4-5-251128"
     provider: str = ""
     api_key: str = ""

@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from vikingbot.agent.context import ContextBuilder
+from vikingbot.agent.intent_router import (
+    IntentRoute,
+    classify_knowledge_base_intent,
+    generate_route_response,
+)
 from vikingbot.agent.memory import MemoryStore
 from vikingbot.agent.subagent import SubagentManager
 from vikingbot.agent.tools import register_default_tools
@@ -19,7 +24,7 @@ from vikingbot.agent.tools.registry import ToolRegistry
 from vikingbot.bus.events import InboundMessage, OutboundEventType, OutboundMessage
 from vikingbot.bus.queue import MessageBus
 from vikingbot.config import load_config
-from vikingbot.config.schema import BotMode, Config, SessionKey
+from vikingbot.config.schema import BotMode, CapabilityProfile, Config, SessionKey
 from vikingbot.hooks import HookContext
 from vikingbot.hooks.manager import hook_manager
 from vikingbot.providers.base import LLMProvider
@@ -111,7 +116,11 @@ class AgentLoop:
         self.sandbox_manager = sandbox_manager
         self.config = config
 
-        self.context = ContextBuilder(workspace, sandbox_manager=sandbox_manager)
+        self.context = ContextBuilder(
+            workspace,
+            sandbox_manager=sandbox_manager,
+            config=self.config,
+        )
 
         self._register_builtin_hooks()
         self.sessions = session_manager or SessionManager(
@@ -178,6 +187,24 @@ class AgentLoop:
             subagent_manager=self.subagents,
             cron_service=self.cron_service,
         )
+
+    def _is_knowledge_base_mode(self) -> bool:
+        """Whether the agent is restricted to knowledge-base QA mode."""
+        return self.config.agents.capability_profile == CapabilityProfile.KNOWLEDGE_BASE
+
+    @staticmethod
+    def _has_document_evidence(tools_used: list[dict]) -> bool:
+        """Whether tool results contain document-backed evidence for answering."""
+        evidence_tools = {"openviking_read", "openviking_grep"}
+        for tool_used in tools_used:
+            if tool_used.get("tool_name") not in evidence_tools:
+                continue
+            if not tool_used.get("execute_success"):
+                continue
+            result = tool_used.get("result")
+            if isinstance(result, str) and result.strip():
+                return True
+        return False
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -542,6 +569,7 @@ class AgentLoop:
         publish_events: bool = True,
         sender_id: str | None = None,
         user_request: str | None = None,
+        require_document_evidence: bool = False,
     ) -> tuple[str | None, list[dict], dict[str, int]]:
         """
         Run the core agent loop: call LLM, execute tools, repeat until done.
@@ -699,6 +727,15 @@ class AgentLoop:
             else:
                 final_content = "I've completed processing but have no response to give."
 
+        if require_document_evidence and not self._has_document_evidence(tools_used):
+            final_content = await generate_route_response(
+                provider=self.provider,
+                model=self.model,
+                route_label="no_evidence",
+                user_message=user_request or "",
+                session_id=session_key.safe_name(),
+            )
+
         return final_content, tools_used, token_usage
 
     @trace(
@@ -813,6 +850,76 @@ class AgentLoop:
                 await self.sessions.save(session)
                 return None
 
+            if self._is_knowledge_base_mode():
+                intent_decision = await classify_knowledge_base_intent(
+                    provider=self.provider,
+                    model=self.model,
+                    user_message=msg.content,
+                    session_id=msg.session_key.safe_name(),
+                )
+                if intent_decision.route == IntentRoute.META_RESPONSE:
+                    meta_reply = await generate_route_response(
+                        provider=self.provider,
+                        model=self.model,
+                        route_label=intent_decision.label,
+                        user_message=msg.content,
+                        session_id=msg.session_key.safe_name(),
+                    )
+                    session.add_message(
+                        "user",
+                        msg.content,
+                        sender_id=msg.sender_id,
+                    )
+                    session.add_message(
+                        "assistant",
+                        meta_reply,
+                        routing_label=intent_decision.label,
+                        routing_reason=intent_decision.reason,
+                    )
+                    await self.sessions.save(session)
+                    time_cost = round(time.time() - start_time, 2)
+                    return OutboundMessage(
+                        session_key=msg.session_key,
+                        content=meta_reply,
+                        metadata=msg.metadata,
+                        time_cost=time_cost,
+                    )
+                if intent_decision.route == IntentRoute.SAFE_REDIRECT:
+                    redirect_reply = await generate_route_response(
+                        provider=self.provider,
+                        model=self.model,
+                        route_label=intent_decision.label,
+                        user_message=msg.content,
+                        session_id=msg.session_key.safe_name(),
+                    )
+                    session.add_message(
+                        "user",
+                        msg.content,
+                        sender_id=msg.sender_id,
+                        skip_history=True,
+                        routing_label=intent_decision.label,
+                        routing_reason=intent_decision.reason,
+                    )
+                    session.add_message(
+                        "assistant",
+                        redirect_reply,
+                        skip_history=True,
+                        routing_label=intent_decision.label,
+                        routing_reason=intent_decision.reason,
+                    )
+                    await self.sessions.save(session)
+                    logger.info(
+                        "Knowledge-base router redirected request: "
+                        f"{intent_decision.label} ({intent_decision.reason})"
+                    )
+                    time_cost = round(time.time() - start_time, 2)
+                    return OutboundMessage(
+                        session_key=msg.session_key,
+                        content=redirect_reply,
+                        metadata=msg.metadata,
+                        time_cost=time_cost,
+                    )
+
             # Consolidate memory before processing if session is too large
             if len(session.messages) > self.memory_window:
                 # Clone session for async consolidation, then immediately trim original
@@ -836,6 +943,7 @@ class AgentLoop:
                 sender_id=msg.sender_id,
                 is_group_chat=is_group_chat,
                 eval=self._eval,
+                config=self.config,
             )
 
             # Build initial messages (use get_history for LLM-formatted messages)
@@ -854,6 +962,7 @@ class AgentLoop:
                 publish_events=True,
                 sender_id=msg.sender_id,
                 user_request=msg.content,
+                require_document_evidence=self._is_knowledge_base_mode(),
             )
 
             # Log response preview
@@ -907,6 +1016,7 @@ class AgentLoop:
             session_key=msg.session_key,
             publish_events=False,
             user_request=msg.content,
+            require_document_evidence=self._is_knowledge_base_mode(),
         )
 
         if final_content is None:
