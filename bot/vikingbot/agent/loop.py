@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,6 +22,7 @@ from vikingbot.config import load_config
 from vikingbot.config.schema import BotMode, Config, SessionKey
 from vikingbot.hooks import HookContext
 from vikingbot.hooks.manager import hook_manager
+from vikingbot.openviking_mount.uri_utils import is_generic_scope_summary_uri, is_summary_uri
 from vikingbot.providers.base import LLMProvider
 from vikingbot.sandbox import SandboxManager
 from vikingbot.session.manager import SessionManager
@@ -110,7 +112,11 @@ class AgentLoop:
         self.sandbox_manager = sandbox_manager
         self.config = config
 
-        self.context = ContextBuilder(workspace, sandbox_manager=sandbox_manager)
+        self.context = ContextBuilder(
+            workspace,
+            sandbox_manager=sandbox_manager,
+            config=self.config,
+        )
 
         self._register_builtin_hooks()
         self.sessions = session_manager or SessionManager(
@@ -237,6 +243,7 @@ class AgentLoop:
             "completion_tokens": 0,
             "total_tokens": 0,
         }
+        has_kb_read_evidence = False
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -349,11 +356,26 @@ class AgentLoop:
                         "output_token": cal_str_tokens(result, text_type="mixed"),
                     }
                     tools_used.append(tool_used_dict)
+                    has_kb_read_evidence = has_kb_read_evidence or self._is_concrete_kb_read_result(
+                        tool_name=tool_call.name,
+                        arguments=tool_call.arguments,
+                        result=result,
+                    )
 
                 messages.append(
-                    {"role": "system", "content": "Reflect on the results and decide next steps."}
+                    {"role": "system", "content": self.context.build_tool_reflection_prompt()}
                 )
             else:
+                if self.context._is_knowledge_base_mode() and not has_kb_read_evidence:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": self.context.build_kb_continue_search_prompt(
+                                progress_summary=self._summarize_kb_tool_state(messages)
+                            ),
+                        }
+                    )
+                    continue
                 final_content = response.content
                 break
 
@@ -363,7 +385,269 @@ class AgentLoop:
             else:
                 final_content = "I've completed processing but have no response to give."
 
+        if final_content:
+            final_content = await self._finalize_kb_response(final_content, session_key, messages)
+
         return final_content, tools_used, token_usage
+
+    @staticmethod
+    def _is_concrete_kb_read_result(tool_name: str, arguments: dict, result: str) -> bool:
+        """Whether a tool result represents a concrete KB document read."""
+        if tool_name != "openviking_read":
+            return False
+        if not isinstance(arguments, dict):
+            return False
+        if arguments.get("level", "abstract") != "read":
+            return False
+
+        uri = str(arguments.get("uri", "") or "")
+        if not uri or is_summary_uri(uri) or is_generic_scope_summary_uri(uri):
+            return False
+
+        if not isinstance(result, str) or not result.strip():
+            return False
+        if result.startswith("Error reading from Viking:"):
+            return False
+        if "不能直接执行 level='read'" in result:
+            return False
+        if "下没有可读取的正文文件" in result:
+            return False
+        return True
+
+    @classmethod
+    def _summarize_kb_tool_state(cls, messages: list[dict]) -> str:
+        """Summarize KB retrieval state for the next search iteration."""
+        lines: list[str] = []
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            tool_name = message.get("name") or "unknown_tool"
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                snippet = content.strip().replace("\n", " ")
+                lines.append(f"- {tool_name}: {snippet[:200]}")
+            else:
+                lines.append(f"- {tool_name}")
+        return "\n".join(lines[-6:]) if lines else "No KB tool evidence collected yet."
+
+    @classmethod
+    def _extract_image_evidence_blocks(cls, messages: list[dict]) -> list[str]:
+        """Collect tool evidence blocks that already preserve text-image association."""
+        seen: set[str] = set()
+        blocks: list[str] = []
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            if not cls.SEND_IMAGE_LINE_RE.search(content):
+                continue
+            normalized = content.strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                blocks.append(normalized)
+        return blocks
+
+    @classmethod
+    def _extract_send_image_lines_from_text(cls, content: str) -> list[str]:
+        """Collect unique send:// Markdown image lines from a text block."""
+        seen: set[str] = set()
+        lines: list[str] = []
+        for match in cls.SEND_IMAGE_LINE_RE.finditer(content):
+            line = match.group(0)
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+        return lines
+
+    @staticmethod
+    def _parse_selected_segment_indexes(selection_text: str, max_index: int) -> list[int]:
+        """Parse segment indexes from a model selection response."""
+        return sorted(
+            {
+                int(match.group(0))
+                for match in re.finditer(r"\d+", selection_text or "")
+                if 1 <= int(match.group(0)) <= max_index
+            }
+        )
+
+    @classmethod
+    def _build_image_evidence_segments(cls, blocks: list[str]) -> list[str]:
+        """Split image evidence blocks into smaller text-image segments."""
+        segments: list[str] = []
+        for block in blocks:
+            text_buffer: list[str] = []
+            image_buffer: list[str] = []
+            for raw_line in block.splitlines():
+                line = raw_line.rstrip()
+                is_image_line = bool(cls.SEND_IMAGE_LINE_RE.fullmatch(line.strip()))
+                if is_image_line:
+                    image_buffer.append(line.strip())
+                    continue
+                if image_buffer:
+                    segment_parts = ["\n".join(part for part in text_buffer if part).strip()]
+                    segment_parts.append("\n".join(image_buffer))
+                    segment = "\n\n".join(part for part in segment_parts if part).strip()
+                    if segment:
+                        segments.append(segment)
+                    text_buffer = [line] if line else []
+                    image_buffer = []
+                    continue
+                text_buffer.append(line)
+
+            if image_buffer:
+                segment_parts = ["\n".join(part for part in text_buffer if part).strip()]
+                segment_parts.append("\n".join(image_buffer))
+                segment = "\n\n".join(part for part in segment_parts if part).strip()
+                if segment:
+                    segments.append(segment)
+
+        return segments
+
+    async def _select_relevant_image_segments(
+        self, draft_content: str, image_segments: list[str], session_key: SessionKey
+    ) -> list[str]:
+        """Ask the model to choose the minimum image segments needed for the answer."""
+        if not image_segments:
+            return []
+
+        numbered_segments = "\n\n".join(
+            f"[Segment {index}]\n{segment}" for index, segment in enumerate(image_segments, start=1)
+        )
+        selection_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Select the minimum image evidence segments needed to support the answer. "
+                    "Return only segment numbers separated by commas. "
+                    "Do not include any explanation."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Answer draft:\n"
+                    f"{draft_content}\n\n"
+                    "Candidate image evidence segments:\n"
+                    f"{numbered_segments}"
+                ),
+            },
+        ]
+        selection = await self.provider.chat(
+            messages=selection_messages,
+            model=self.model,
+            session_id=f"{session_key.safe_name()}:kb-image-select",
+        )
+        indexes = self._parse_selected_segment_indexes(selection.content or "", len(image_segments))
+        if not indexes:
+            retry_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Return only valid segment numbers separated by commas. "
+                        "Do not include any words or explanation."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "You must choose one or more segment numbers from the list below.\n\n"
+                        f"{numbered_segments}"
+                    ),
+                },
+            ]
+            retry = await self.provider.chat(
+                messages=retry_messages,
+                model=self.model,
+                session_id=f"{session_key.safe_name()}:kb-image-select-retry",
+            )
+            indexes = self._parse_selected_segment_indexes(retry.content or "", len(image_segments))
+        return [image_segments[index - 1] for index in indexes]
+
+    async def _finalize_kb_response(
+        self, draft_content: str, session_key: SessionKey, messages: list[dict]
+    ) -> str:
+        """Rewrite a KB draft into one direct user-facing answer."""
+        if not self.context._is_knowledge_base_mode() or not draft_content:
+            return draft_content
+
+        image_evidence_blocks = self._extract_image_evidence_blocks(messages)
+        image_evidence_segments = self._build_image_evidence_segments(image_evidence_blocks)
+        selected_image_segments = await self._select_relevant_image_segments(
+            draft_content, image_evidence_segments, session_key
+        )
+        should_include_images = bool(selected_image_segments)
+
+        preserve_block = ""
+        if should_include_images:
+            preserve_block = (
+                "\n\nThe tool evidence below already preserves the association between explanatory "
+                "text and screenshots. When composing the final reply, keep the relevant image "
+                "Markdown lines exactly as written and keep each image near the text it illustrates. "
+                "Do not move all images to the end.\n\n"
+                "Image-aware evidence:\n"
+                + "\n\n---\n\n".join(selected_image_segments)
+            )
+
+        final_messages = [
+            {
+                "role": "system",
+                "content": self.context.build_kb_final_response_system_prompt(),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Rewrite the following draft into one direct final reply for the user.\n"
+                    "Remove any mention of searching, reading documents, internal progress, or tool usage.\n\n"
+                    f"Draft:\n{draft_content}{preserve_block}"
+                ),
+            },
+        ]
+
+        response = await self.provider.chat(
+            messages=final_messages,
+            model=self.model,
+            session_id=f"{session_key.safe_name()}:kb-final",
+        )
+        final_content = response.content or draft_content
+
+        allowed_image_lines: list[str] = []
+        for block in selected_image_segments:
+            allowed_image_lines.extend(self._extract_send_image_lines_from_text(block))
+        allowed_image_lines = list(dict.fromkeys(allowed_image_lines))
+
+        if allowed_image_lines:
+            allowed_set = set(allowed_image_lines)
+            output_image_lines = self._extract_send_image_lines_from_text(final_content)
+            unexpected_lines = [line for line in output_image_lines if line not in allowed_set]
+            if unexpected_lines:
+                correction_messages = [
+                    {
+                        "role": "system",
+                        "content": self.context.build_kb_final_response_system_prompt(),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Rewrite the final reply again.\n"
+                            "You used Markdown image lines that were not present in the evidence.\n"
+                            "You may use only the exact image Markdown lines listed below, and no other send:// references.\n\n"
+                            "Allowed image Markdown lines:\n"
+                            + "\n".join(allowed_image_lines)
+                            + "\n\nReply draft to correct:\n"
+                            + final_content
+                        ),
+                    },
+                ]
+                correction = await self.provider.chat(
+                    messages=correction_messages,
+                    model=self.model,
+                    session_id=f"{session_key.safe_name()}:kb-final-correct",
+                )
+                final_content = correction.content or final_content
+
+        return final_content
 
     @trace(
         name="process_message",
@@ -500,6 +784,7 @@ class AgentLoop:
                 sender_id=msg.sender_id,
                 is_group_chat=is_group_chat,
                 eval=self._eval,
+                config=self.config,
             )
 
             # Build initial messages (use get_history for LLM-formatted messages)
@@ -753,3 +1038,4 @@ Respond with ONLY valid JSON, no markdown fences."""
 
         response = await self._process_message(msg)
         return response.content if response else ""
+    SEND_IMAGE_LINE_RE = re.compile(r"!\[[^\]]*\]\((send://[^)\s]+)\)")
