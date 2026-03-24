@@ -40,7 +40,6 @@ Do not mention retrieval, search, tools, internal files, chapters, prompts, or i
 Do not narrate what you found, do not say you are about to answer, and do not repeat the answer.
 Do not introduce yourself unless the user explicitly asked who you are or what you can do.
 If the evidence only supports part of the answer, answer that supported part and briefly note the limit.
-Preserve any literal Markdown image lines like ![alt](send://...) exactly when they are useful.
 Return the final reply only."""
 
 DEFAULT_TOOL_REFLECTION_PROMPT = "Reflect on the results and decide next steps."

@@ -1,13 +1,13 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 """
-OpenAI-compatible Rerank API Client.
+HTTP rerank client for OpenAI-compatible and DashScope-native endpoints.
 
-Supports third-party rerank services like Alibaba Cloud DashScope (qwen3-rerank)
-via api_key + api_base configuration.
+Supports third-party rerank services like Alibaba Cloud DashScope via
+api_key + api_base configuration.
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -18,9 +18,10 @@ logger = get_logger(__name__)
 
 class OpenAIRerankClient:
     """
-    OpenAI-compatible rerank API client using Bearer token auth.
+    Rerank API client using Bearer token auth.
 
-    Compatible with services like Alibaba Cloud DashScope.
+    Compatible with OpenAI/Cohere-style rerank endpoints and Alibaba Cloud
+    DashScope's native rerank HTTP endpoint.
     """
 
     def __init__(self, api_key: str, api_base: str, model_name: str):
@@ -33,8 +34,44 @@ class OpenAIRerankClient:
             model_name: Model name to use for reranking
         """
         self.api_key = api_key
-        self.api_base = api_base
+        self.api_base = api_base.rstrip("/")
         self.model_name = model_name
+
+    def _uses_dashscope_native_shape(self) -> bool:
+        """Whether api_base points to DashScope's native rerank endpoint."""
+        return "/api/v1/services/rerank/" in self.api_base
+
+    def _build_request_body(self, query: str, documents: List[str]) -> Dict[str, Any]:
+        """Build the request body for the configured rerank endpoint."""
+        if self._uses_dashscope_native_shape():
+            return {
+                "model": self.model_name,
+                "input": {
+                    "query": query,
+                    "documents": documents,
+                },
+            }
+
+        return {
+            "model": self.model_name,
+            "query": query,
+            "documents": documents,
+        }
+
+    @staticmethod
+    def _extract_results(result: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        """Extract rerank results from known response shapes."""
+        results = result.get("results")
+        if results is not None:
+            return results
+
+        output = result.get("output")
+        if isinstance(output, dict):
+            nested_results = output.get("results")
+            if nested_results is not None:
+                return nested_results
+
+        return None
 
     def rerank_batch(self, query: str, documents: List[str]) -> Optional[List[float]]:
         """
@@ -51,11 +88,7 @@ class OpenAIRerankClient:
         if not documents:
             return []
 
-        req_body = {
-            "model": self.model_name,
-            "query": query,
-            "documents": documents,
-        }
+        req_body = self._build_request_body(query, documents)
 
         try:
             response = requests.post(
@@ -70,8 +103,9 @@ class OpenAIRerankClient:
             response.raise_for_status()
             result = response.json()
 
-            # Standard OpenAI/Cohere rerank format: results[].{index, relevance_score}
-            results = result.get("results")
+            # OpenAI-compatible shape uses top-level results; DashScope native
+            # rerank nests results under output.results.
+            results = self._extract_results(result)
             if not results:
                 logger.warning(f"[OpenAIRerankClient] Unexpected response format: {result}")
                 return None
@@ -98,6 +132,26 @@ class OpenAIRerankClient:
             logger.debug(f"[OpenAIRerankClient] Reranked {len(documents)} documents")
             return scores
 
+        except requests.HTTPError as e:
+            response = e.response
+            if response is not None:
+                request_id = response.headers.get("x-request-id") or response.headers.get(
+                    "x-dashscope-request-id"
+                )
+                try:
+                    error_payload = response.json()
+                except ValueError:
+                    error_payload = response.text
+
+                logger.error(
+                    "[OpenAIRerankClient] Rerank failed: status=%s request_id=%s body=%s",
+                    response.status_code,
+                    request_id,
+                    error_payload,
+                )
+            else:
+                logger.error(f"[OpenAIRerankClient] Rerank failed: {e}")
+            return None
         except Exception as e:
             logger.error(f"[OpenAIRerankClient] Rerank failed: {e}")
             return None

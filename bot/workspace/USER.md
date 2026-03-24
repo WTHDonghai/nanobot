@@ -1,49 +1,62 @@
-# User Profile
+# User
 
-Information about the user to help personalize interactions.
+用于个性化互动的用户信息
 
-## Basic Information
+基本信息
 
-- **Name**: (your name)
-- **Timezone**: (your timezone, e.g., UTC+8)
-- **Language**: (preferred language)
+- 姓名：（你的名字）
 
-## Preferences
+- 时区：（你的时区，例如 UTC+8）
 
-### Communication Style
+- 语言：偏好语言
 
-- [ ] Casual
-- [ ] Professional
-- [ ] Technical
+偏好设置
 
-### Response Length
+沟通风格
 
-- [ ] Brief and concise
-- [ ] Detailed explanations
-- [ ] Adaptive based on question
+[] 轻松随意
 
-### Technical Level
+[] 专业正式
 
-- [ ] Beginner
-- [ ] Intermediate
-- [ ] Expert
+[] 技术严谨
 
-## Work Context
+回复长度
 
-- **Primary Role**: (your role, e.g., developer, researcher)
-- **Main Projects**: (what you're working on)
-- **Tools You Use**: (IDEs, languages, frameworks)
+[] 简洁精炼
 
-## Topics of Interest
+[] 详细讲解
 
-- 
-- 
-- 
+[] 根据问题自适应
 
-## Special Instructions
+技术水平
 
-- For knowledge-base, SOP, and how-to questions, prefer including relevant images in the reply when sendable images are available and they help the user understand the steps.
-- Keep images aligned with the corresponding step or explanation. Do not include unrelated screenshots just to add images.
-- When there are many candidate images, prioritize the most helpful ones instead of sending every image.
-- In user-facing replies, do not mention internal platform names or workflow details such as OpenViking, retrieval, memory search, tool calls, or resource generation.
+[] 初学者
+
+[] 中级
+
+[] 专业/专家
+
+工作场景
+
+- 主要角色：（你的职位，例如开发者、研究员）
+
+- 主要项目：当前负责的工作内容
+
+- 使用工具：IDE、编程语言、框架等
+
+感兴趣的主题
+
+-
+
+-
+
+-
+
+特殊说明
+
+- 对于知识库、标准作业流程（SOP）及操作指南类问题，在可发送图片且有助于理解步骤时，回复中优先附上相关图片。
+
+- 图片需与对应步骤或说明内容匹配，不要添加无关截图。
+
+- 若有多个可选图片，优先选择最有帮助的，无需全部发送。
 

@@ -465,6 +465,22 @@ AST 提取支持：Python、JavaScript/TypeScript、Rust、Go、Java、C/C++。�
 }
 ```
 
+**DashScope 原生 rerank 接口（如北京区 `qwen3-vl-rerank` / `gte-rerank-v2`）：**
+
+```json
+{
+  "rerank": {
+    "provider": "openai",
+    "api_key": "your-api-key",
+    "api_base": "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
+    "model": "qwen3-vl-rerank",
+    "threshold": 0.1
+  }
+}
+```
+
+说明：`provider` 仍然使用 `"openai"`，但客户端会根据 `api_base` 自动切换到 DashScope 原生请求/响应格式。
+
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `provider` | str | `"volcengine"` 或 `"openai"` |

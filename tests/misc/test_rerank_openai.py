@@ -16,8 +16,15 @@ class TestOpenAIRerankClient:
     def _make_client(self):
         return OpenAIRerankClient(
             api_key="test-key",
-            api_base="https://dashscope.aliyuncs.com/api/v1/services/rerank",
+            api_base="https://dashscope.aliyuncs.com/compatible-api/v1/reranks",
             model_name="qwen3-rerank",
+        )
+
+    def _make_dashscope_native_client(self):
+        return OpenAIRerankClient(
+            api_key="test-key",
+            api_base="https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
+            model_name="qwen3-vl-rerank",
         )
 
     def test_rerank_batch_success(self):
@@ -141,12 +148,55 @@ class TestOpenAIRerankClient:
             client.rerank_batch("my query", ["doc1"])
 
         call_kwargs = mock_post.call_args
-        assert call_kwargs.kwargs["url"] == "https://dashscope.aliyuncs.com/api/v1/services/rerank"
+        assert call_kwargs.kwargs["url"] == "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
         assert call_kwargs.kwargs["headers"]["Authorization"] == "Bearer test-key"
         body = call_kwargs.kwargs["json"]
         assert body["model"] == "qwen3-rerank"
         assert body["query"] == "my query"
         assert body["documents"] == ["doc1"]
+
+    def test_rerank_batch_dashscope_native_success(self):
+        client = self._make_dashscope_native_client()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "output": {
+                "results": [
+                    {"index": 0, "relevance_score": 0.9},
+                    {"index": 1, "relevance_score": 0.3},
+                    {"index": 2, "relevance_score": 0.7},
+                ]
+            }
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("openviking_cli.utils.rerank_openai.requests.post", return_value=mock_response):
+            scores = client.rerank_batch("test query", ["doc1", "doc2", "doc3"])
+
+        assert scores == [0.9, 0.3, 0.7]
+
+    def test_rerank_batch_dashscope_native_sends_nested_request(self):
+        client = self._make_dashscope_native_client()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "output": {"results": [{"index": 0, "relevance_score": 0.8}]}
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch(
+            "openviking_cli.utils.rerank_openai.requests.post", return_value=mock_response
+        ) as mock_post:
+            client.rerank_batch("my query", ["doc1"])
+
+        call_kwargs = mock_post.call_args
+        assert (
+            call_kwargs.kwargs["url"]
+            == "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+        )
+        assert call_kwargs.kwargs["headers"]["Authorization"] == "Bearer test-key"
+        body = call_kwargs.kwargs["json"]
+        assert body["model"] == "qwen3-vl-rerank"
+        assert body["input"]["query"] == "my query"
+        assert body["input"]["documents"] == ["doc1"]
 
     def test_from_config(self):
         config = RerankConfig(

@@ -490,6 +490,22 @@ Reranking model for search result refinement.
 }
 ```
 
+**DashScope native rerank endpoint (for example, Beijing `qwen3-vl-rerank` or `gte-rerank-v2`):**
+
+```json
+{
+  "rerank": {
+    "provider": "openai",
+    "api_key": "your-api-key",
+    "api_base": "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
+    "model": "qwen3-vl-rerank",
+    "threshold": 0.1
+  }
+}
+```
+
+Note: `provider` remains `"openai"`, but the client auto-detects the DashScope-native request and response shape from `api_base`.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `provider` | str | `"volcengine"` or `"openai"` |
