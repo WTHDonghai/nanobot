@@ -3,28 +3,30 @@
 from typing import TYPE_CHECKING, Callable
 
 from vikingbot.agent.tools.cron import CronTool
-from vikingbot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
+from vikingbot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from vikingbot.agent.tools.image import ImageGenerationTool
 from vikingbot.agent.tools.message import MessageTool
 from vikingbot.agent.tools.ov_file import (
-    VikingReadTool,
-    VikingListTool,
-    VikingSearchTool,
-    VikingGrepTool,
-    VikingGlobTool,
-    VikingSearchUserMemoryTool,
-    VikingMemoryCommitTool,
     VikingAddResourceTool,
+    VikingGlobTool,
+    VikingGrepTool,
+    VikingListTool,
+    VikingMemoryCommitTool,
+    VikingMultiReadTool,
+    VikingReadTool,
+    VikingSearchTool,
 )
 from vikingbot.agent.tools.registry import ToolRegistry
 from vikingbot.agent.tools.shell import ExecTool
 from vikingbot.agent.tools.web import WebFetchTool
 from vikingbot.agent.tools.websearch import WebSearchTool
-from vikingbot.config.loader import load_config
 from vikingbot.config.schema import CapabilityProfile
 
 if TYPE_CHECKING:
-    from vikingbot.agent.tools.spawn import SpawnTool
+    from vikingbot.bus.events import OutboundMessage
+    from vikingbot.config.schema import Config
+    from vikingbot.cron.service import CronService
+    from vikingbot.subagent.manager import SubagentManager
 
 
 def register_default_tools(
@@ -97,26 +99,20 @@ def register_default_tools(
     # Open Viking tools
     if include_viking_tools:
         registry.register(VikingReadTool())
+        registry.register(VikingMultiReadTool())
         registry.register(VikingListTool())
         registry.register(VikingSearchTool())
         registry.register(VikingGrepTool())
         registry.register(VikingGlobTool())
-        registry.register(VikingSearchUserMemoryTool())
         registry.register(VikingMemoryCommitTool())
         if not config.read_only:
             registry.register(VikingAddResourceTool())
 
-    # Image generation tool
+    # Image generation tool currently returns a disabled/stub response.
     if include_image_tool:
-        agent_config = load_config().agents
-        provider_api_key = agent_config.api_key if agent_config else None
-        provider_api_base = agent_config.api_base if agent_config else None
-        gen_image_model = agent_config.gen_image_model
         registry.register(
             ImageGenerationTool(
-                gen_image_model=gen_image_model,
-                api_key=provider_api_key,
-                api_base=provider_api_base,
+                gen_image_model=config.agents.gen_image_model,
                 send_callback=send_callback,
             )
         )

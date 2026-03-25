@@ -1,9 +1,10 @@
 """OpenViking file system tools: read, write, list, search resources."""
 
+import asyncio
 from abc import ABC
 from pathlib import Path
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import httpx
 from loguru import logger
@@ -25,7 +26,6 @@ class OVFileTool(Tool, ABC):
         if self._client is None:
             self._client = await VikingClient.create(tool_context.workspace_id)
         return self._client
-
 
 class VikingReadTool(OVFileTool):
     """Tool to read content from Viking resources."""
@@ -176,8 +176,6 @@ class VikingReadTool(OVFileTool):
             ".svg",
             ".tiff",
         }
-
-
 class VikingListTool(OVFileTool):
     """Tool to list Viking resources."""
 
@@ -187,7 +185,7 @@ class VikingListTool(OVFileTool):
 
     @property
     def description(self) -> str:
-        return "List resources in a OpenViking path."
+        return "List resources in a OpenViking folder path."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -271,7 +269,8 @@ class VikingSearchTool(OVFileTool):
     ) -> str:
         try:
             client = await self._get_client(tool_context)
-            results = await client.search(query, target_uri=target_uri)
+            search_client = getattr(client, 'admin_user_client', client)
+            results = await search_client.search(query, target_uri=target_uri)
 
             if not results:
                 return f"No results found for query: {query}"
@@ -512,7 +511,8 @@ class VikingGrepTool(OVFileTool):
 
     @property
     def description(self) -> str:
-        return "Search Viking resources using regex patterns (like grep)."
+        return ("Search Viking resources using regex patterns (like grep). Supports multiple patterns to search concurrently."
+                "Please avoid repeated calls with similar queries as much as possible.")
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -524,8 +524,9 @@ class VikingGrepTool(OVFileTool):
                     "description": "The whole Viking URI to search within (e.g., viking://resources/)",
                 },
                 "pattern": {
-                    "type": "string",
-                    "description": "Regex pattern to search for",
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Regex pattern or array of regex patterns to search for",
                 },
                 "case_insensitive": {
                     "type": "boolean",
@@ -540,37 +541,70 @@ class VikingGrepTool(OVFileTool):
         self,
         tool_context: "ToolContext",
         uri: str,
-        pattern: str,
+        pattern: Union[str, list[str]],
         case_insensitive: bool = False,
         **kwargs: Any,
     ) -> str:
         try:
             client = await self._get_client(tool_context)
-            result = await client.grep(uri, pattern, case_insensitive=case_insensitive)
+            patterns = [pattern] if isinstance(pattern, str) else pattern
 
-            if isinstance(result, dict):
-                matches = result.get("matches", [])
-                count = result.get("count", 0)
-            else:
-                matches = getattr(result, "matches", [])
-                count = getattr(result, "count", 0)
+            # Limit concurrent requests to avoid overwhelming the server and memory
+            max_concurrent = 10
+            semaphore = asyncio.Semaphore(max_concurrent)
 
-            if not matches:
-                return f"No matches found for pattern: {pattern}"
+            async def run_grep(p: str) -> tuple[str, list[Any]]:
+                async with semaphore:
+                    try:
+                        result = await client.grep(uri, p, case_insensitive=case_insensitive)
+                        if isinstance(result, dict):
+                            matches = result.get("matches", [])
+                        else:
+                            matches = getattr(result, "matches", [])
+                        return (p, matches)
+                    except Exception as e:
+                        logger.warning(f"Error searching for pattern '{p}': {e}")
+                        return (p, [])
 
-            display_count = len(matches)
-            result_lines = [f"Found {display_count} match{'es' if display_count != 1 else ''}:"]
-            for match in matches:
-                if isinstance(match, dict):
-                    match_uri = match.get("uri", "unknown")
-                    line = match.get("line", "?")
-                    content = match.get("content", "")
-                else:
-                    match_uri = getattr(match, "uri", "unknown")
-                    line = getattr(match, "line", "?")
-                    content = getattr(match, "content", "")
-                result_lines.append(f"\n📄 {match_uri}:{line}")
-                result_lines.append(f"   {content}")
+            tasks = [run_grep(p) for p in patterns]
+            results = await asyncio.gather(*tasks)
+
+            # Merge results by URI
+            merged_results: dict[str, list[tuple[int, str, str]]] = {}
+            total_matches = 0
+
+            for p, matches in results:
+                if not matches:
+                    continue
+                total_matches += len(matches)
+                for match in matches:
+                    if isinstance(match, dict):
+                        match_uri = match.get("uri", "unknown")
+                        line = match.get("line", "?")
+                        content = match.get("content", "")
+                    else:
+                        match_uri = getattr(match, "uri", "unknown")
+                        line = getattr(match, "line", "?")
+                        content = getattr(match, "content", "")
+
+                    if match_uri not in merged_results:
+                        merged_results[match_uri] = []
+                    merged_results[match_uri].append((line, content, p))
+
+            if not merged_results:
+                pattern_str = ", ".join(f"'{p}'" for p in patterns)
+                return f"No matches found for patterns: {pattern_str}"
+
+            # Format output
+            result_lines = [f"Found {total_matches} match{'es' if total_matches != 1 else ''} across {len(patterns)} pattern{'s' if len(patterns) != 1 else ''}:"]
+
+            for match_uri, matches in merged_results.items():
+                # Sort matches by line number
+                matches.sort(key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0)
+                result_lines.append(f"\n📄 {match_uri}")
+                for line, content, pattern_name in matches:
+                    result_lines.append(f"   Line {line} (pattern: '{pattern_name}'):")
+                    result_lines.append(f"   {content}")
 
             return "\n".join(result_lines)
         except Exception as e:
@@ -633,38 +667,6 @@ class VikingGlobTool(OVFileTool):
         except Exception as e:
             return f"Error searching Viking with glob: {str(e)}"
 
-
-class VikingSearchUserMemoryTool(OVFileTool):
-    """Tool to search Viking user memories"""
-
-    @property
-    def name(self) -> str:
-        return "user_memory_search"
-
-    @property
-    def description(self) -> str:
-        return "Search for user memories in OpenViking using a query."
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "The search query"}},
-            "required": ["query"],
-        }
-
-    async def execute(self, tool_context: ToolContext, query: str, **kwargs: Any) -> str:
-        try:
-            client = await self._get_client(tool_context)
-            results = await client.search_user_memory(query, tool_context.sender_id)
-
-            if not results:
-                return f"No results found for query: {query}"
-            return str(results)
-        except Exception as e:
-            return f"Error searching Viking: {str(e)}"
-
-
 class VikingMemoryCommitTool(OVFileTool):
     """Tool to commit messages to OpenViking session."""
 
@@ -713,3 +715,85 @@ class VikingMemoryCommitTool(OVFileTool):
         except Exception as e:
             logger.exception(f"Error processing message: {e}")
             return f"Error committing to Viking: {str(e)}"
+
+class VikingMultiReadTool(OVFileTool):
+    """Tool to read content from multiple Viking resources concurrently."""
+
+    @property
+    def name(self) -> str:
+        return "openviking_multi_read"
+
+    @property
+    def description(self) -> str:
+        return "Read full content from multiple OpenViking resources concurrently. Returns complete content for all URIs with no truncation."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "uris": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of Viking file URIs to read from (e.g., [\"viking://resources/path/123.md\", \"viking://resources/path/456.md\"])",
+                },
+            },
+            "required": ["uris"],
+        }
+
+    async def execute(
+        self,
+        tool_context: ToolContext,
+        uris: list[str],
+        **kwargs: Any,
+    ) -> str:
+        level = "read"  # 默认获取完整内容
+        try:
+            if not uris:
+                return "Error: No URIs provided."
+
+            client = await self._get_client(tool_context)
+            max_concurrent = 10
+            semaphore = asyncio.Semaphore(max_concurrent)
+
+            async def read_single_uri(uri: str) -> dict:
+                async with semaphore:
+                    try:
+                        content = await client.read_content(uri, level=level)
+                        return {
+                            "uri": uri,
+                            "content": content,
+                            "success": True,
+                        }
+                    except Exception as e:
+                        logger.warning(f"Error reading from {uri}: {e}")
+                        return {
+                            "uri": uri,
+                            "content": f"Error reading from Viking: {str(e)}",
+                            "success": False,
+                        }
+
+            # 并发读取所有URI
+            read_tasks = [read_single_uri(uri) for uri in uris]
+            results = await asyncio.gather(*read_tasks)
+
+            # 构建结果
+            result_lines = [f"Multi-read results for {len(uris)} resources (level: {level}):"]
+
+            for i, result in enumerate(results, 1):
+                uri = result["uri"]
+                content = result["content"]
+                success = result["success"]
+
+                result_lines.append(f"\n--- START OF {uri} ---")
+                if success:
+                    result_lines.append(content)
+                else:
+                    result_lines.append(f"ERROR: {content}")
+                result_lines.append(f"--- END OF {uri} ---")
+
+            return "\n".join(result_lines)
+
+        except Exception as e:
+            logger.exception(f"Error in VikingMultiReadTool: {e}")
+            return f"Error multi-reading Viking resources: {str(e)}"
