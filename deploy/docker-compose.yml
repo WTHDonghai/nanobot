@@ -1,0 +1,35 @@
+services:
+  openviking:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        # 版本号: git tag 或 commit hash
+        OPENVIKING_VERSION: ${OPENVIKING_VERSION:-0.0.0}
+    image: openviking:${OPENVIKING_VERSION:-latest}
+    container_name: openviking-${OPENVIKING_VERSION:-dev}
+    restart: unless-stopped
+    ports:
+      - "1933:1933"
+    volumes:
+      # 配置文件
+      - ./ov.conf:/app/ov.conf:ro
+      # 数据持久化
+      - openviking-data:/app/data
+    environment:
+      - OPENVIKING_CONFIG_FILE=/app/ov.conf
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1933/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    networks:
+      - openviking-net
+
+volumes:
+  openviking-data:
+
+networks:
+  openviking-net:
+    driver: bridge
