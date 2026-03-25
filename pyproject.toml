@@ -172,6 +172,9 @@ write_to = "openviking/_version.py"
 local_scheme = "no-local-version"
 tag_regex = "^(?:v)?(?:[a-zA-Z0-9_]+@)?(?P<version>[0-9]+(?:\\.[0-9]+)*)$"
 
+[tool.setuptools]
+package-dir = {"vikingbot" = "bot/vikingbot"}
+
 [tool.setuptools.packages.find]
 where = [".", "bot"]
 include = ["openviking*", "vikingbot*"]
