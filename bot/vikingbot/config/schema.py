@@ -397,6 +397,7 @@ class AgentsConfig(BaseModel):
     """Agent configuration."""
 
     model: str = "openai/doubao-seed-2-0-pro-260215"
+    fast_model: str = "dashscope/qwen-turbo"
     max_tool_iterations: int = 50
     memory_window: int = 50
     capability_profile: CapabilityProfile = CapabilityProfile.KNOWLEDGE_BASE

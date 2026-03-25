@@ -107,6 +107,11 @@ class AgentLoop:
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self.fast_model = (
+            config.agents.fast_model
+            if config and hasattr(config.agents, "fast_model")
+            else "dashscope/qwen-turbo"
+        )
         self.max_iterations = max_iterations
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
@@ -541,7 +546,7 @@ class AgentLoop:
         ]
         selection = await self.provider.chat(
             messages=selection_messages,
-            model=self.model,
+            model=self.fast_model,
             session_id=f"{session_key.safe_name()}:kb-image-select",
         )
         indexes = self._parse_selected_segment_indexes(selection.content or "", len(image_segments))
@@ -564,7 +569,7 @@ class AgentLoop:
             ]
             retry = await self.provider.chat(
                 messages=retry_messages,
-                model=self.model,
+                model=self.fast_model,
                 session_id=f"{session_key.safe_name()}:kb-image-select-retry",
             )
             indexes = self._parse_selected_segment_indexes(retry.content or "", len(image_segments))
@@ -573,7 +578,12 @@ class AgentLoop:
     async def _finalize_kb_response(
         self, draft_content: str, session_key: SessionKey, messages: list[dict]
     ) -> str:
-        """Rewrite a KB draft into one direct user-facing answer."""
+        """Rewrite a KB draft into one direct user-facing answer.
+
+        Optimization: if the draft contains no image evidence, skip the final
+        LLM rewrite entirely and return the draft as-is.  This removes one
+        expensive LLM round-trip from the critical path.
+        """
         if not self.context._is_knowledge_base_mode() or not draft_content:
             return draft_content
 
@@ -584,16 +594,18 @@ class AgentLoop:
         )
         should_include_images = bool(selected_image_segments)
 
-        preserve_block = ""
-        if should_include_images:
-            preserve_block = (
-                "\n\nThe tool evidence below already preserves the association between explanatory "
-                "text and screenshots. When composing the final reply, keep the relevant image "
-                "Markdown lines exactly as written and keep each image near the text it illustrates. "
-                "Do not move all images to the end.\n\n"
-                "Image-aware evidence:\n"
-                + "\n\n---\n\n".join(selected_image_segments)
-            )
+        # Fast path: no images → return draft directly, no rewrite LLM call needed
+        if not should_include_images:
+            return draft_content
+
+        preserve_block = (
+            "\n\nThe tool evidence below already preserves the association between explanatory "
+            "text and screenshots. When composing the final reply, keep the relevant image "
+            "Markdown lines exactly as written and keep each image near the text it illustrates. "
+            "Do not move all images to the end.\n\n"
+            "Image-aware evidence:\n"
+            + "\n\n---\n\n".join(selected_image_segments)
+        )
 
         final_messages = [
             {
@@ -647,7 +659,7 @@ class AgentLoop:
                 ]
                 correction = await self.provider.chat(
                     messages=correction_messages,
-                    model=self.model,
+                    model=self.fast_model,
                     session_id=f"{session_key.safe_name()}:kb-final-correct",
                 )
                 final_content = correction.content or final_content
@@ -798,7 +810,7 @@ class AgentLoop:
                     logger.info("[IntentRouter] Classifying user intent...")
                     decision = await classify_knowledge_base_intent(
                         provider=self.provider,
-                        model=self.model,
+                        model=self.fast_model,
                         user_message=msg.content,
                         session_id=session_key.safe_name(),
                     )
