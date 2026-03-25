@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from vikingbot.agent.context import ContextBuilder
+from vikingbot.agent.intent_router import (
+    IntentRoute,
+    classify_knowledge_base_intent,
+    generate_route_response,
+)
 from vikingbot.agent.memory import MemoryStore
 from vikingbot.agent.subagent import SubagentManager
 from vikingbot.agent.tools import register_default_tools
@@ -786,6 +791,48 @@ class AgentLoop:
                 eval=self._eval,
                 config=self.config,
             )
+
+            # Knowledge-base mode: classify intent before agent loop
+            if message_context._is_knowledge_base_mode():
+                try:
+                    logger.info("[IntentRouter] Classifying user intent...")
+                    decision = await classify_knowledge_base_intent(
+                        provider=self.provider,
+                        model=self.model,
+                        user_message=msg.content,
+                        session_id=session_key.safe_name(),
+                    )
+                    logger.info(
+                        f"[IntentRouter] label={decision.label} route={decision.route} "
+                        f"confidence={decision.confidence} reason={decision.reason}"
+                    )
+
+                    if decision.route != IntentRoute.AGENT:
+                        # Non-retrieval route: generate a direct response
+                        response_text = await generate_route_response(
+                            provider=self.provider,
+                            model=self.model,
+                            route_label=decision.label,
+                            user_message=msg.content,
+                            session_id=session_key.safe_name(),
+                        )
+                        # Save to session
+                        session.add_message("user", msg.content, sender_id=msg.sender_id)
+                        session.add_message("assistant", response_text, sender_id=msg.sender_id)
+                        await self.sessions.save(session)
+
+                        time_cost = round(time.time() - start_time, 2)
+                        return OutboundMessage(
+                            session_key=msg.session_key,
+                            content=response_text,
+                            metadata=msg.metadata,
+                            time_cost=time_cost,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[IntentRouter] Classification failed, falling back to agent loop: {e}",
+                        exc_info=True,
+                    )
 
             # Build initial messages (use get_history for LLM-formatted messages)
             messages = await message_context.build_messages(
