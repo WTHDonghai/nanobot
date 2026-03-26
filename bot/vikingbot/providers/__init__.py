@@ -1,6 +1,6 @@
 """LLM provider abstraction module."""
 
 from vikingbot.providers.base import LLMProvider, LLMResponse
-from vikingbot.providers.openai_compatible_provider import OpenAICompatibleProvider
+from vikingbot.providers.litellm_provider import LiteLLMProvider
 
-__all__ = ["LLMProvider", "LLMResponse", "OpenAICompatibleProvider"]
+__all__ = ["LLMProvider", "LLMResponse", "LiteLLMProvider"]

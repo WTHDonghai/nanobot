@@ -23,10 +23,10 @@ from vikingbot.agent.tools.websearch import WebSearchTool
 from vikingbot.config.schema import CapabilityProfile
 
 if TYPE_CHECKING:
+    from vikingbot.agent.subagent import SubagentManager
     from vikingbot.bus.events import OutboundMessage
     from vikingbot.config.schema import Config
     from vikingbot.cron.service import CronService
-    from vikingbot.subagent.manager import SubagentManager
 
 
 def register_default_tools(
@@ -72,6 +72,9 @@ def register_default_tools(
     exa_api_key = None  # TODO: Add to config if needed
     tavily_api_key = config.tools.web.search.tavily_api_key if config.tools.web.search else None
 
+    provider_api_key = config.agents.api_key or config.get_api_key(config.agents.gen_image_model)
+    provider_api_base = config.agents.api_base or config.get_api_base(config.agents.gen_image_model)
+    gen_image_model = config.agents.gen_image_model
     # File tools
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())
@@ -108,11 +111,13 @@ def register_default_tools(
         if not config.read_only:
             registry.register(VikingAddResourceTool())
 
-    # Image generation tool currently returns a disabled/stub response.
+    # Image generation tool
     if include_image_tool:
         registry.register(
             ImageGenerationTool(
-                gen_image_model=config.agents.gen_image_model,
+                gen_image_model=gen_image_model,
+                api_key=provider_api_key,
+                api_base=provider_api_base,
                 send_callback=send_callback,
             )
         )
