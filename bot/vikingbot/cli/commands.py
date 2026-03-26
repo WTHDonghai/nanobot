@@ -202,44 +202,30 @@ def main(
 
 
 def _make_provider(config, langfuse_client: None = None):
-    """Create a non-LiteLLM provider using an OpenAI-compatible HTTP API."""
-    del langfuse_client
-    from vikingbot.providers.openai_compatible_provider import OpenAICompatibleProvider
-    from vikingbot.providers.registry import find_by_model, find_by_name, find_gateway
+    """Create LiteLLM provider from configuration."""
+    from vikingbot.providers.litellm_provider import LiteLLMProvider
 
-    config = load_config()
     p = config.agents
+    model = p.model if p else None
+    api_key = p.api_key if p else None
+    api_base = p.api_base if p else None
+    provider_name = p.provider if p else None
+    extra_headers = p.extra_headers if p else {}
 
-    model = p.model
-    api_key = p.api_key or config.get_api_key(model)
-    api_base = p.api_base or config.get_api_base(model)
-    provider_name = p.provider or config.get_provider_name(model) or ""
-    extra_headers = p.extra_headers if p else None
-
-    resolved_spec = (
-        find_gateway(provider_name, api_key, api_base)
-        or find_by_name(provider_name)
-        or find_by_model(model)
-    )
-    resolved_provider_name = resolved_spec.name if resolved_spec else provider_name
+    if not model:
+        raise RuntimeError("No LLM model configured. Please set it in ~/.openviking/ov.conf")
 
     if not api_key and not model.startswith("bedrock/"):
         console.print("[yellow]Warning: No API key configured.[/yellow]")
         console.print("You can configure providers later in the Console UI.")
 
-    unsupported_direct_providers = {"anthropic"}
-    if resolved_provider_name in unsupported_direct_providers and not api_base:
-        raise RuntimeError(
-            f"vikingbot currently does not have a direct non-LiteLLM adapter for provider '{resolved_provider_name}'. "
-            "Please switch to an OpenAI-compatible endpoint or configure api_base explicitly."
-        )
-
-    return OpenAICompatibleProvider(
+    return LiteLLMProvider(
         api_key=api_key,
         api_base=api_base,
         default_model=model,
         extra_headers=extra_headers,
-        provider_name=resolved_provider_name or provider_name,
+        provider_name=provider_name,
+        langfuse_client=langfuse_client,
     )
 
 

@@ -44,8 +44,10 @@ COPY third_party/ third_party/
 COPY bot/ bot/
 
 # Install project and dependencies (triggers setup.py artifact builds + build_extension).
+# --locked ensures the lockfile is used and is consistent with pyproject.toml,
+# preventing silent re-resolution that could pull unexpected package versions.
 RUN --mount=type=cache,target=/root/.cache/uv,id=uv-${TARGETPLATFORM} \
-    uv sync --no-editable --extra bot-full
+    uv sync --locked --no-editable --extra bot-full
 
 # Stage 4: runtime
 FROM python:3.13-slim-trixie
