@@ -428,6 +428,34 @@ For OpenAI-compatible providers that return SSE (Server-Sent Events) format resp
 
 > **Note**: The OpenAI SDK requires `stream=true` to properly parse SSE responses. When using providers that force SSE format, you must set this option to `true`.
 
+### feishu
+
+Configuration for Feishu/Lark cloud document parsing. See [Resources](../api/02-resources.md) for supported URL patterns.
+
+```json
+{
+  "feishu": {
+    "app_id": "",
+    "app_secret": "",
+    "domain": "https://open.feishu.cn",
+    "max_rows_per_sheet": 1000,
+    "max_records_per_table": 1000
+  }
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `app_id` | str | Feishu app ID (can also be set via `FEISHU_APP_ID` env var) |
+| `app_secret` | str | Feishu app secret (can also be set via `FEISHU_APP_SECRET` env var) |
+| `domain` | str | Feishu API domain. Use `https://open.larksuite.com` for Lark international |
+| `max_rows_per_sheet` | int | Maximum rows to import per spreadsheet sheet (default: `1000`) |
+| `max_records_per_table` | int | Maximum records to import per bitable table (default: `1000`) |
+
+**Dependency**: `pip install 'openviking[bot-feishu]'`
+
+**Lark international**: For Lark URLs (`*.larksuite.com`), set `domain` to `https://open.larksuite.com`.
+
 ### code
 
 Controls how code files are summarized via `code_summary_mode`. Both config formats are equivalent:
@@ -591,6 +619,19 @@ Directly uses the AGFS Go implementation through a shared library.
 | `prefix` | str | Optional key prefix for namespace isolation | "" |
 | `use_ssl` | bool | Enable/disable SSL (HTTPS) for S3 connections | true |
 | `use_path_style` | bool | true for PathStyle used by MinIO and some S3-compatible services; false for VirtualHostStyle used by TOS and some S3-compatible services | true |
+| `directory_marker_mode` | str | How to persist directory markers: `none`, `empty`, or `nonempty` | `"empty"` |
+
+`directory_marker_mode` controls how AGFS materializes directory objects in S3:
+
+- `empty` is the default. AGFS writes a zero-byte directory marker and preserves empty-directory semantics.
+- `nonempty` writes a non-empty marker payload. Use this for S3-compatible services such as TOS that reject zero-byte directory markers.
+- `none` switches AGFS to prefix-style S3 semantics. AGFS does not create directory marker objects, so empty directories are not persisted and may not be discoverable until they contain at least one child object.
+
+Typical choices:
+
+- For MinIO, SeaweedFS, and most PathStyle backends, keep the default `empty`.
+- For TOS or other VirtualHostStyle backends that reject zero-byte directory markers, use `nonempty`.
+- If you want pure prefix-style behavior and do not need persisted empty directories, use `none`.
 
 </details>
 
@@ -632,7 +673,8 @@ Supports S3 storage in VirtualHostStyle mode, such as TOS.
         "region": "us-east-1",
         "access_key": "your-ak",
         "secret_key": "your-sk",
-        "use_path_style": false
+        "use_path_style": false,
+        "directory_marker_mode": "nonempty"
       }
     }
   }
@@ -786,6 +828,98 @@ Path locks are enabled by default and usually require no configuration. **The de
 
 For details on the lock mechanism, see [Path Locks and Crash Recovery](../concepts/09-transaction.md).
 
+## encryption Section
+
+Enable at-rest data encryption to ensure data security and isolation in multi-tenant environments. Encryption is completely transparent to users with no API changes.
+
+```json
+{
+  "encryption": {
+    "enabled": true,
+    "provider": "local|vault|volcengine_kms"
+  }
+}
+```
+
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `enabled` | bool | Whether encryption is enabled | `false` |
+| `provider` | str | Key provider: `"local"`, `"vault"`, or `"volcengine_kms"` | - |
+
+### Local (File)
+
+Suitable for development environments and single-node deployments:
+
+```json
+{
+  "encryption": {
+    "enabled": true,
+    "provider": "local",
+    "local": {
+      "key_file": "~/.openviking/master.key"
+    }
+  }
+}
+```
+
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `local.key_file` | str | Root key file path | `~/.openviking/master.key` |
+
+### Vault (HashiCorp Vault)
+
+Suitable for production and multi-cloud deployments:
+
+```json
+{
+  "encryption": {
+    "enabled": true,
+    "provider": "vault",
+    "vault": {
+      "address": "https://vault.example.com:8200",
+      "token": "vault-token-xxx",
+      "mount_point": "transit",
+      "key_name": "openviking-root"
+    }
+  }
+}
+```
+
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `vault.address` | str | Vault service address | - |
+| `vault.token` | str | Vault access token | - |
+| `vault.mount_point` | str | Transit engine mount point | `"transit"` |
+| `vault.key_name` | str | Root key name | `"openviking-root"` |
+
+### Volcengine KMS
+
+Suitable for Volcengine cloud deployments:
+
+```json
+{
+  "encryption": {
+    "enabled": true,
+    "provider": "volcengine_kms",
+    "volcengine_kms": {
+      "key_id": "kms-key-id-xxx",
+      "region": "cn-beijing",
+      "access_key": "AKLTxxxxxxxx",
+      "secret_key": "Tmpxxxxxxxx"
+    }
+  }
+}
+```
+
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `volcengine_kms.key_id` | str | KMS key ID | - |
+| `volcengine_kms.region` | str | Region | `"cn-beijing"` |
+| `volcengine_kms.access_key` | str | Volcengine Access Key | - |
+| `volcengine_kms.secret_key` | str | Volcengine Secret Key | - |
+
+For detailed encryption explanations, see [Data Encryption](../concepts/10-encryption.md). For complete usage instructions, see [Encryption Guide](./08-encryption.md).
+
 ## Full Schema
 
 ```json
@@ -816,6 +950,25 @@ For details on the lock mechanism, see [Path Locks and Crash Recovery](../concep
     "model": "string",
     "api_base": "string",
     "threshold": 0.1
+  },
+  "encryption": {
+    "enabled": false,
+    "provider": "local|vault|volcengine_kms",
+    "local": {
+      "key_file": "~/.openviking/master.key"
+    },
+    "vault": {
+      "address": "https://vault.example.com:8200",
+      "token": "string",
+      "mount_point": "transit",
+      "key_name": "openviking-root"
+    },
+    "volcengine_kms": {
+      "key_id": "string",
+      "region": "cn-beijing",
+      "access_key": "string",
+      "secret_key": "string"
+    }
   },
   "storage": {
     "workspace": "string",

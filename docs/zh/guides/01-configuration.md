@@ -403,6 +403,34 @@ OpenViking 使用 JSON 配置文件（`ov.conf`）进行设置。配置文件支
 
 > **注意**: OpenAI SDK 需要 `stream=true` 才能正确解析 SSE 响应。使用强制返回 SSE 格式的 provider 时，必须将此选项设置为 `true`。
 
+### feishu
+
+飞书/Lark 云端文档解析配置。支持的 URL 格式详见[资源管理](../api/02-resources.md)。
+
+```json
+{
+  "feishu": {
+    "app_id": "",
+    "app_secret": "",
+    "domain": "https://open.feishu.cn",
+    "max_rows_per_sheet": 1000,
+    "max_records_per_table": 1000
+  }
+}
+```
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `app_id` | str | 飞书应用 ID（也可通过 `FEISHU_APP_ID` 环境变量设置） |
+| `app_secret` | str | 飞书应用密钥（也可通过 `FEISHU_APP_SECRET` 环境变量设置） |
+| `domain` | str | 飞书 API 域名。Lark 国际版请设为 `https://open.larksuite.com` |
+| `max_rows_per_sheet` | int | 电子表格每个 sheet 最大导入行数（默认 `1000`） |
+| `max_records_per_table` | int | 多维表格每个表最大导入记录数（默认 `1000`） |
+
+**依赖**：`pip install 'openviking[bot-feishu]'`
+
+**Lark 国际版**：对于 Lark URL（`*.larksuite.com`），请将 `domain` 设为 `https://open.larksuite.com`。
+
 ### code
 
 通过 `code_summary_mode` 控制代码文件的摘要生成方式。以下两种写法等价：
@@ -567,6 +595,19 @@ AST 提取支持：Python、JavaScript/TypeScript、Rust、Go、Java、C/C++。�
 | `prefix` | str | 用于命名空间隔离的可选键前缀 | "" |
 | `use_ssl` | bool | 为 S3 连接启用/禁用 SSL（HTTPS） | true |
 | `use_path_style` | bool | true 表示对 MinIO 和某些 S3 兼容服务使用 PathStyle；false 表示对 TOS 和某些 S3 兼容服务使用 VirtualHostStyle | true |
+| `directory_marker_mode` | str | 目录 marker 的持久化方式，可选 `none`、`empty`、`nonempty` | `"empty"` |
+
+`directory_marker_mode` 用来控制 AGFS 在 S3 中如何落目录对象：
+
+- `empty` 是默认值。AGFS 会写入 0 字节目录 marker，并保留空目录语义。
+- `nonempty` 会写入非空目录 marker。对于 TOS 这类拒绝 0 字节目录 marker 的 S3 兼容后端，应使用这个模式。
+- `none` 会让 AGFS 采用更接近原生 S3 prefix 的目录语义，不再创建目录 marker 对象。此时空目录不会被持久化，只有目录下至少存在一个子对象后，相关目录才可能被发现。
+
+典型选择：
+
+- 对 MinIO、SeaweedFS 以及大多数 PathStyle 后端，保持默认 `empty` 即可。
+- 对 TOS 或其他拒绝 0 字节目录 marker 的 VirtualHostStyle 后端，使用 `nonempty`。
+- 如果你想完全使用 prefix 风格行为，并且不需要持久化空目录，可以使用 `none`。
 
 </details>
 
@@ -608,7 +649,8 @@ AST 提取支持：Python、JavaScript/TypeScript、Rust、Go、Java、C/C++。�
         "region": "us-east-1",
         "access_key": "your-ak",
         "secret_key": "your-sk",
-        "use_path_style": false
+        "use_path_style": false,
+        "directory_marker_mode": "nonempty"
       }
     }
   }
@@ -741,6 +783,98 @@ HTTP 客户端（`SyncHTTPClient` / `AsyncHTTPClient`）和 CLI 工具连接远�
 
 启动方式和部署详情见 [服务部署](./03-deployment.md)，认证详情见 [认证](./04-authentication.md)。
 
+## encryption 段
+
+启用静态数据加密，确保多租户环境下的数据安全与隔离。加密功能对用户完全透明，API 无变化。
+
+```json
+{
+  "encryption": {
+    "enabled": true,
+    "provider": "local|vault|volcengine_kms"
+  }
+}
+```
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `enabled` | bool | 是否启用加密 | `false` |
+| `provider` | str | 密钥提供程序：`"local"`、`"vault"` 或 `"volcengine_kms"` | - |
+
+### Local（本地文件）
+
+适合开发环境和单节点部署：
+
+```json
+{
+  "encryption": {
+    "enabled": true,
+    "provider": "local",
+    "local": {
+      "key_file": "~/.openviking/master.key"
+    }
+  }
+}
+```
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `local.key_file` | str | 根密钥文件路径 | `~/.openviking/master.key` |
+
+### Vault（HashiCorp Vault）
+
+适合生产环境和多云部署：
+
+```json
+{
+  "encryption": {
+    "enabled": true,
+    "provider": "vault",
+    "vault": {
+      "address": "https://vault.example.com:8200",
+      "token": "vault-token-xxx",
+      "mount_point": "transit",
+      "key_name": "openviking-root"
+    }
+  }
+}
+```
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `vault.address` | str | Vault 服务地址 | - |
+| `vault.token` | str | Vault 访问令牌 | - |
+| `vault.mount_point` | str | Transit 引擎挂载点 | `"transit"` |
+| `vault.key_name` | str | 根密钥名称 | `"openviking-root"` |
+
+### Volcengine KMS（火山引擎）
+
+适合火山引擎云部署：
+
+```json
+{
+  "encryption": {
+    "enabled": true,
+    "provider": "volcengine_kms",
+    "volcengine_kms": {
+      "key_id": "kms-key-id-xxx",
+      "region": "cn-beijing",
+      "access_key": "AKLTxxxxxxxx",
+      "secret_key": "Tmpxxxxxxxx"
+    }
+  }
+}
+```
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `volcengine_kms.key_id` | str | KMS 密钥 ID | - |
+| `volcengine_kms.region` | str | 区域 | `"cn-beijing"` |
+| `volcengine_kms.access_key` | str | 火山引擎 Access Key | - |
+| `volcengine_kms.secret_key` | str | 火山引擎 Secret Key | - |
+
+加密功能的详细说明见 [数据加密](../concepts/10-encryption.md)，完整使用流程见 [加密指南](./08-encryption.md)。
+
 ## storage.transaction 段
 
 路径锁默认启用，通常无需配置。**默认行为是不等待**：若目标路径已被其他操作锁定，操作立即失败并抛出 `LockAcquisitionError`。若需要等待重试，请将 `lock_timeout` 设为正数。
@@ -793,6 +927,25 @@ HTTP 客户端（`SyncHTTPClient` / `AsyncHTTPClient`）和 CLI 工具连接远�
     "model": "string",
     "api_base": "string",
     "threshold": 0.1
+  },
+  "encryption": {
+    "enabled": false,
+    "provider": "local|vault|volcengine_kms",
+    "local": {
+      "key_file": "~/.openviking/master.key"
+    },
+    "vault": {
+      "address": "https://vault.example.com:8200",
+      "token": "string",
+      "mount_point": "transit",
+      "key_name": "openviking-root"
+    },
+    "volcengine_kms": {
+      "key_id": "string",
+      "region": "cn-beijing",
+      "access_key": "string",
+      "secret_key": "string"
+    }
   },
   "storage": {
     "workspace": "string",
