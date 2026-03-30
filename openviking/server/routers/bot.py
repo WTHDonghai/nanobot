@@ -54,6 +54,11 @@ def extract_auth_token(request: Request) -> Optional[str]:
 
 def require_auth_token(request: Request) -> str:
     """Return an auth token or raise 401 for bot proxy endpoints."""
+    # Check if auth is disabled (dev mode) via app state
+    if hasattr(request.app, "state") and getattr(request.app.state, "api_key_manager", None) is None:
+        if getattr(request.app.state, "config", None) and request.app.state.config.auth_mode != "trusted":
+            return "dev_mode_dummy_token"
+
     auth_token = extract_auth_token(request)
     if not auth_token:
         raise HTTPException(
@@ -94,6 +99,42 @@ async def health_check(request: Request):
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Bot service error: {e.response.text}",
         )
+
+
+@router.get("/images/{image_name:path}")
+async def proxy_image(image_name: str, request: Request):
+    """
+    Proxy an image request to the actual Bot API.
+    """
+    bot_url = get_bot_url()
+    
+    import mimetypes
+    media_type, _ = mimetypes.guess_type(image_name)
+    media_type = media_type or "application/octet-stream"
+
+    async def file_stream() -> AsyncGenerator[bytes, None]:
+        try:
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "GET",
+                    f"{bot_url}/bot/v1/images/{image_name}",
+                    timeout=30.0,
+                ) as response:
+                    # If Bot API returns an error, we can't raise HTTPException anymore
+                    # because the StreamingResponse has already started, but we can stop yielding.
+                    if response.status_code != 200:
+                        logger.error(f"Failed to fetch image from bot (status: {response.status_code})")
+                        return
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+        except Exception as e:
+            logger.error(f"Error streaming image {image_name}: {e}")
+            pass
+
+    return StreamingResponse(
+        file_stream(),
+        media_type=media_type,
+    )
 
 
 @router.post("/chat")
