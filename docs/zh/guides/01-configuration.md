@@ -735,6 +735,22 @@ openviking-server --config /path/to/ov.conf
 
 本文档上方各配置段（embedding、vlm、rerank、storage）均属于 `ov.conf`。SDK 嵌入模式和服务端共用此文件。
 
+如需配置 memory 相关行为，可在 `ov.conf` 中添加 `memory` 段：
+
+```json
+{
+  "memory": {
+    "agent_scope_mode": "user+agent"
+  }
+}
+```
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `agent_scope_mode` | Agent memory 命名空间模式：`"user+agent"` 按 `(user_id, agent_id)` 隔离；`"agent"` 仅按 `agent_id` 隔离，同一 agent 的不同用户共享 agent memory | `"user+agent"` |
+
+`agent_scope_mode` 只影响 `viking://agent/{agent_space}/memories/...` 这类 agent 级命名空间，不影响 `viking://user/{user_space}/memories/...` 下的 user memory。
+
 ### ovcli.conf
 
 HTTP 客户端（`SyncHTTPClient` / `AsyncHTTPClient`）和 CLI 工具连接远程服务端的配置文件：
@@ -743,6 +759,8 @@ HTTP 客户端（`SyncHTTPClient` / `AsyncHTTPClient`）和 CLI 工具连接远�
 {
   "url": "http://localhost:1933",
   "api_key": "your-secret-key",
+  "account": "acme",
+  "user": "alice",
   "agent_id": "my-agent",
   "output": "table"
 }
@@ -752,8 +770,16 @@ HTTP 客户端（`SyncHTTPClient` / `AsyncHTTPClient`）和 CLI 工具连接远�
 |------|------|--------|
 | `url` | 服务端地址 | （必填） |
 | `api_key` | API Key 认证（root key 或 user key） | `null`（无认证） |
+| `account` | 默认发送为 `X-OpenViking-Account` 的租户标识 | `null` |
+| `user` | 默认发送为 `X-OpenViking-User` 的用户标识 | `null` |
 | `agent_id` | Agent 标识，用于 agent space 隔离 | `null` |
 | `output` | 默认输出格式：`"table"` 或 `"json"` | `"table"` |
+
+也可以在单次命令里用 CLI 参数覆盖这些身份字段：
+
+```bash
+openviking --account acme --user alice --agent-id assistant-2 ls viking://
+```
 
 详见 [服务部署](./03-deployment.md)。
 
@@ -766,6 +792,7 @@ HTTP 客户端（`SyncHTTPClient` / `AsyncHTTPClient`）和 CLI 工具连接远�
   "server": {
     "host": "0.0.0.0",
     "port": 1933,
+    "auth_mode": "api_key",
     "root_api_key": "your-secret-root-key",
     "cors_origins": ["*"]
   }
@@ -776,10 +803,13 @@ HTTP 客户端（`SyncHTTPClient` / `AsyncHTTPClient`）和 CLI 工具连接远�
 |------|------|------|--------|
 | `host` | str | 绑定地址 | `0.0.0.0` |
 | `port` | int | 绑定端口 | `1933` |
-| `root_api_key` | str | Root API Key，启用多租户认证，不设则为开发模式 | `null` |
+| `auth_mode` | str | 认证模式：`"api_key"` 或 `"trusted"` | `"api_key"` |
+| `root_api_key` | str | Root API Key。在 `api_key` 模式下启用多租户认证 | `null` |
 | `cors_origins` | list | CORS 允许的来源 | `["*"]` |
 
-配置 `root_api_key` 后，服务端启用多租户认证。通过 Admin API 创建工作区和用户 key。不配置时为开发模式，不需要认证。
+`api_key` 模式使用 API Key 认证；`trusted` 模式信任上游网关或受信调用方注入的 `X-OpenViking-Account` / `X-OpenViking-User` 请求头。
+
+配置 `root_api_key` 后，服务端启用多租户认证。通过 Admin API 创建工作区和用户 key。只有在 `auth_mode = "api_key"` 且未配置 `root_api_key` 时，服务端才会进入开发模式。
 
 启动方式和部署详情见 [服务部署](./03-deployment.md)，认证详情见 [认证](./04-authentication.md)。
 
