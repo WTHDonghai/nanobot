@@ -710,7 +710,12 @@ class VikingFS:
         async def _walk(current_path: str, current_rel: str, current_depth: int):
             if len(all_entries) >= node_limit or current_depth >= level_limit:
                 return
-            for entry in self._ls_entries(current_path):
+            try:
+                dir_entries = self._ls_entries(current_path)
+            except Exception as e:
+                logger.debug(f"[VikingFS._tree_original] Skipping inaccessible path {current_path}: {e}")
+                return
+            for entry in dir_entries:
                 if len(all_entries) >= node_limit:
                     break
                 name = entry.get("name", "")
