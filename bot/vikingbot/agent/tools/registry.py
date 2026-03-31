@@ -125,7 +125,6 @@ class ToolRegistry:
         session_key: SessionKey,
         sandbox_manager: SandboxManager | None = None,
         sender_id: str | None = None,
-        account_id: str | None = None,
     ) -> str:
         """
         Execute a tool by name with given parameters.
@@ -151,7 +150,6 @@ class ToolRegistry:
             session_key=session_key,
             sandbox_manager=sandbox_manager,
             sender_id=sender_id,
-            account_id=account_id,
         )
 
         # Langfuse tool call tracing - automatic for all tools

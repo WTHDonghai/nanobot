@@ -277,7 +277,6 @@
         </div>
         <div class="api-config">
             <input type="text" id="apiBaseUrl" class="api-input" value="http://127.0.0.1:1933" placeholder="API Base URL (e.g. http://127.0.0.1:1933)">
-            <input type="password" id="apiKey" class="api-input" style="width: 180px" placeholder="API Key (X-API-Key)">
             <input type="text" id="userId" class="api-input" value="test_user" style="width: 150px" title="Set this to match your DingTalk user ID to access the same knowledge base" placeholder="User ID">
         </div>
     </div>
@@ -439,19 +438,13 @@
         const activeBotMsg = createBotMessagePlaceholder();
         const baseUrl = apiBaseUrlInput.value.trim().replace(/\/$/, "");
 
-        const apiKey = document.getElementById('apiKey').value.trim();
-        const headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'text/event-stream'
-        };
-        if (apiKey) {
-            headers['X-API-Key'] = apiKey;
-        }
-
         try {
             const response = await fetch(`${baseUrl}/bot/v1/chat/stream`, {
                 method: 'POST',
-                headers: headers,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream'
+                },
                 body: JSON.stringify({
                     message: text,
                     session_id: sessionId,

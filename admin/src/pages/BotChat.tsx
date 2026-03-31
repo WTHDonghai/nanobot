@@ -85,12 +85,7 @@ const BotChat: React.FC = () => {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-        body: JSON.stringify({ 
-          message: userMsg, 
-          session_id: sessionId, 
-          user_id: selectedUserId,
-          account_id: selectedAccountId // Inject current account context dynamically
-        })
+        body: JSON.stringify({ message: userMsg, session_id: sessionId, user_id: selectedUserId })
       });
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -168,14 +163,7 @@ const BotChat: React.FC = () => {
             <div className="chat-bubble">
               {m.loading && !m.text ? (
                  <div className="typing-dots"><span/><span/><span/></div>
-              ) : (
-                 <div 
-                   className="markdown-body"
-                   dangerouslySetInnerHTML={{ 
-                     __html: (window as any).marked ? (window as any).marked.parse(m.text) : m.text 
-                   }} 
-                 />
-              )}
+              ) : m.text}
             </div>
           </div>
         ))}

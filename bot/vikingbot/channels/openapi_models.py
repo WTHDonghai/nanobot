@@ -44,7 +44,6 @@ class ChatRequest(BaseModel):
         default="default", description="Session ID (optional, will create new if not provided)"
     )
     user_id: Optional[str] = Field(default=None, description="User identifier (optional)")
-    account_id: Optional[str] = Field(default=None, description="Account identifier (optional)")
     stream: bool = Field(default=False, description="Whether to stream the response")
     context: Optional[List[ChatMessage]] = Field(
         default=None, description="Additional context messages"
