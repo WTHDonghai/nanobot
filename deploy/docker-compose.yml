@@ -2,7 +2,7 @@ services:
   openviking:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile
+      dockerfile: Dockerfile
       args:
         # 版本号: git tag 或 commit hash
         OPENVIKING_VERSION: ${OPENVIKING_VERSION:-0.0.0}

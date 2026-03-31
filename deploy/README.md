@@ -40,6 +40,47 @@ git push origin v1.2.3
 REGISTRY=registry.example.com/ ./scripts/build-docker.sh 1.2.3
 ```
 
+### 2.1 基础镜像与依赖缓存
+
+当前 `Dockerfile` 已拆成可复用的缓存层：
+
+- `build-base`：Go/Rust/uv/系统编译依赖
+- `py-deps`：基于 `uv.lock` 的 Python 依赖环境
+- `admin-deps`：基于 `admin/package-lock.json` 的前端依赖
+
+可以先单独构建这些层，再在正式构建时复用：
+
+```bash
+# 预构建工具链基础镜像
+IMAGE_NAME=openviking-build-base BUILD_TARGET=build-base ./scripts/build-docker.sh 2026.03
+
+# 预构建 Python 依赖镜像
+IMAGE_NAME=openviking-py-deps BUILD_TARGET=py-deps ./scripts/build-docker.sh uvlock-20260331
+
+# 预构建前端依赖镜像
+IMAGE_NAME=openviking-admin-deps BUILD_TARGET=admin-deps ./scripts/build-docker.sh npmlock-20260331
+```
+
+正式构建时，可将这些镜像作为基础层透传给 `buildx`：
+
+```bash
+BUILD_BASE_IMAGE=registry.example.com/openviking-build-base:2026.03 \
+PY_DEPS_IMAGE=registry.example.com/openviking-py-deps:uvlock-20260331 \
+ADMIN_DEPS_IMAGE=registry.example.com/openviking-admin-deps:npmlock-20260331 \
+REGISTRY=registry.example.com/ \
+./scripts/build-docker.sh 1.2.3
+```
+
+如果是 CI/CD 多机环境，建议同时开启 BuildKit 远程缓存：
+
+```bash
+CACHE_FROM=type=registry,ref=registry.example.com/openviking:buildcache \
+CACHE_TO=type=registry,ref=registry.example.com/openviking:buildcache,mode=max \
+REGISTRY=registry.example.com/ \
+PUSH=1 \
+./scripts/build-docker.sh 1.2.3
+```
+
 ### 3. 部署
 
 ```bash

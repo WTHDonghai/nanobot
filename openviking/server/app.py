@@ -223,10 +223,14 @@ def create_app(
     from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
 
-    root_dir = pathlib.Path(__file__).parent.parent.parent
-    admin_dist = root_dir / "admin" / "dist"
-    
-    if admin_dist.exists():
+    root_dir = pathlib.Path(__file__).resolve().parent.parent.parent
+    admin_dist_candidates = [
+        pathlib.Path("/app/admin/dist"),
+        root_dir / "admin" / "dist",
+    ]
+    admin_dist = next((path for path in admin_dist_candidates if path.exists()), None)
+
+    if admin_dist is not None:
         app.mount("/admin/assets", StaticFiles(directory=str(admin_dist / "assets")), name="admin_assets")
         
         @app.get("/admin")
