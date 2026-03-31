@@ -2,7 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Bot,
+  ChevronRight,
   History,
+  Loader2,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
@@ -10,6 +13,7 @@ import {
   SendHorizontal,
   Trash2,
   User,
+  Zap,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -78,12 +82,13 @@ type ChatMessage = {
   status?: string;
   loading?: boolean;
   createdAt?: string;
+  steps?: string[];
 };
 
 const WELCOME_TEXT = '你好！我是 XMS 技术支持专员。有什么可以帮助你？';
 const MAX_SESSION_CONTEXT_BUDGET = 100_000_000;
 
-const makeWelcomeMessages = (status = '请选择历史会话或开始新会话'): ChatMessage[] => [
+const makeWelcomeMessages = (status = ''): ChatMessage[] => [
   { key: 'welcome', role: 'bot', text: WELCOME_TEXT, status },
 ];
 
@@ -189,7 +194,7 @@ const deriveSessionTitleFromMessages = (sessionMessages: SessionContextMessage[]
     || sessionMessages.find((message) => getPrimaryTextFromMessage(message));
 
   if (!candidate) return '';
-  return getPrimaryTextFromMessage(candidate).slice(0, 80);
+  return getPrimaryTextFromMessage(candidate).slice(0, 200);
 };
 
 const renderMessageText = (parts: SessionContextPart[] = []): string => {
@@ -234,9 +239,47 @@ const readStoredSessionTitles = (storageKey: string | null): Record<string, stri
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     return Object.entries(parsed).reduce<Record<string, string>>((acc, [key, value]) => {
       if (typeof value !== 'string') return acc;
-      const normalizedValue = toSingleLine(value).slice(0, 80);
+      const normalizedValue = toSingleLine(value).slice(0, 200);
       if (!normalizedValue) return acc;
       acc[key] = normalizedValue;
+      return acc;
+    }, {});
+  } catch {
+    return {};
+  }
+};
+
+const readStoredSessionMessages = (storageKey: string | null): Record<string, ChatMessage[]> => {
+  if (!storageKey) return {};
+
+  try {
+    const raw = window.sessionStorage.getItem(storageKey);
+    if (!raw) return {};
+
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.entries(parsed).reduce<Record<string, ChatMessage[]>>((acc, [sessionId, value]) => {
+      if (!Array.isArray(value)) return acc;
+
+      const messages = value.reduce<ChatMessage[]>((items, entry, index) => {
+        if (!entry || typeof entry !== 'object') return items;
+
+        const record = entry as Record<string, unknown>;
+        const role = record.role === 'user' || record.role === 'bot' ? record.role : null;
+        const text = typeof record.text === 'string' ? record.text : null;
+        if (!role || text === null) return items;
+
+        items.push({
+          key: typeof record.key === 'string' ? record.key : `${sessionId}-${index}`,
+          role,
+          text,
+          status: typeof record.status === 'string' ? record.status : undefined,
+          loading: typeof record.loading === 'boolean' ? record.loading : undefined,
+          createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
+        });
+        return items;
+      }, []);
+
+      if (messages.length > 0) acc[sessionId] = messages;
       return acc;
     }, {});
   } catch {
@@ -300,7 +343,7 @@ const RenameModal = ({
             value={value}
             onChange={(e) => onChange(e.target.value)}
             placeholder={defaultTitle}
-            maxLength={80}
+            maxLength={200}
             autoFocus
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
@@ -341,8 +384,10 @@ const BotChat: React.FC = () => {
   const [sessionMutating, setSessionMutating] = useState(false);
   const [sessionError, setSessionError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null);
+  const [activeActionMenu, setActiveActionMenu] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const actionMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const sessionMessageCacheRef = useRef<Record<string, ChatMessage[]>>({});
@@ -354,10 +399,14 @@ const BotChat: React.FC = () => {
   }
 
   function resetInputHeight() {
-    if (inputRef.current) inputRef.current.style.height = 'auto';
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto';
+      inputRef.current.style.overflowY = 'hidden';
+    }
   }
 
-  function resetConversation(status = '请选择历史会话或开始新会话') {
+  function resetConversation(status = '') {
+    persistLastActiveSession(null);
     setSessionId(null);
     setActiveSessionMeta(null);
     setMessages(makeWelcomeMessages(status));
@@ -380,14 +429,109 @@ const BotChat: React.FC = () => {
     return `ov:bot:session-titles:${serverUrl}:${accountScope}:${userScope}`;
   }
 
+  function getSessionMessageCacheStorageKey(): string | null {
+    const accountScope = role === 'user' ? (accountId || selectedAccountId || 'default') : selectedAccountId;
+    const userScope = role === 'user' ? (selectedUserId || userId || '') : selectedUserId;
+    if (!serverUrl || !accountScope || !userScope) return null;
+    return `ov:bot:session-cache:${serverUrl}:${accountScope}:${userScope}`;
+  }
+
+  function getDerivedSessionTitleStorageKey(): string | null {
+    const accountScope = role === 'user' ? (accountId || selectedAccountId || 'default') : selectedAccountId;
+    const userScope = role === 'user' ? (selectedUserId || userId || '') : selectedUserId;
+    if (!serverUrl || !accountScope || !userScope) return null;
+    return `ov:bot:session-derived-titles:${serverUrl}:${accountScope}:${userScope}`;
+  }
+
+  function getLastActiveSessionStorageKey(): string | null {
+    const accountScope = role === 'user' ? (accountId || selectedAccountId || 'default') : selectedAccountId;
+    const userScope = role === 'user' ? (selectedUserId || userId || '') : selectedUserId;
+    if (!serverUrl || !accountScope || !userScope) return null;
+    return `ov:bot:last-session:${serverUrl}:${accountScope}:${userScope}`;
+  }
+
+  function persistLastActiveSession(nextSessionId: string | null) {
+    const storageKey = getLastActiveSessionStorageKey();
+    if (!storageKey) return;
+
+    try {
+      if (nextSessionId) {
+        window.sessionStorage.setItem(storageKey, nextSessionId);
+      } else {
+        window.sessionStorage.removeItem(storageKey);
+      }
+    } catch {
+      // Ignore browser storage quota and privacy mode errors.
+    }
+  }
+
+  function readLastActiveSession(): string | null {
+    const storageKey = getLastActiveSessionStorageKey();
+    if (!storageKey) return null;
+
+    try {
+      return window.sessionStorage.getItem(storageKey);
+    } catch {
+      return null;
+    }
+  }
+
+  function persistSessionMessageCache(cache: Record<string, ChatMessage[]>) {
+    const storageKey = getSessionMessageCacheStorageKey();
+    if (!storageKey) return;
+
+    try {
+      if (Object.keys(cache).length === 0) {
+        window.sessionStorage.removeItem(storageKey);
+      } else {
+        window.sessionStorage.setItem(storageKey, JSON.stringify(cache));
+      }
+    } catch {
+      // Ignore browser storage quota and privacy mode errors.
+    }
+  }
+
+  function updateSessionMessageCache(
+    updater: (prev: Record<string, ChatMessage[]>) => Record<string, ChatMessage[]>,
+  ) {
+    const next = updater(sessionMessageCacheRef.current);
+    sessionMessageCacheRef.current = next;
+    persistSessionMessageCache(next);
+  }
+
+  function setCachedSessionMessages(targetSessionId: string, nextMessages: ChatMessage[]) {
+    updateSessionMessageCache((prev) => ({
+      ...prev,
+      [targetSessionId]: nextMessages,
+    }));
+  }
+
+  function removeCachedSessionMessages(targetSessionId: string) {
+    updateSessionMessageCache((prev) => {
+      if (!prev[targetSessionId]) return prev;
+      const next = { ...prev };
+      delete next[targetSessionId];
+      return next;
+    });
+  }
+
   function rememberSessionTitle(targetSessionId: string, nextTitle: string, overwrite = false) {
-    const normalizedTitle = toSingleLine(nextTitle).slice(0, 80);
+    const normalizedTitle = toSingleLine(nextTitle).slice(0, 200);
     if (!normalizedTitle) return;
 
     setDerivedSessionTitles((prev) => {
       if (!overwrite && prev[targetSessionId]) return prev;
       if (prev[targetSessionId] === normalizedTitle) return prev;
-      return { ...prev, [targetSessionId]: normalizedTitle };
+      
+      const next = { ...prev, [targetSessionId]: normalizedTitle };
+      const storageKey = getDerivedSessionTitleStorageKey();
+      try {
+        if (storageKey) {
+          window.localStorage.setItem(storageKey, JSON.stringify(next));
+        }
+      } catch {}
+
+      return next;
     });
   }
 
@@ -409,7 +553,16 @@ const BotChat: React.FC = () => {
     return shortenSessionId(session.session_id);
   }
 
+  function toggleActionMenu(menuId: string) {
+    setActiveActionMenu((prev) => prev === menuId ? null : menuId);
+  }
+
+  function closeActionMenu() {
+    setActiveActionMenu(null);
+  }
+
   function openRenameDialog(targetSession: SessionSummary) {
+    closeActionMenu();
     setRenameTarget(targetSession);
     setRenameValue(getSessionTitle(targetSession));
   }
@@ -444,7 +597,7 @@ const BotChat: React.FC = () => {
 
   function confirmRenameSession() {
     if (!renameTarget) return;
-    const normalizedTitle = toSingleLine(renameValue).slice(0, 80);
+    const normalizedTitle = toSingleLine(renameValue).slice(0, 200);
     if (!normalizedTitle) return;
 
     updateRenamedSessionTitles((prev) => ({
@@ -551,11 +704,13 @@ const BotChat: React.FC = () => {
   async function handleNewSession() {
     if (loading || sessionReplayLoading || sessionMutating) return;
 
+    closeActionMenu();
     setSessionMutating(true);
     try {
       const nextSessionId = await requestNewSession();
       const welcomeMessages = makeWelcomeMessages('新会话已开始');
-      sessionMessageCacheRef.current[nextSessionId] = welcomeMessages;
+      setCachedSessionMessages(nextSessionId, welcomeMessages);
+      persistLastActiveSession(nextSessionId);
       setSessionId(nextSessionId);
       setActiveSessionMeta({ session_id: nextSessionId, message_count: 0 });
       setSessionError('');
@@ -574,11 +729,13 @@ const BotChat: React.FC = () => {
   async function handleSelectSession(targetSessionId: string) {
     if (loading || sessionReplayLoading || sessionMutating) return;
 
+    closeActionMenu();
     const requestId = ++replayRequestRef.current;
     const cachedMessages = sessionMessageCacheRef.current[targetSessionId];
     const cachedMeta = sessions.find((session) => session.session_id === targetSessionId) || null;
 
     if (cachedMessages?.length) {
+      persistLastActiveSession(targetSessionId);
       setSessionId(targetSessionId);
       setActiveSessionMeta(cachedMeta || { session_id: targetSessionId });
       setMessages(cachedMessages);
@@ -639,7 +796,8 @@ const BotChat: React.FC = () => {
         ? mapSessionMessages(mergedMessages)
         : (cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages));
 
-      sessionMessageCacheRef.current[targetSessionId] = nextMessages;
+      setCachedSessionMessages(targetSessionId, nextMessages);
+      persistLastActiveSession(targetSessionId);
       setSessionId(targetSessionId);
       setActiveSessionMeta(detail || { session_id: targetSessionId });
       setMessages(nextMessages);
@@ -670,11 +828,20 @@ const BotChat: React.FC = () => {
       );
 
       const deletedId = deleteTarget.session_id;
-      delete sessionMessageCacheRef.current[deletedId];
+      closeActionMenu();
+      removeCachedSessionMessages(deletedId);
       setDerivedSessionTitles((prev) => {
         if (!prev[deletedId]) return prev;
         const next = { ...prev };
         delete next[deletedId];
+
+        const storageKey = getDerivedSessionTitleStorageKey();
+        try {
+          if (storageKey) {
+            window.localStorage.setItem(storageKey, JSON.stringify(next));
+          }
+        } catch {}
+
         return next;
       });
       updateRenamedSessionTitles((prev) => {
@@ -707,8 +874,20 @@ const BotChat: React.FC = () => {
   }, [messages]);
 
   useEffect(() => {
+    if (!activeActionMenu) return undefined;
+
+    function handlePointerDown(event: MouseEvent) {
+      if (actionMenuRef.current?.contains(event.target as Node)) return;
+      closeActionMenu();
+    }
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [activeActionMenu]);
+
+  useEffect(() => {
     if (!sessionId) return;
-    sessionMessageCacheRef.current[sessionId] = messages;
+    setCachedSessionMessages(sessionId, messages);
   }, [sessionId, messages]);
 
   useEffect(() => {
@@ -750,23 +929,49 @@ const BotChat: React.FC = () => {
   }, [selectedAccountId, serverUrl, apiKey, role]);
 
   useEffect(() => {
-    const storageKey = getSessionTitleStorageKey();
-    setRenamedSessionTitles(readStoredSessionTitles(storageKey));
+    const renamedKey = getSessionTitleStorageKey();
+    if (renamedKey) {
+      setRenamedSessionTitles(readStoredSessionTitles(renamedKey));
+    } else {
+      setRenamedSessionTitles({});
+    }
+
+    const derivedKey = getDerivedSessionTitleStorageKey();
+    if (derivedKey) {
+      setDerivedSessionTitles(readStoredSessionTitles(derivedKey));
+    } else {
+      setDerivedSessionTitles({});
+    }
   }, [serverUrl, role, accountId, userId, selectedAccountId, selectedUserId]);
 
   useEffect(() => {
-    sessionMessageCacheRef.current = {};
+    const storageKey = getSessionMessageCacheStorageKey();
+    sessionMessageCacheRef.current = readStoredSessionMessages(storageKey);
+  }, [serverUrl, role, accountId, userId, selectedAccountId, selectedUserId]);
+
+  useEffect(() => {
     setSessions([]);
-    setDerivedSessionTitles({});
     setSessionQuery('');
     setSessionError('');
+    closeActionMenu();
     setDeleteTarget(null);
     setRenameTarget(null);
     setRenameValue('');
     setPreviewImage(null);
 
     if (selectedUserId) {
-      resetConversation('请选择历史会话或开始新会话');
+      const lastActiveSessionId = readLastActiveSession();
+      const cachedMessages = lastActiveSessionId ? sessionMessageCacheRef.current[lastActiveSessionId] : undefined;
+
+      if (lastActiveSessionId && cachedMessages?.length) {
+        setSessionId(lastActiveSessionId);
+        setActiveSessionMeta(null);
+        setMessages(cachedMessages);
+        setInput('');
+        resetInputHeight();
+      } else {
+        resetConversation('');
+      }
     } else {
       resetConversation('正在同步会话上下文');
     }
@@ -780,8 +985,8 @@ const BotChat: React.FC = () => {
       return;
     }
 
-    void loadSessions(null);
-  }, [serverUrl, apiKey, role, selectedAccountId, selectedUserId]);
+    void loadSessions(sessionId);
+  }, [serverUrl, apiKey, role, selectedAccountId, selectedUserId, sessionId]);
 
   const handleSend = async () => {
     if (!input.trim() || loading || !selectedUserId) return;
@@ -798,12 +1003,13 @@ const BotChat: React.FC = () => {
     setMessages((prev) => [
       ...prev,
       { key: userMessageKey, role: 'user', text: userMsg },
-      { key: botId, role: 'bot', text: '', status: '思考中...', loading: true },
+      { key: botId, role: 'bot', text: '', status: '思考中...', loading: true, steps: [] },
     ]);
 
     try {
       if (!activeSessionId) {
         activeSessionId = await requestNewSession();
+        persistLastActiveSession(activeSessionId);
         setSessionId(activeSessionId);
         setActiveSessionMeta({ session_id: activeSessionId, message_count: 0 });
       }
@@ -840,9 +1046,65 @@ const BotChat: React.FC = () => {
           try {
             const evt = JSON.parse(line.slice(6));
             let status = '思考中...';
-            if (evt.event === 'tool_call') status = '调用工具中...';
-            else if (evt.event === 'tool_result') status = '整理工具结果...';
-            else if (evt.event === 'response') status = 'Bot 回复';
+            if (evt.event === 'tool_call') {
+              let displayStatus = '正在调用工具...';
+              try {
+                let name = '';
+                let args: Record<string, any> = {};
+                
+                if (typeof evt.data === 'string') {
+                  const match = evt.data.match(/^([a-zA-Z0-9_]+)\((.*)\)$/s);
+                  if (match) {
+                    name = match[1];
+                    try { args = JSON.parse(match[2]); } catch {}
+                  }
+                }
+                if (!name) {
+                  name = evt.data?.name || '';
+                  const argsStr = evt.data?.arguments || evt.data?.args || '';
+                  try { args = typeof argsStr === 'string' && argsStr.startsWith('{') ? JSON.parse(argsStr) : argsStr || {}; } catch {}
+                }
+                
+                if (name.includes('search') || name.includes('检索')) {
+                  const query = args.query || args.keyword || args.q || '';
+                  displayStatus = query ? `正在搜索: "${query}"` : '正在检索资料库...';
+                } else if (name.includes('read_file') || name.includes('读取') || name.includes('read')) {
+                  const path = args.path || args.file_path || args.filename || args.uri || '';
+                  let filename = path.split('/').pop() || path;
+                  if (filename.endsWith('.md')) filename = filename.slice(0, -3);
+                  displayStatus = filename ? `正在读取文件: ${filename}` : '正在读取文件...';
+                } else if (name.includes('python') || name.includes('run_code')) {
+                  displayStatus = '正在运行代码进行计算...';
+                } else {
+                  displayStatus = name ? `正在执行: ${name}` : '正在调用工具...';
+                }
+              } catch {}
+              status = displayStatus;
+            } else if (evt.event === 'tool_result') {
+              let displayStatus = '处理结果中...';
+              try {
+                const dataStr = typeof evt.data === 'string' ? evt.data : JSON.stringify(evt.data);
+                if (dataStr.startsWith('FindResult')) {
+                  const uriMatches = Array.from(dataStr.matchAll(/uri='viking:\/\/resources\/(.*?)'/g));
+                  if (uriMatches.length > 0) {
+                    const fileNames = uriMatches.map((m: any) => (m[1].split('/').pop() || '').replace(/\.md$/, '')).filter(Boolean);
+                    const uniqueNames = Array.from(new Set(fileNames));
+                    if (uniqueNames.length > 0) {
+                      displayStatus = `提取到相关资源: ${uniqueNames.slice(0, 2).join('、')}${uniqueNames.length > 2 ? ' 等' : ''}`;
+                    } else {
+                      displayStatus = `找到 ${uriMatches.length} 份匹配资料`;
+                    }
+                  } else {
+                    displayStatus = '搜索完成，未找到直接相关的资料';
+                  }
+                } else if (dataStr.length > 20) {
+                   displayStatus = '已获取内容，正在分析归纳...';
+                }
+              } catch {}
+              status = displayStatus;
+            } else if (evt.event === 'response') {
+              status = 'Bot 回复';
+            }
 
             if (evt.event === 'error') {
               let detail = 'Bot 服务异常';
@@ -861,9 +1123,15 @@ const BotChat: React.FC = () => {
               finalContent = typeof evt.data === 'string' ? evt.data : JSON.stringify(evt.data);
             }
 
-            setMessages((prev) => prev.map((message) => (
-              message.key === botId ? { ...message, status, text: finalContent || '' } : message
-            )));
+            setMessages((prev) => prev.map((message) => {
+              if (message.key === botId) {
+                const currentSteps = message.steps || [];
+                const isNewStep = status !== '思考中...' && status !== 'Bot 回复' && currentSteps[currentSteps.length - 1] !== status;
+                const nextSteps = isNewStep ? [...currentSteps, status] : currentSteps;
+                return { ...message, status, text: finalContent || '', steps: nextSteps };
+              }
+              return message;
+            }));
           } catch (err) {
             if (err instanceof Error) throw err;
           }
@@ -895,7 +1163,9 @@ const BotChat: React.FC = () => {
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
     e.target.style.height = 'auto';
-    e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
+    const scrollHeight = e.target.scrollHeight;
+    e.target.style.height = `${Math.min(scrollHeight, 200)}px`;
+    e.target.style.overflowY = scrollHeight > 200 ? 'auto' : 'hidden';
   };
 
   const ready = role === 'user' ? Boolean(selectedUserId) : Boolean(selectedAccountId && selectedUserId);
@@ -912,7 +1182,6 @@ const BotChat: React.FC = () => {
       title,
       subtitle,
       session.session_id,
-      String(session.message_count ?? ''),
       formatDateTime(session.created_at),
       formatDateTime(session.updated_at),
     ].join(' ').toLowerCase();
@@ -960,7 +1229,7 @@ const BotChat: React.FC = () => {
             className="input"
             value={sessionQuery}
             onChange={(e) => setSessionQuery(e.target.value)}
-            placeholder="搜索 Session ID / 时间 / 消息数"
+            placeholder="搜索 Session ID / 标题 / 时间"
             disabled={!ready}
           />
         </div>
@@ -983,6 +1252,7 @@ const BotChat: React.FC = () => {
                 {group.items.map((session) => {
                   const title = getSessionTitle(session);
                   const subtitle = getSessionSubtitle(session);
+                  const menuId = `session:${session.session_id}`;
 
                   return (
                     <div key={session.session_id} className={`chat-session-item ${session.session_id === sessionId ? 'active' : ''}`}>
@@ -993,33 +1263,37 @@ const BotChat: React.FC = () => {
                         title={title}
                       >
                         <div className="chat-session-item-main">
-                          <div className="chat-session-item-title">{title}</div>
+                          <div className="chat-session-item-title" title={title}>{title}</div>
                           <div className="chat-session-item-subtitle" title={session.session_id}>{subtitle}</div>
                         </div>
                         <div className="chat-session-item-meta">
                           <span>{formatRelativeTime(session.updated_at || session.created_at)}</span>
-                          <span>{session.message_count ?? 0} 条</span>
                         </div>
                       </button>
-                      <div className="chat-session-item-actions">
+                      <div
+                        ref={activeActionMenu === menuId ? actionMenuRef : null}
+                        className={`chat-session-item-actions ${activeActionMenu === menuId ? 'open' : ''}`}
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         <button
-                          className="chat-session-icon-btn"
-                          onClick={() => openRenameDialog(session)}
+                          className={`chat-session-icon-btn ${activeActionMenu === menuId ? 'active' : ''}`}
+                          onClick={() => toggleActionMenu(menuId)}
                           disabled={busy}
-                          title="重命名会话"
-                          aria-label="重命名会话"
+                          title="会话操作"
+                          aria-label="会话操作"
                         >
-                          <Pencil size={14} />
+                          <MoreHorizontal size={14} />
                         </button>
-                        <button
-                          className="chat-session-icon-btn danger"
-                          onClick={() => setDeleteTarget(session)}
-                          disabled={busy}
-                          title="删除会话"
-                          aria-label="删除会话"
-                        >
-                          <Trash2 size={14} />
-                        </button>
+                        {activeActionMenu === menuId && (
+                          <div className="chat-session-menu">
+                            <button className="chat-session-menu-item" onClick={() => openRenameDialog(session)}>
+                              <Pencil size={14} /> 重命名
+                            </button>
+                            <button className="chat-session-menu-item danger" onClick={() => { closeActionMenu(); setDeleteTarget(session); }}>
+                              <Trash2 size={14} /> 删除
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
@@ -1042,18 +1316,33 @@ const BotChat: React.FC = () => {
             <span className="chat-current-label">当前会话</span>
             <span className="chat-current-title" title={activeSessionTitle}>{activeSessionTitle}</span>
             {sessionId && (
-              <button
-                className="chat-session-icon-btn chat-current-rename-btn"
-                onClick={() => activeSessionMeta && openRenameDialog(activeSessionMeta)}
-                disabled={busy || !activeSessionMeta}
-                title="重命名当前会话"
-                aria-label="重命名当前会话"
+              <div
+                ref={activeActionMenu === 'current-session' ? actionMenuRef : null}
+                className="chat-current-actions"
               >
-                <Pencil size={14} />
-              </button>
+                <button
+                  className={`chat-session-icon-btn chat-current-action-btn ${activeActionMenu === 'current-session' ? 'active' : ''}`}
+                  onClick={() => toggleActionMenu('current-session')}
+                  disabled={busy || !activeSessionMeta}
+                  title="当前会话操作"
+                  aria-label="当前会话操作"
+                >
+                  <MoreHorizontal size={14} />
+                </button>
+                {activeActionMenu === 'current-session' && activeSessionMeta && (
+                  <div className="chat-session-menu chat-current-menu">
+                    <button className="chat-session-menu-item" onClick={() => openRenameDialog(activeSessionMeta)}>
+                      <Pencil size={14} /> 重命名
+                    </button>
+                    <button className="chat-session-menu-item danger" onClick={() => { closeActionMenu(); setDeleteTarget(activeSessionMeta); }}>
+                      <Trash2 size={14} /> 删除
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
             <code title={sessionId || ''}>{sessionId ? shortenSessionId(sessionId) : '待创建'}</code>
-            <span className="chat-current-meta">{activeSessionMeta?.message_count ?? 0} 条消息</span>
+            <span className="chat-current-meta">{messages.filter(m => m.key !== 'welcome').length} 条消息</span>
             <span className="chat-current-meta">
               最近更新 {formatRelativeTime(activeSessionMeta?.updated_at || activeSessionMeta?.created_at)}
             </span>
@@ -1101,9 +1390,32 @@ const BotChat: React.FC = () => {
                   {message.role === 'user' ? <User size={18} /> : <Bot size={18} />}
                 </div>
                 <div className="chat-content-wrap">
-                  {message.role === 'bot' && message.status && message.status !== 'Bot 回复' && (
-                    <div className="chat-status">{message.status}</div>
-                  )}
+                  {message.role === 'bot' && message.steps && message.steps.length > 0 && (message.loading || message.steps.length > 1) ? (
+                    <div className="chat-status-container">
+                      <details className="chat-process-details" open={message.loading}>
+                        <summary className="chat-process-summary">
+                          <div className="chat-process-summary-left">
+                            {message.loading ? <Loader2 size={12} className="chat-status-icon" /> : <Zap size={12} className="chat-status-finished-icon" />}
+                            <span>{message.loading ? message.status : `使用了 ${message.steps.length} 个步骤思考`}</span>
+                          </div>
+                          <ChevronRight size={14} className="chat-process-chevron" />
+                        </summary>
+                        <div className="chat-process-timeline">
+                          {message.steps.map((step, i) => (
+                            <div key={i} className="chat-timeline-item">
+                              <div className="chat-timeline-dot" />
+                              <div className="chat-timeline-text">{step}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    </div>
+                  ) : message.role === 'bot' && message.status && message.status !== 'Bot 回复' ? (
+                    <div className="chat-status">
+                      {message.loading && <Loader2 size={12} className="chat-status-icon" />}
+                      <span>{message.status}</span>
+                    </div>
+                  ) : null}
                   <div className="chat-bubble">
                     {message.loading && !message.text ? (
                       <div className="typing-dots"><span /><span /><span /></div>
