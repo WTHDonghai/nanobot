@@ -35,6 +35,7 @@ class ToolContext:
     sandbox_manager: SandboxManager | None = None
     workspace_id: str = sandbox_manager.to_workspace_id(session_key) if sandbox_manager else None
     sender_id: str | None = None
+    account_id: str | None = None  # Tenant account ID for multi-tenant routing
 
 
 """Base class for agent tools."""

@@ -233,6 +233,7 @@ class AgentLoop:
         session_key: SessionKey,
         publish_events: bool = True,
         sender_id: str | None = None,
+        message_metadata: dict | None = None,
     ) -> tuple[str | None, list[dict], dict[str, int], int]:
         """
         Run the core agent loop: call LLM, execute tools, repeat until done.
@@ -318,6 +319,7 @@ class AgentLoop:
                         session_key=session_key,
                         sandbox_manager=self.sandbox_manager,
                         sender_id=sender_id,
+                        metadata=message_metadata,
                     )
                     tool_execute_duration = (time.time() - tool_execute_start_time) * 1000
                     return idx, tool_call, result, tool_execute_duration
@@ -804,6 +806,7 @@ class AgentLoop:
                 is_group_chat=is_group_chat,
                 eval=self._eval,
                 config=self.config,
+                account_id=msg.metadata.get("account_id") if msg.metadata else None,
             )
 
             # Knowledge-base mode: classify intent before agent loop
@@ -863,6 +866,7 @@ class AgentLoop:
                 session_key=session_key,
                 publish_events=True,
                 sender_id=msg.sender_id,
+                message_metadata=msg.metadata if msg.metadata else None,
             )
 
             # Log response preview
@@ -920,6 +924,7 @@ class AgentLoop:
             messages=messages,
             session_key=msg.session_key,
             publish_events=False,
+            message_metadata=msg.metadata if msg.metadata else None,
         )
 
         if final_content is None or (

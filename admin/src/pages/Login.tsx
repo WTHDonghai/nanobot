@@ -28,13 +28,14 @@ const Login: React.FC = () => {
         throw new Error('无法获取身份信息');
       }
 
-      const { role, account_id } = whoamiRes.result;
+      const { role, account_id, user_id } = whoamiRes.result;
 
-      if (role === 'user') {
-        throw new Error('权限不足：普通用户无权访问管理与工作区面板');
-      }
+      // Allow ordinary users to log in for restricted view
+      // if (role === 'user') {
+      //   throw new Error('权限不足：普通用户无权访问管理与工作区面板');
+      // }
 
-      setAuth(SERVER_URL, key, role, account_id, remember);
+      setAuth(SERVER_URL, key, role, account_id, user_id, remember);
       navigate('/dashboard');
     } catch (err: any) {
       setError('登录失败：' + err.message);

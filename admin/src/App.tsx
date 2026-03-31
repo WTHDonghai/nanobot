@@ -19,6 +19,9 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
 };
 
 const AppRoutes = () => {
+  const { role } = useAuth();
+  const defaultPage = role === 'user' ? '/resources' : '/dashboard';
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
@@ -28,14 +31,14 @@ const AppRoutes = () => {
           <ProtectedRoute>
             <Layout>
               <Routes>
-                <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/" element={<Navigate to={defaultPage} replace />} />
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/accounts" element={<Accounts />} />
                 <Route path="/sessions" element={<Sessions />} />
                 <Route path="/bot" element={<BotChat />} />
                 <Route path="/system" element={<SystemInfo />} />
                 <Route path="/resources" element={<Resources />} />
-                <Route path="*" element={<Navigate to="/dashboard" replace />} />
+                <Route path="*" element={<Navigate to={defaultPage} replace />} />
               </Routes>
             </Layout>
           </ProtectedRoute>

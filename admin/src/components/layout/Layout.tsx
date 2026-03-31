@@ -5,7 +5,7 @@ import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database } fr
 import './Layout.css';
 
 const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { serverUrl, role, accountId, logout } = useAuth();
+  const { serverUrl, role, accountId, userId, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -26,11 +26,15 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     { path: '/accounts', label: '账号组成员', icon: <Users size={18} /> },
     { path: '/resources', label: '资源库 (Resources)', icon: <Database size={18} /> },
     { path: '/sessions', label: '工作区会话', icon: <MessagesSquare size={18} /> },
+  ];
+
+  const userItems = [
+    { path: '/resources', label: '资源库 (Resources)', icon: <Database size={18} /> },
     { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
   ];
 
-  const navItems = role === 'root' ? rootItems : adminItems;
-  const currentRoleLabel = role === 'root' ? '👑 Root 超级管理员' : `租户管理员 (${accountId})`;
+  const navItems = role === 'root' ? rootItems : role === 'admin' ? adminItems : userItems;
+  const currentRoleLabel = role === 'root' ? '👑 Root 超级管理员' : role === 'admin' ? `租户管理员 (${accountId})` : `${userId || '普通用户'} (${accountId})`;
 
   const currentPageLabel = navItems.find((item) => item.path === location.pathname)?.label || '页面';
 

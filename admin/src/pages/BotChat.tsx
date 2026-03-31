@@ -1,6 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { fetchApi } from '../services/api';
+import { SendHorizontal, Bot, User } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import './BotChat.css';
 
 const BotChat: React.FC = () => {
@@ -43,7 +46,19 @@ const BotChat: React.FC = () => {
 
   // Fetch users when account changes
   useEffect(() => {
-    if (selectedAccountId) {
+    if (role === 'user') {
+      fetchApi(serverUrl, apiKey, `/api/v1/system/whoami`)
+        .then(res => {
+          if (res.result && res.result.user_id) {
+            setUsers([{ user_id: res.result.user_id }]);
+            setSelectedUserId(res.result.user_id);
+          }
+        })
+        .catch(() => {
+          setUsers([]);
+          setSelectedUserId('');
+        });
+    } else if (selectedAccountId) {
       fetchApi(serverUrl, apiKey, `/api/v1/admin/accounts/${selectedAccountId}/users`)
         .then(res => {
           const usrs = res.result || [];
@@ -59,7 +74,7 @@ const BotChat: React.FC = () => {
       setUsers([]);
       setSelectedUserId('');
     }
-  }, [selectedAccountId, serverUrl, apiKey]);
+  }, [selectedAccountId, serverUrl, apiKey, role]);
 
   const handleNewSession = () => {
     setSessionId(crypto.randomUUID());
@@ -85,7 +100,7 @@ const BotChat: React.FC = () => {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-        body: JSON.stringify({ message: userMsg, session_id: sessionId, user_id: selectedUserId })
+        body: JSON.stringify({ message: userMsg, session_id: sessionId, user_id: selectedUserId, account_id: selectedAccountId || undefined })
       });
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -135,52 +150,90 @@ const BotChat: React.FC = () => {
     }
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    e.target.style.height = 'auto';
+    e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+  };
+
   return (
     <div className="chat-layout">
-      <div className="chat-config" style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 16 }}>
-        {role === 'root' && (
-          <div className="form-group" style={{ margin: 0, flex: 1 }}>
-            <label>账号 (Account)</label>
-            <select className="select" style={{ padding: '9px 14px' }} value={selectedAccountId} onChange={e => setSelectedAccountId(e.target.value)}>
-              {accounts.map(a => <option key={a.account_id} value={a.account_id}>{a.account_id}</option>)}
+      {/* Hide config bar entirely for users */}
+      {role !== 'user' && (
+        <div className="chat-config-bar">
+          {role === 'root' && (
+             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+               <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Account</label>
+               <select className="select" style={{ padding: '4px 8px', fontSize: '0.85rem' }} value={selectedAccountId} onChange={e => setSelectedAccountId(e.target.value)}>
+                 {accounts.map(a => <option key={a.account_id} value={a.account_id}>{a.account_id}</option>)}
+               </select>
+             </div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>User</label>
+            <select className="select" style={{ padding: '4px 8px', fontSize: '0.85rem' }} value={selectedUserId} onChange={e => setSelectedUserId(e.target.value)}>
+              {users.map(u => <option key={u.user_id} value={u.user_id}>{u.user_id}</option>)}
+              {users.length === 0 && <option value="" disabled>无</option>}
             </select>
           </div>
-        )}
-        <div className="form-group" style={{ margin: 0, flex: 1 }}>
-          <label>发信用户 (User)</label>
-          <select className="select" style={{ padding: '9px 14px' }} value={selectedUserId} onChange={e => setSelectedUserId(e.target.value)}>
-            {users.map(u => <option key={u.user_id} value={u.user_id}>{u.user_id}</option>)}
-            {users.length === 0 && <option value="" disabled>暂无用户</option>}
-          </select>
+          <button className="btn btn-ghost btn-sm" onClick={handleNewSession} style={{ marginLeft: 'auto' }}>重置会话</button>
         </div>
-        <button className="btn btn-ghost" onClick={handleNewSession}>新会话</button>
-      </div>
+      )}
 
-      <div className="chat-messages">
-        {messages.map((m, i) => (
-          <div key={i} className={`chat-msg ${m.role}`}>
-            {m.role === 'bot' && <div className="chat-status">{m.status}</div>}
-            <div className="chat-bubble">
-              {m.loading && !m.text ? (
-                 <div className="typing-dots"><span/><span/><span/></div>
-              ) : m.text}
+      <div className="chat-feed-container">
+        <div className="chat-messages">
+          {messages.map((m, i) => (
+            <div key={i} className={`chat-row ${m.role}`}>
+              <div className={`chat-avatar ${m.role === 'user' ? 'user-av' : 'bot-av'}`}>
+                {m.role === 'user' ? <User size={18} /> : <Bot size={18} />}
+              </div>
+              <div className="chat-content-wrap">
+                {m.role === 'bot' && m.status && m.status !== 'Bot 回复' && (
+                  <div className="chat-status">{m.status}</div>
+                )}
+                <div className="chat-bubble">
+                  {m.loading && !m.text ? (
+                     <div className="typing-dots"><span/><span/><span/></div>
+                  ) : (
+                    <div className="markdown-body">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {m.text}
+                      </ReactMarkdown>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
-          </div>
-        ))}
-        <div ref={messagesEndRef} />
+          ))}
+          <div ref={messagesEndRef} />
+        </div>
       </div>
 
-      <div className="chat-input-row" style={{ display: 'flex', gap: 10, marginTop: 16 }}>
-        <textarea 
-          className="textarea" 
-          style={{ flex: 1, resize: 'none', height: 46 }}
-          value={input} 
-          onChange={e => setInput(e.target.value)} 
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }} 
-          placeholder={selectedUserId ? "输入消息，Enter 发送" : "请先选择发信用户"} 
-          disabled={loading || !selectedUserId}
-        />
-        <button className="btn btn-primary" onClick={handleSend} disabled={loading || !selectedUserId}>发送</button>
+      <div className="chat-input-wrapper">
+        <div className="chat-input-box">
+          <textarea 
+            value={input} 
+            onChange={handleInput} 
+            onKeyDown={handleKeyDown} 
+            placeholder={selectedUserId ? "给 Bot 发送消息..." : "正在同步用户信息..."} 
+            disabled={loading || !selectedUserId}
+            rows={1}
+          />
+          <button className="chat-send-btn" onClick={handleSend} disabled={loading || !selectedUserId || !input.trim()}>
+            {loading ? (
+              <div className="loader" style={{ width: 14, height: 14, borderTopColor: '#fff', borderColor: 'rgba(255,255,255,0.3) rgba(255,255,255,0.3) rgba(255,255,255,0.3) #fff' }} />
+            ) : (
+              <SendHorizontal size={18} style={{position: 'relative', left: -1}} />
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -381,10 +381,14 @@ class OpenAPIChannel(BaseChannel):
                 pass
 
             # Create and publish inbound message
+            inbound_metadata = {}
+            if request.account_id:
+                inbound_metadata["account_id"] = request.account_id
             msg = InboundMessage(
                 session_key=session_key,
                 sender_id=user_id,
                 content=content,
+                metadata=inbound_metadata,
             )
 
             await self.bus.publish_inbound(msg)
@@ -443,10 +447,14 @@ class OpenAPIChannel(BaseChannel):
                     chat_id=session_id,
                 )
 
+                inbound_metadata = {}
+                if request.account_id:
+                    inbound_metadata["account_id"] = request.account_id
                 msg = InboundMessage(
                     session_key=session_key,
                     sender_id=user_id,
                     content=request.message,
+                    metadata=inbound_metadata,
                 )
 
                 await self.bus.publish_inbound(msg)
