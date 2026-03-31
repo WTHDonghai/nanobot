@@ -710,7 +710,12 @@ class VikingFS:
         async def _walk(current_path: str, current_rel: str, current_depth: int):
             if len(all_entries) >= node_limit or current_depth >= level_limit:
                 return
-            for entry in self._ls_entries(current_path):
+            try:
+                dir_entries = self._ls_entries(current_path)
+            except Exception as e:
+                logger.debug(f"[VikingFS._tree_original] Skipping inaccessible path {current_path}: {e}")
+                return
+            for entry in dir_entries:
                 if len(all_entries) >= node_limit:
                     break
                 name = entry.get("name", "")
@@ -1380,7 +1385,7 @@ class VikingFS:
     ) -> None:
         """Update URIs in vector store (when moving files).
 
-        Preserves vector data, only updates uri and parent_uri fields, no need to regenerate embeddings.
+        Preserves vector data and updates URI-derived identifiers without regenerating embeddings.
         """
         vector_store = self._get_vector_store()
         if not vector_store:
@@ -1392,13 +1397,11 @@ class VikingFS:
         for uri in uris:
             try:
                 new_uri = uri.replace(old_base_uri, new_base_uri, 1)
-                new_parent_uri = VikingURI(new_uri).parent.uri
 
                 await vector_store.update_uri_mapping(
                     ctx=self._ctx_or_default(ctx),
                     uri=uri,
                     new_uri=new_uri,
-                    new_parent_uri=new_parent_uri,
                     levels=levels,
                 )
                 logger.debug(f"[VikingFS] Updated URI: {uri} -> {new_uri}")

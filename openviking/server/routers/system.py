@@ -109,15 +109,35 @@ async def readiness_check(request: Request):
 
 @router.get("/api/v1/system/status", tags=["system"])
 async def system_status(
-    _ctx: RequestContext = Depends(get_request_context),
+    ctx: RequestContext = Depends(get_request_context),
 ):
-    """Get system status."""
+    """Get system status.
+
+    ``result.user`` is the authenticated request's ``user_id`` (from API key or
+    headers), not the process-wide service default — clients use this to resolve
+    multi-tenant paths (e.g. OpenClaw plugin).
+    """
     service = get_service()
     return Response(
         status="ok",
         result={
             "initialized": service._initialized,
-            "user": service.user._user_id,
+            "user": ctx.user.user_id,
+        },
+    )
+
+
+@router.get("/api/v1/system/whoami", tags=["system"])
+async def system_whoami(
+    ctx: RequestContext = Depends(get_request_context),
+):
+    """Get the current authenticated identity's role and account context."""
+    return Response(
+        status="ok",
+        result={
+            "role": ctx.role.value,
+            "account_id": ctx.account_id,
+            "user_id": ctx.user.user_id,
         },
     )
 

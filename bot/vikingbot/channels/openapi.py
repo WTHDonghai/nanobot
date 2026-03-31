@@ -1,6 +1,8 @@
 """OpenAPI channel for HTTP-based chat API."""
 
 import asyncio
+import mimetypes
+import re
 import secrets
 import uuid
 from datetime import datetime
@@ -8,12 +10,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 
 from vikingbot.bus.events import InboundMessage, OutboundEventType, OutboundMessage
 from vikingbot.bus.queue import MessageBus
 from vikingbot.channels.base import BaseChannel
+from vikingbot.utils import get_images_path
 from vikingbot.channels.openapi_models import (
     ChatRequest,
     ChatResponse,
@@ -37,6 +40,7 @@ class OpenAPIChannelConfig(BaseChannelConfig):
     api_key: str = ""  # If empty, no auth required
     allow_from: list[str] = []
     max_concurrent_requests: int = 100
+    base_url: str = ""  # Optional. If set, image URLs will use this as prefix (e.g. "https://api.yoursite.com").
     _channel_id: str = "default"
 
     def channel_id(self) -> str:
@@ -110,6 +114,55 @@ class OpenAPIChannel(BaseChannel):
             pending.set_final("")
         logger.info("OpenAPI channel stopped")
 
+    def _replace_send_uris(self, content: str) -> str:
+        """
+        Replace send://filename references inside Markdown content with
+        web-accessible image URLs served by this channel.
+
+        Handles two forms:
+          - Markdown image:  ![alt](send://foo.png)  →  ![alt](/bot/v1/images/foo.png)
+          - Bare reference:  send://foo.png           →  ![foo](/bot/v1/images/foo.png)
+        """
+        if not content or "send://" not in content:
+            return content
+
+        base = self.config.base_url.rstrip("/") if self.config.base_url else ""
+        images_path = get_images_path()
+
+        def _image_url(filename: str) -> str:
+            return f"{base}/bot/v1/images/{filename}"
+
+        def _replace_markdown(m: re.Match) -> str:
+            alt, ref = m.group(1), m.group(2)
+            filename = ref[len("send://"):]
+            if not (images_path / filename).exists():
+                logger.warning(f"OpenAPI channel: image file not found, skipping: {filename}")
+                return m.group(0)  # leave as-is
+            return f"![{alt}]({_image_url(filename)})"
+
+        def _replace_bare(m: re.Match) -> str:
+            ref = m.group(0)
+            filename = ref[len("send://"):]
+            if not (images_path / filename).exists():
+                logger.warning(f"OpenAPI channel: image file not found, skipping: {filename}")
+                return ref
+            alt = filename.rsplit(".", 1)[0]
+            return f"![{alt}]({_image_url(filename)})"
+
+        # First replace Markdown images that point to send://
+        result = re.sub(
+            r"!\[([^\]]*)\]\((send://[^)\s]+)\)",
+            _replace_markdown,
+            content,
+        )
+        # Then replace any remaining bare send:// references
+        result = re.sub(
+            r"send://[^\s)>\"']+",
+            _replace_bare,
+            result,
+        )
+        return result
+
     async def send(self, msg: OutboundMessage) -> None:
         """
         Handle outbound messages - routes to pending responses.
@@ -123,16 +176,19 @@ class OpenAPIChannel(BaseChannel):
             return
 
         if msg.event_type == OutboundEventType.RESPONSE:
-            # Final response - add to stream first
-            await pending.add_event("response", msg.content or "")
-            pending.set_final(msg.content or "")
+            # Rewrite send:// image references before delivering to clients
+            content = self._replace_send_uris(msg.content or "")
+            await pending.add_event("response", content)
+            pending.set_final(content)
             await pending.close_stream()
         elif msg.event_type == OutboundEventType.REASONING:
             await pending.add_event("reasoning", msg.content)
         elif msg.event_type == OutboundEventType.TOOL_CALL:
             await pending.add_event("tool_call", msg.content)
         elif msg.event_type == OutboundEventType.TOOL_RESULT:
-            await pending.add_event("tool_result", msg.content)
+            # Also rewrite images inside tool results so streaming clients see valid URLs
+            content = self._replace_send_uris(msg.content or "")
+            await pending.add_event("tool_result", content)
 
     def get_router(self) -> APIRouter:
         """Get or create the FastAPI router."""
@@ -164,6 +220,28 @@ class OpenAPIChannel(BaseChannel):
             return HealthResponse(
                 status="healthy" if channel._running else "unhealthy",
                 version=__version__,
+            )
+
+        @router.get("/images/{image_name:path}")
+        async def serve_image(image_name: str):
+            """
+            Serve a bot-generated image by name.
+            Images are stored under get_data_path()/images/ and referenced
+            via send:// URIs inside agent responses.
+            """
+            # Security: reject any path that tries to escape the images directory
+            if ".." in image_name or image_name.startswith("/"):
+                raise HTTPException(status_code=400, detail="Invalid image name")
+
+            image_path = get_images_path() / image_name
+            if not image_path.exists() or not image_path.is_file():
+                raise HTTPException(status_code=404, detail="Image not found")
+
+            media_type, _ = mimetypes.guess_type(str(image_path))
+            return FileResponse(
+                path=str(image_path),
+                media_type=media_type or "application/octet-stream",
+                filename=image_path.name,
             )
 
         @router.post("/chat", response_model=ChatResponse)

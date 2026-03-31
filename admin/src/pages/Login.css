@@ -1,0 +1,69 @@
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: radial-gradient(ellipse at 30% 50%, rgba(99,102,241,0.12) 0%, transparent 60%), var(--bg);
+}
+
+.login-card {
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 48px;
+  width: 420px;
+  box-shadow: 0 25px 60px rgba(0,0,0,0.5);
+}
+
+.login-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 32px;
+}
+
+.login-logo-icon {
+  width: 44px;
+  height: 44px;
+  background: var(--primary);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-header h1 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, #fff, #94a3b8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  line-height: 1.2;
+}
+
+.login-subtitle-text {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: #94a3b8;
+  -webkit-text-fill-color: initial;
+}
+
+.login-desc {
+  color: var(--muted);
+  margin-bottom: 32px;
+  font-size: 0.9rem;
+}
+
+.login-btn {
+  width: 100%;
+  margin-top: 24px;
+}
+
+.error-msg {
+  color: var(--danger);
+  font-size: 0.85rem;
+  margin-top: 16px;
+  text-align: center;
+  min-height: 20px;
+}

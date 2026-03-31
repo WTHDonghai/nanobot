@@ -1,0 +1,96 @@
+import React from 'react';
+import { NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
+import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database } from 'lucide-react';
+import './Layout.css';
+
+const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { serverUrl, role, accountId, userId, logout } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
+  const rootItems = [
+    { path: '/dashboard', label: '总览', icon: <LayoutGrid size={18} /> },
+    { path: '/accounts', label: '全部租户与账号', icon: <Users size={18} /> },
+    { path: '/sessions', label: '全局会话监控', icon: <MessagesSquare size={18} /> },
+    { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
+    { path: '/system', label: '系统监控与接口', icon: <Activity size={18} /> },
+  ];
+
+  const adminItems = [
+    { path: '/dashboard', label: '工作区概览', icon: <LayoutGrid size={18} /> },
+    { path: '/accounts', label: '账号组成员', icon: <Users size={18} /> },
+    { path: '/resources', label: '资源库 (Resources)', icon: <Database size={18} /> },
+    { path: '/sessions', label: '工作区会话', icon: <MessagesSquare size={18} /> },
+    { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
+  ];
+
+  const userItems = [
+    { path: '/resources', label: '资源库 (Resources)', icon: <Database size={18} /> },
+    { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
+  ];
+
+  const navItems = role === 'root' ? rootItems : role === 'admin' ? adminItems : userItems;
+  const currentRoleLabel = role === 'root' ? '👑 Root 超级管理员' : role === 'admin' ? `租户管理员 (${accountId})` : `${userId || '普通用户'} (${accountId})`;
+
+  const currentPageLabel = navItems.find((item) => item.path === location.pathname)?.label || '页面';
+
+  return (
+    <div className="app-container">
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <div className="brand">
+            <div className="brand-icon">
+              <svg width="18" height="18" fill="none" stroke="#fff" strokeWidth="2.5" viewBox="0 0 24 24">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+              </svg>
+            </div>
+            <div>
+              <div className="brand-title">OpenViking</div>
+              <div className="brand-sub">Admin Panel</div>
+            </div>
+          </div>
+        </div>
+        
+        <nav className="sidebar-nav">
+          {navItems.map((item) => (
+            <NavLink
+              key={item.path}
+              to={item.path}
+              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+            >
+              <span className="nav-icon">{item.icon}</span>
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+        
+        <div className="sidebar-footer">
+          <div className="server-info">
+            <strong>{currentRoleLabel}</strong>
+            <span style={{ display: 'block', fontSize: '11px', opacity: 0.7, marginTop: 4, textOverflow: 'ellipsis', overflow: 'hidden' }}>{serverUrl}</span>
+          </div>
+          <button className="btn btn-ghost btn-sm" style={{ width: '100%', marginTop: '12px' }} onClick={handleLogout}>
+            <LogOut size={14} /> 退出登录
+          </button>
+        </div>
+      </aside>
+
+      <main className="main-content">
+        <header className="topbar">
+          <h1 className="page-title">{currentPageLabel}</h1>
+        </header>
+        <div className="content-container">
+          {children}
+        </div>
+      </main>
+    </div>
+  );
+};
+
+export default Layout;

@@ -49,7 +49,9 @@ class MemoryStore:
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
-    async def get_viking_memory_context(self, current_message: str, workspace_id: str, sender_id: str) -> str:
+    async def get_viking_memory_context(
+        self, current_message: str, workspace_id: str, sender_id: str
+    ) -> str:
         try:
             config = load_config().ov_server
             admin_user_id = config.admin_user_id

@@ -37,7 +37,7 @@ def get_bot_url() -> str:
     return BOT_API_URL
 
 
-async def verify_auth(request: Request) -> Optional[str]:
+def extract_auth_token(request: Request) -> Optional[str]:
     """Extract and return authorization token from request."""
     # Try X-API-Key header first
     api_key = request.headers.get("X-API-Key")
@@ -50,6 +50,22 @@ async def verify_auth(request: Request) -> Optional[str]:
         return auth_header[7:]  # Remove "Bearer " prefix
 
     return None
+
+
+def require_auth_token(request: Request) -> str:
+    """Return an auth token or raise 401 for bot proxy endpoints."""
+    # Check if auth is disabled (dev mode) via app state
+    if hasattr(request.app, "state") and getattr(request.app.state, "api_key_manager", None) is None:
+        if getattr(request.app.state, "config", None) and request.app.state.config.auth_mode != "trusted":
+            return "dev_mode_dummy_token"
+
+    auth_token = extract_auth_token(request)
+    if not auth_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token",
+        )
+    return auth_token
 
 
 @router.get("/health")
@@ -85,6 +101,42 @@ async def health_check(request: Request):
         )
 
 
+@router.get("/images/{image_name:path}")
+async def proxy_image(image_name: str, request: Request):
+    """
+    Proxy an image request to the actual Bot API.
+    """
+    bot_url = get_bot_url()
+    
+    import mimetypes
+    media_type, _ = mimetypes.guess_type(image_name)
+    media_type = media_type or "application/octet-stream"
+
+    async def file_stream() -> AsyncGenerator[bytes, None]:
+        try:
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "GET",
+                    f"{bot_url}/bot/v1/images/{image_name}",
+                    timeout=30.0,
+                ) as response:
+                    # If Bot API returns an error, we can't raise HTTPException anymore
+                    # because the StreamingResponse has already started, but we can stop yielding.
+                    if response.status_code != 200:
+                        logger.error(f"Failed to fetch image from bot (status: {response.status_code})")
+                        return
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+        except Exception as e:
+            logger.error(f"Error streaming image {image_name}: {e}")
+            pass
+
+    return StreamingResponse(
+        file_stream(),
+        media_type=media_type,
+    )
+
+
 @router.post("/chat")
 async def chat(request: Request):
     """Send a message to the bot and get a response.
@@ -92,7 +144,7 @@ async def chat(request: Request):
     Proxies the request to Vikingbot OpenAPIChannel.
     """
     bot_url = get_bot_url()
-    auth_token = await verify_auth(request)
+    auth_token = require_auth_token(request)
 
     # Read request body
     try:
@@ -106,9 +158,7 @@ async def chat(request: Request):
     try:
         async with httpx.AsyncClient() as client:
             # Build headers
-            headers = {"Content-Type": "application/json"}
-            if auth_token:
-                headers["X-API-Key"] = auth_token
+            headers = {"Content-Type": "application/json", "X-API-Key": auth_token}
 
             # Forward to Vikingbot OpenAPIChannel chat endpoint
             response = await client.post(
@@ -146,7 +196,7 @@ async def chat_stream(request: Request):
     Proxies the request to Vikingbot OpenAPIChannel with SSE streaming.
     """
     bot_url = get_bot_url()
-    auth_token = await verify_auth(request)
+    auth_token = require_auth_token(request)
 
     # Read request body
     try:
@@ -162,9 +212,7 @@ async def chat_stream(request: Request):
         try:
             async with httpx.AsyncClient() as client:
                 # Build headers
-                headers = {"Content-Type": "application/json"}
-                if auth_token:
-                    headers["X-API-Key"] = auth_token
+                headers = {"Content-Type": "application/json", "X-API-Key": auth_token}
 
                 # Forward to Vikingbot OpenAPIChannel stream endpoint
                 async with client.stream(
