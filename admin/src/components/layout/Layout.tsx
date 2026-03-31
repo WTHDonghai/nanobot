@@ -18,6 +18,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     { path: '/dashboard', label: '总览', icon: <LayoutGrid size={18} /> },
     { path: '/accounts', label: '全部租户与账号', icon: <Users size={18} /> },
     { path: '/sessions', label: '全局会话监控', icon: <MessagesSquare size={18} /> },
+    { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
     { path: '/system', label: '系统监控与接口', icon: <Activity size={18} /> },
   ];
 
@@ -26,6 +27,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     { path: '/accounts', label: '账号组成员', icon: <Users size={18} /> },
     { path: '/resources', label: '资源库 (Resources)', icon: <Database size={18} /> },
     { path: '/sessions', label: '工作区会话', icon: <MessagesSquare size={18} /> },
+    { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
   ];
 
   const userItems = [
