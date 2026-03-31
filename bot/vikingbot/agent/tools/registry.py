@@ -125,7 +125,6 @@ class ToolRegistry:
         session_key: SessionKey,
         sandbox_manager: SandboxManager | None = None,
         sender_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
     ) -> str:
         """
         Execute a tool by name with given parameters.
@@ -151,7 +150,6 @@ class ToolRegistry:
             session_key=session_key,
             sandbox_manager=sandbox_manager,
             sender_id=sender_id,
-            account_id=metadata.get("account_id") if metadata else None,
         )
 
         # Langfuse tool call tracing - automatic for all tools

@@ -12,11 +12,27 @@
   display: flex; 
   gap: 16px; 
   align-items: center; 
+  flex-wrap: wrap;
   padding: 10px 24px; 
   border-bottom: 1px solid var(--border);
   background: var(--bg2);
   flex-shrink: 0;
   z-index: 10;
+}
+
+.chat-config-note {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  max-width: 520px;
+  line-height: 1.5;
+}
+
+.chat-config-note code {
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
 }
 
 /* Scrollable container */
@@ -313,4 +329,3 @@
   from { opacity: 0; }
   to { opacity: 1; }
 }
-

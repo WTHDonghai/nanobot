@@ -10,8 +10,7 @@ const BotChat: React.FC = () => {
   const { serverUrl, apiKey, role, accountId } = useAuth();
   const [messages, setMessages] = useState<any[]>([{ role: 'bot', text: '你好！我是 XMS 技术支持专员。有什么可以帮助你？', status: 'XMS Support Bot' }]);
   const [input, setInput] = useState('');
-  
-  const [accounts, setAccounts] = useState<any[]>([]);
+
   const [users, setUsers] = useState<any[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [selectedUserId, setSelectedUserId] = useState<string>('');
@@ -29,21 +28,13 @@ const BotChat: React.FC = () => {
     scrollToBottom();
   }, [messages]);
 
-  // Fetch accounts based on role
+  // Root no longer switches account here. Bot account is fixed on the server side,
+  // so this page only uses the login context account to load users.
   useEffect(() => {
-    if (role === 'root') {
-      fetchApi(serverUrl, apiKey, '/api/v1/admin/accounts')
-        .then(res => {
-          const accs = res.result || [];
-          setAccounts(accs);
-          if (accs.length > 0) setSelectedAccountId(accs[0].account_id);
-        })
-        .catch(() => setAccounts([]));
-    } else if (accountId) {
-      setAccounts([{ account_id: accountId }]);
-      setSelectedAccountId(accountId);
+    if (role !== 'user') {
+      setSelectedAccountId(accountId || 'default');
     }
-  }, [serverUrl, apiKey, role, accountId]);
+  }, [role, accountId]);
 
   // Fetch users when account changes
   useEffect(() => {
@@ -101,7 +92,7 @@ const BotChat: React.FC = () => {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-        body: JSON.stringify({ message: userMsg, session_id: sessionId, user_id: selectedUserId, account_id: selectedAccountId || undefined })
+        body: JSON.stringify({ message: userMsg, session_id: sessionId, user_id: selectedUserId })
       });
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -170,12 +161,10 @@ const BotChat: React.FC = () => {
       {role !== 'user' && (
         <div className="chat-config-bar">
           {role === 'root' && (
-             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-               <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Account</label>
-               <select className="select" style={{ padding: '4px 8px', fontSize: '0.85rem' }} value={selectedAccountId} onChange={e => setSelectedAccountId(e.target.value)}>
-                 {accounts.map(a => <option key={a.account_id} value={a.account_id}>{a.account_id}</option>)}
-               </select>
-             </div>
+            <div className="chat-config-note">
+              Bot 使用服务端固定 Account，不支持在此页面切换。
+              当前仅展示工作区 <code>{selectedAccountId || 'default'}</code> 的用户列表。
+            </div>
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>User</label>

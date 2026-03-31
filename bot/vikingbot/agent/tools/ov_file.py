@@ -20,16 +20,12 @@ WORD_IMAGE_ARTIFACT_RE = re.compile(r"ov-asset://|INCLUDEPICTURE", re.IGNORECASE
 class OVFileTool(Tool, ABC):
     def __init__(self):
         super().__init__()
-        self._clients: dict[str | None, "VikingClient"] = {}
+        self._client = None
 
     async def _get_client(self, tool_context: ToolContext):
-        key = tool_context.account_id  # None means "use config default"
-        if key not in self._clients:
-            self._clients[key] = await VikingClient.create(
-                agent_id=tool_context.workspace_id,
-                account_id=tool_context.account_id,
-            )
-        return self._clients[key]
+        if self._client is None:
+            self._client = await VikingClient.create(tool_context.workspace_id)
+        return self._client
 
 class VikingReadTool(OVFileTool):
     """Tool to read content from Viking resources."""
@@ -488,7 +484,7 @@ class VikingAddResourceTool(OVFileTool):
                 if not local_path.is_file():
                     return f"Error: Not a file: {path}"
 
-            client = await VikingClient.create(agent_id=tool_context.workspace_id, account_id=tool_context.account_id)
+            client = await VikingClient.create(tool_context.workspace_id)
             result = await client.add_resource(path, description)
 
             if result:

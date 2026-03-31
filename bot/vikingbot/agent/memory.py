@@ -49,12 +49,14 @@ class MemoryStore:
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
-    async def get_viking_memory_context(self, current_message: str, workspace_id: str, sender_id: str, account_id: str | None = None) -> str:
+    async def get_viking_memory_context(
+        self, current_message: str, workspace_id: str, sender_id: str
+    ) -> str:
         try:
             config = load_config().ov_server
             admin_user_id = config.admin_user_id
             user_id = sender_id if config.mode == "remote" else admin_user_id
-            client = await VikingClient.create(agent_id=workspace_id, account_id=account_id)
+            client = await VikingClient.create(agent_id=workspace_id)
             result = await client.search_memory(query=current_message, user_id=user_id, agent_user_id=admin_user_id, limit=5)
             if not result:
                 return ""
@@ -68,8 +70,8 @@ class MemoryStore:
             logger.error(f"[READ_USER_MEMORY]: search error. {e}")
             return ""
 
-    async def get_viking_user_profile(self, workspace_id: str, user_id: str, account_id: str | None = None) -> str:
-        client = await VikingClient.create(agent_id=workspace_id, account_id=account_id)
+    async def get_viking_user_profile(self, workspace_id: str, user_id: str) -> str:
+        client = await VikingClient.create(agent_id=workspace_id)
         result = await client.read_user_profile(user_id)
         if not result:
             return ""
