@@ -17,6 +17,7 @@ const BotChat: React.FC = () => {
   const [selectedUserId, setSelectedUserId] = useState<string>('');
 
   const [sessionId, setSessionId] = useState(crypto.randomUUID());
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -203,7 +204,20 @@ const BotChat: React.FC = () => {
                      <div className="typing-dots"><span/><span/><span/></div>
                   ) : (
                     <div className="markdown-body">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      <ReactMarkdown 
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          img(props) {
+                            return (
+                              <img 
+                                {...props} 
+                                style={{ maxWidth: '100%', borderRadius: '8px', cursor: 'zoom-in', marginTop: '8px' }}
+                                onClick={() => setPreviewImage(props.src || null)}
+                              />
+                            );
+                          }
+                        }}
+                      >
                         {m.text}
                       </ReactMarkdown>
                     </div>
@@ -235,6 +249,12 @@ const BotChat: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {previewImage && (
+        <div className="image-preview-overlay" onClick={() => setPreviewImage(null)}>
+          <img src={previewImage} alt="Fullscreen preview" onClick={(e) => e.stopPropagation()} />
+        </div>
+      )}
     </div>
   );
 };
