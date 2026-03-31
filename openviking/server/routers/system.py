@@ -127,6 +127,21 @@ async def system_status(
     )
 
 
+@router.get("/api/v1/system/whoami", tags=["system"])
+async def system_whoami(
+    ctx: RequestContext = Depends(get_request_context),
+):
+    """Get the current authenticated identity's role and account context."""
+    return Response(
+        status="ok",
+        result={
+            "role": ctx.role.value,
+            "account_id": ctx.account_id,
+            "user_id": ctx.user.user_id,
+        },
+    )
+
+
 class WaitRequest(BaseModel):
     """Request model for wait."""
 

@@ -218,4 +218,29 @@ def create_app(
     app.include_router(tasks_router)
     app.include_router(bot_router, prefix="/bot/v1")
 
+    # Serve Admin React SPA
+    import pathlib
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    root_dir = pathlib.Path(__file__).parent.parent.parent
+    admin_dist = root_dir / "admin" / "dist"
+    
+    if admin_dist.exists():
+        app.mount("/admin/assets", StaticFiles(directory=str(admin_dist / "assets")), name="admin_assets")
+        
+        @app.get("/admin")
+        @app.get("/admin/")
+        @app.get("/admin/{full_path:path}")
+        async def serve_admin_spa(full_path: str = ""):
+            # Fallback for client-side routing
+            target = admin_dist / full_path
+            if full_path and target.is_file():
+                return FileResponse(str(target))
+            return FileResponse(str(admin_dist / "index.html"))
+            
+        logger.info("Admin Panel hosted at /admin/")
+    else:
+        logger.info("Admin Panel static files not found, /admin/ endpoint not mounted.")
+
     return app
