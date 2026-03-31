@@ -97,6 +97,7 @@ class ContextBuilder:
         is_group_chat: bool = False,
         eval: bool = False,
         config: Config | None = None,
+        account_id: str | None = None,
     ):
         self.workspace = workspace
         self._templates_ensured = False
@@ -107,6 +108,7 @@ class ContextBuilder:
         self._is_group_chat = is_group_chat
         self._eval = eval
         self.config = config
+        self._account_id = account_id
 
     @property
     def memory(self):
@@ -211,7 +213,7 @@ Skills with available="false" need dependencies installed first - you can try in
         # Viking user profile
         start = _time.time()
         profile = await self.memory.get_viking_user_profile(
-            workspace_id=workspace_id, user_id=self._sender_id
+            workspace_id=workspace_id, user_id=self._sender_id, account_id=self._account_id
         )
         cost = round(_time.time() - start, 2)
         logger.info(
@@ -244,7 +246,7 @@ Skills with available="false" need dependencies installed first - you can try in
         # Viking agent memory
         start = _time.time()
         viking_memory = await self.memory.get_viking_memory_context(
-            current_message=current_message, workspace_id=workspace_id, sender_id=sender_id
+            current_message=current_message, workspace_id=workspace_id, sender_id=sender_id, account_id=self._account_id
         )
         cost = round(_time.time() - start, 2)
         logger.info(

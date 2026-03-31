@@ -26,7 +26,7 @@ WORD_CONTROL_CHAR_RE = re.compile(r"[\x01\x13\x14\x15]")
 
 
 class VikingClient:
-    def __init__(self, agent_id: Optional[str] = None):
+    def __init__(self, agent_id: Optional[str] = None, account_id: Optional[str] = None):
         config = load_config()
         openviking_config = config.ov_server
         self.openviking_config = openviking_config
@@ -41,22 +41,25 @@ class VikingClient:
         else:
             if agent_id and "#" in agent_id:
                 agent_id = agent_id.split("#", 1)[0]
+            
+            active_account_id = account_id or openviking_config.account_id
+            
             self.client = ov.AsyncHTTPClient(
                 url=openviking_config.server_url,
                 api_key=openviking_config.root_api_key,
-                account=openviking_config.account_id,
+                account=active_account_id,
                 user=openviking_config.admin_user_id,
                 agent_id=agent_id,
             )
             self.agent_id = agent_id
-            self.account_id = openviking_config.account_id
+            self.account_id = active_account_id
             self.admin_user_id = openviking_config.admin_user_id
             self._apikey_manager = None
             if self.ov_path:
                 self._apikey_manager = UserApiKeyManager(
                     ov_path=self.ov_path,
                     server_url=openviking_config.server_url,
-                    account_id=openviking_config.account_id,
+                    account_id=active_account_id,
                 )
         self.mode = openviking_config.mode
 
@@ -79,13 +82,14 @@ class VikingClient:
                 await self.admin_user_client.initialize()
 
     @classmethod
-    async def create(cls, agent_id: Optional[str] = None):
+    async def create(cls, agent_id: Optional[str] = None, account_id: Optional[str] = None):
         """Factory method to create and initialize a VikingClient instance.
 
         Args:
             agent_id: The agent ID to use
+            account_id: The account ID to use (overrides config if provided)
         """
-        instance = cls(agent_id)
+        instance = cls(agent_id, account_id)
         await instance._initialize()
         return instance
 

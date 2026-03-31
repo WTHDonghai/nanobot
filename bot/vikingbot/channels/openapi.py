@@ -380,11 +380,16 @@ class OpenAPIChannel(BaseChannel):
                 # Context is handled separately by session manager
                 pass
 
+            metadata = {}
+            if request.account_id:
+                metadata["account_id"] = request.account_id
+
             # Create and publish inbound message
             msg = InboundMessage(
                 session_key=session_key,
                 sender_id=user_id,
                 content=content,
+                metadata=metadata,
             )
 
             await self.bus.publish_inbound(msg)
@@ -443,10 +448,15 @@ class OpenAPIChannel(BaseChannel):
                     chat_id=session_id,
                 )
 
+                metadata = {}
+                if request.account_id:
+                    metadata["account_id"] = request.account_id
+
                 msg = InboundMessage(
                     session_key=session_key,
                     sender_id=user_id,
                     content=request.message,
+                    metadata=metadata,
                 )
 
                 await self.bus.publish_inbound(msg)
