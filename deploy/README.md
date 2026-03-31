@@ -81,6 +81,30 @@ PUSH=1 \
 ./scripts/build-docker.sh 1.2.3
 ```
 
+多架构构建时请注意：
+
+- `PLATFORM=linux/amd64,linux/arm64` 不能和默认的本地 `--load` 一起使用
+- 多架构镜像通常需要 `PUSH=1` 推送到镜像仓库，生成 manifest list
+- 如果不想推仓库，可以用 `OUTPUT=type=oci,dest=...` 导出为 OCI 归档
+
+示例：
+
+```bash
+# 推荐：直接推送 multi-arch 镜像
+PLATFORM=linux/amd64,linux/arm64 \
+PUSH=1 \
+REGISTRY=registry.example.com/ \
+./scripts/build-docker.sh 1.2.3
+
+# 或导出为 OCI 归档
+PLATFORM=linux/amd64,linux/arm64 \
+OUTPUT=type=oci,dest=openviking-1.2.3.tar \
+./scripts/build-docker.sh 1.2.3
+
+# 如果只想在本机加载镜像，请只构建单架构
+PLATFORM=linux/amd64 ./scripts/build-docker.sh 1.2.3
+```
+
 ### 3. 部署
 
 ```bash

@@ -13,14 +13,20 @@ BUILD_TARGET=${BUILD_TARGET:-""}
 PLATFORM=${PLATFORM:-""}
 CACHE_FROM=${CACHE_FROM:-""}
 CACHE_TO=${CACHE_TO:-""}
+OUTPUT=${OUTPUT:-""}
 BUILD_BASE_IMAGE=${BUILD_BASE_IMAGE:-""}
 PY_DEPS_IMAGE=${PY_DEPS_IMAGE:-""}
 ADMIN_DEPS_IMAGE=${ADMIN_DEPS_IMAGE:-""}
 PUSH=${PUSH:-0}
 LOAD=${LOAD:-""}
+MULTI_PLATFORM=0
+
+if [[ -n "$PLATFORM" && "$PLATFORM" == *","* ]]; then
+    MULTI_PLATFORM=1
+fi
 
 if [[ -z "$LOAD" ]]; then
-    if [[ "$PUSH" == "1" ]]; then
+    if [[ "$PUSH" == "1" || -n "$OUTPUT" ]]; then
         LOAD=0
     else
         LOAD=1
@@ -55,7 +61,19 @@ fi
 if [[ -n "$CACHE_TO" ]]; then
     echo "Cache to: ${CACHE_TO}"
 fi
+if [[ -n "$OUTPUT" ]]; then
+    echo "Output: ${OUTPUT}"
+fi
 echo "=========================================="
+
+if [[ "$MULTI_PLATFORM" == "1" && "$LOAD" == "1" ]]; then
+    echo "Error: --load does not support multi-platform images." >&2
+    echo "Use one of the following approaches:" >&2
+    echo "  1. PUSH=1 PLATFORM=${PLATFORM} $0 ${VERSION}" >&2
+    echo "  2. OUTPUT=type=oci,dest=openviking-${VERSION//\//-}.tar PLATFORM=${PLATFORM} $0 ${VERSION}" >&2
+    echo "  3. PLATFORM=linux/amd64 $0 ${VERSION}" >&2
+    exit 1
+fi
 
 build_cmd=(
     docker buildx build
@@ -79,6 +97,10 @@ fi
 
 if [[ -n "$CACHE_TO" ]]; then
     build_cmd+=(--cache-to "${CACHE_TO}")
+fi
+
+if [[ -n "$OUTPUT" ]]; then
+    build_cmd+=(--output "${OUTPUT}")
 fi
 
 if [[ -n "$BUILD_BASE_IMAGE" ]]; then
