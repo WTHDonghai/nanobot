@@ -9,6 +9,7 @@ import Sessions from './pages/Sessions';
 import BotChat from './pages/BotChat';
 import SystemInfo from './pages/SystemInfo';
 import Resources from './pages/Resources';
+import TestBot from './pages/TestBot';
 
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const { serverUrl } = useAuth();
@@ -24,6 +25,8 @@ const AppRoutes = () => {
 
   return (
     <Routes>
+      {/* Public route: no login required, credentials come from URL params */}
+      <Route path="/test-bot" element={<TestBot />} />
       <Route path="/login" element={<Login />} />
       <Route
         path="/*"
