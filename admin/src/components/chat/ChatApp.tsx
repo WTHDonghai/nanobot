@@ -2,17 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Bot,
-  CheckSquare,
   ChevronRight,
-  History,
   Loader2,
   MoreHorizontal,
   Pencil,
-  Plus,
-  RefreshCw,
-  Search,
   SendHorizontal,
-  Square,
   Trash2,
   User,
   Zap,
@@ -20,272 +14,34 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { fetchApi } from '../../services/api';
+import {
+  ApiEnvelope,
+  ChatMessage,
+  RawSessionListItem,
+  SessionArchiveResult,
+  SessionContextResult,
+  SessionSummary,
+  UserOption,
+} from './types';
+import {
+  MAX_SESSION_CONTEXT_BUDGET,
+  deriveSessionTitleFromMessages,
+  formatDateTime,
+  formatRelativeTime,
+  getArchiveIndex,
+  getSessionSortTime,
+  getSessionId,
+  makeWelcomeMessages,
+  mapSessionMessages,
+  readStoredSessionMessages,
+  readStoredSessionTitles,
+  unwrapResult,
+  shortenSessionId,
+  toSingleLine,
+  formatShortSessionTime,
+} from './utils';
+import SessionSidebar from './SessionSidebar';
 import './ChatApp.css';
-
-type ApiEnvelope<T> = {
-  status?: string;
-  result?: T;
-  error?: {
-    message?: string;
-  };
-};
-
-type UserOption = {
-  user_id: string;
-};
-
-type RawSessionListItem = {
-  session_id?: string;
-} | string;
-
-type SessionSummary = {
-  session_id: string;
-  created_at?: string;
-  updated_at?: string;
-  message_count?: number;
-  pending_tokens?: number;
-  commit_count?: number;
-  last_commit_at?: string;
-};
-
-type SessionContextPart = {
-  type?: string;
-  text?: string;
-  abstract?: string;
-  context_type?: string;
-  tool_name?: string;
-  tool_status?: string;
-};
-
-type SessionContextMessage = {
-  id?: string;
-  role: 'user' | 'assistant';
-  parts?: SessionContextPart[];
-  created_at?: string;
-};
-
-type SessionContextResult = {
-  latest_archive_id?: string;
-  pre_archive_abstracts?: Array<{ archive_id: string; abstract?: string }>;
-  messages?: SessionContextMessage[];
-};
-
-type SessionArchiveResult = {
-  archive_id: string;
-  messages?: SessionContextMessage[];
-};
-
-type ChatMessage = {
-  key: string;
-  role: 'user' | 'bot';
-  text: string;
-  status?: string;
-  loading?: boolean;
-  createdAt?: string;
-  steps?: string[];
-};
-
-const WELCOME_TEXT = '你好！我是 XMS 技术支持专员。有什么可以帮助你？';
-const MAX_SESSION_CONTEXT_BUDGET = 100_000_000;
-
-const makeWelcomeMessages = (status = ''): ChatMessage[] => [
-  { key: 'welcome', role: 'bot', text: WELCOME_TEXT, status },
-];
-
-const unwrapResult = <T,>(response: ApiEnvelope<T>, fallbackMessage: string): T => {
-  if (!response || response.status === 'error' || response.result === undefined) {
-    throw new Error(response?.error?.message || fallbackMessage);
-  }
-  return response.result;
-};
-
-const getSessionId = (item: RawSessionListItem): string => {
-  if (typeof item === 'string') return item;
-  return item.session_id || '';
-};
-
-const getSessionSortTime = (session: SessionSummary): number => {
-  const value = session.updated_at || session.created_at;
-  if (!value) return 0;
-  const time = new Date(value).getTime();
-  return Number.isNaN(time) ? 0 : time;
-};
-
-const getArchiveIndex = (archiveId: string): number => {
-  const match = archiveId.match(/archive_(\d+)/);
-  return match ? Number(match[1]) : 0;
-};
-
-const formatDateTime = (value?: string): string => {
-  if (!value) return '--';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
-};
-
-const formatRelativeTime = (value?: string): string => {
-  if (!value) return '时间未知';
-  const timestamp = new Date(value).getTime();
-  if (Number.isNaN(timestamp)) return value;
-  const diff = Date.now() - timestamp;
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return '刚刚';
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days} 天前`;
-  return formatDateTime(value);
-};
-
-const toSingleLine = (value: string): string => value.replace(/\s+/g, ' ').trim();
-
-const shortenSessionId = (value: string): string => {
-  if (value.length <= 22) return value;
-  return `${value.slice(0, 8)}...${value.slice(-6)}`;
-};
-
-const formatShortSessionTime = (value?: string): string => {
-  if (!value) return '未命名会话';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '未命名会话';
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).replace(',', ' ');
-};
-
-const getSessionGroupLabel = (value?: string): string => {
-  if (!value) return '更早';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '更早';
-
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfTarget = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-  const diffDays = Math.floor((startOfToday - startOfTarget) / 86400000);
-
-  if (diffDays <= 0) return '今天';
-  if (diffDays === 1) return '昨天';
-  if (diffDays < 7) return '近 7 天';
-  return '更早';
-};
-
-const getPrimaryTextFromMessage = (message: SessionContextMessage): string => {
-  const textParts = (message.parts || [])
-    .filter((part) => part.type === 'text' && part.text?.trim())
-    .map((part) => part.text!.trim());
-  return toSingleLine(textParts.join(' '));
-};
-
-const deriveSessionTitleFromMessages = (sessionMessages: SessionContextMessage[]): string => {
-  const candidate = sessionMessages.find((message) => message.role === 'user' && getPrimaryTextFromMessage(message))
-    || sessionMessages.find((message) => getPrimaryTextFromMessage(message));
-
-  if (!candidate) return '';
-  return getPrimaryTextFromMessage(candidate).slice(0, 200);
-};
-
-const renderMessageText = (parts: SessionContextPart[] = []): string => {
-  const textBlocks = parts
-    .filter((part) => part.type === 'text' && part.text?.trim())
-    .map((part) => part.text!.trim());
-  const contextLines = parts
-    .filter((part) => part.type === 'context' && part.abstract?.trim())
-    .map((part, index) => `${index + 1}. [${part.context_type || 'context'}] ${part.abstract!.trim()}`);
-  const toolLines = parts
-    .filter((part) => part.type === 'tool')
-    .map((part, index) => `${index + 1}. ${part.tool_name || 'tool'} (${part.tool_status || 'done'})`);
-
-  const sections: string[] = [];
-  if (textBlocks.length > 0) sections.push(textBlocks.join('\n\n'));
-  if (contextLines.length > 0) sections.push(['**关联上下文**', ...contextLines].join('\n'));
-  if (toolLines.length > 0) sections.push(['**工具调用**', ...toolLines].join('\n'));
-
-  return sections.join('\n\n').trim() || '（空消息）';
-};
-
-const mapSessionMessages = (sessionMessages: SessionContextMessage[]): ChatMessage[] => {
-  if (sessionMessages.length === 0) {
-    return makeWelcomeMessages('该会话暂无消息，可以继续提问');
-  }
-
-  return sessionMessages.map((message, index) => ({
-    key: message.id || `${message.role}-${index}`,
-    role: message.role === 'assistant' ? 'bot' : 'user',
-    text: renderMessageText(message.parts),
-    createdAt: message.created_at,
-  }));
-};
-
-const readStoredSessionTitles = (storageKey: string | null): Record<string, string> => {
-  if (!storageKey) return {};
-
-  try {
-    const raw = window.localStorage.getItem(storageKey);
-    if (!raw) return {};
-
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return Object.entries(parsed).reduce<Record<string, string>>((acc, [key, value]) => {
-      if (typeof value !== 'string') return acc;
-      const normalizedValue = toSingleLine(value).slice(0, 200);
-      if (!normalizedValue) return acc;
-      acc[key] = normalizedValue;
-      return acc;
-    }, {});
-  } catch {
-    return {};
-  }
-};
-
-const readStoredSessionMessages = (storageKey: string | null): Record<string, ChatMessage[]> => {
-  if (!storageKey) return {};
-
-  try {
-    const raw = window.sessionStorage.getItem(storageKey);
-    if (!raw) return {};
-
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return Object.entries(parsed).reduce<Record<string, ChatMessage[]>>((acc, [sessionId, value]) => {
-      if (!Array.isArray(value)) return acc;
-
-      const messages = value.reduce<ChatMessage[]>((items, entry, index) => {
-        if (!entry || typeof entry !== 'object') return items;
-
-        const record = entry as Record<string, unknown>;
-        const role = record.role === 'user' || record.role === 'bot' ? record.role : null;
-        const text = typeof record.text === 'string' ? record.text : null;
-        if (!role || text === null) return items;
-
-        items.push({
-          key: typeof record.key === 'string' ? record.key : `${sessionId}-${index}`,
-          role,
-          text,
-          status: typeof record.status === 'string' ? record.status : undefined,
-          loading: typeof record.loading === 'boolean' ? record.loading : undefined,
-          createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
-        });
-        return items;
-      }, []);
-
-      if (messages.length > 0) acc[sessionId] = messages;
-      return acc;
-    }, {});
-  } catch {
-    return {};
-  }
-};
 
 const ConfirmModal = ({
   message,
@@ -389,7 +145,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [derivedSessionTitles, setDerivedSessionTitles] = useState<Record<string, string>>({});
   const [renamedSessionTitles, setRenamedSessionTitles] = useState<Record<string, string>>({});
-  const [sessionQuery, setSessionQuery] = useState('');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [activeSessionMeta, setActiveSessionMeta] = useState<SessionSummary | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -402,11 +157,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const [activeActionMenu, setActiveActionMenu] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null);
   const [renameValue, setRenameValue] = useState('');
-  
-  // Multi-select state
-  const [isSelectMode, setIsSelectMode] = useState(false);
-  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
-  const [isBatchDeleting, setIsBatchDeleting] = useState(false);
   const actionMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -889,14 +639,12 @@ const ChatApp: React.FC<ChatAppProps> = ({
     }
   }
 
-  async function handleBatchDeleteSessions() {
-    if (selectedSessionIds.size === 0) return;
-    setIsBatchDeleting(true);
+  async function handleBatchDeleteSessions(batchIds: string[]) {
+    if (batchIds.length === 0) return;
     const deletedIds: string[] = [];
 
     try {
-      // Loop over the selected session IDs and delete them one by one
-      for (const id of Array.from(selectedSessionIds)) {
+      for (const id of batchIds) {
         try {
           await fetchApi<ApiEnvelope<{ session_id: string }>>(
             serverUrl,
@@ -941,8 +689,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
         return changed ? next : prev;
       });
 
-      setSelectedSessionIds(new Set());
-      setIsSelectMode(false);
       setSessionError('');
 
       if (sessionId && deletedIds.includes(sessionId)) {
@@ -953,8 +699,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
       }
     } catch (err: unknown) {
       setSessionError(err instanceof Error ? err.message : '批量删除过程中出现错误');
-    } finally {
-      setIsBatchDeleting(false);
     }
   }
 
@@ -1040,7 +784,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
   useEffect(() => {
     setSessions([]);
-    setSessionQuery('');
     setSessionError('');
     closeActionMenu();
     setDeleteTarget(null);
@@ -1262,212 +1005,28 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const currentIdentityLabel = role === 'user'
     ? (selectedUserId || userId || '当前用户')
     : (selectedUserId || '请选择用户');
-  const normalizedQuery = sessionQuery.trim().toLowerCase();
-  const filteredSessions = sessions.filter((session) => {
-    const title = getSessionTitle(session);
-    const subtitle = getSessionSubtitle(session);
-    if (!normalizedQuery) return true;
-    const haystack = [
-      title,
-      subtitle,
-      session.session_id,
-      formatDateTime(session.created_at),
-      formatDateTime(session.updated_at),
-    ].join(' ').toLowerCase();
-    return haystack.includes(normalizedQuery);
-  });
-  const groupedSessions = ['今天', '昨天', '近 7 天', '更早']
-    .map((label) => ({
-      label,
-      items: filteredSessions.filter((session) => getSessionGroupLabel(session.updated_at || session.created_at) === label),
-    }))
-    .filter((group) => group.items.length > 0);
   const activeSessionTitle = sessionId
     ? (renamedSessionTitles[sessionId] || derivedSessionTitles[sessionId] || (activeSessionMeta ? getSessionTitle(activeSessionMeta) : '当前会话'))
     : '未开始新会话';
 
   return (
     <div className="chat-layout">
-      <aside className="chat-session-panel">
-        <div className="chat-session-panel-header">
-          <div>
-            <div className="chat-session-panel-title">
-              <History size={16} /> 会话管理
-            </div>
-            <div className="chat-session-panel-subtitle">{currentIdentityLabel}</div>
-          </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            {sessions.length > 0 && (
-              <button
-                className={`btn btn-sm ${isSelectMode ? 'btn-primary' : 'btn-ghost'}`}
-                onClick={() => {
-                  setIsSelectMode(!isSelectMode);
-                  if (isSelectMode) setSelectedSessionIds(new Set());
-                }}
-                disabled={!ready || busy || isBatchDeleting}
-                title={isSelectMode ? "取消管理" : "批量管理"}
-              >
-                {isSelectMode ? "完成" : "管理"}
-              </button>
-            )}
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={() => void loadSessions(sessionId)}
-              disabled={!ready || busy || isSelectMode || isBatchDeleting}
-              title="刷新会话历史"
-            >
-              <RefreshCw size={14} />
-            </button>
-          </div>
-        </div>
-
-        <div className="chat-session-toolbar">
-          <button className="btn btn-primary chat-session-create-btn" onClick={handleNewSession} disabled={!ready || busy}>
-            <Plus size={16} /> 新建会话
-          </button>
-        </div>
-
-        <div className="chat-session-search">
-          <Search size={16} />
-          <input
-            className="input"
-            value={sessionQuery}
-            onChange={(e) => setSessionQuery(e.target.value)}
-            placeholder="搜索 Session ID / 标题 / 时间"
-            disabled={!ready}
-          />
-        </div>
-
-        <div className="chat-session-summary">
-          {normalizedQuery ? `匹配 ${filteredSessions.length} / ${sessions.length} 个会话` : `共 ${sessions.length} 个会话`}
-        </div>
-
-        <div className="chat-session-list">
-          {!ready && <div className="chat-session-empty">请选择用户后查看会话历史。</div>}
-          {ready && sessionListLoading && (
-            <div className="chat-session-loading">
-              <div className="loader" />
-            </div>
-          )}
-          {ready && !sessionListLoading && groupedSessions.map((group) => (
-            <section key={group.label} className="chat-session-group">
-              <div className="chat-session-group-title">{group.label}</div>
-              <div className="chat-session-group-list">
-                {group.items.map((session) => {
-                  const title = getSessionTitle(session);
-                  const subtitle = getSessionSubtitle(session);
-                  const menuId = `session:${session.session_id}`;
-
-                  return (
-                    <div key={session.session_id} className={`chat-session-item ${session.session_id === sessionId && !isSelectMode ? 'active' : ''} ${isSelectMode && selectedSessionIds.has(session.session_id) ? 'selected' : ''}`}>
-                      <button
-                        className={`chat-session-item-trigger ${isSelectMode ? 'select-mode' : ''}`}
-                        onClick={() => {
-                          if (isSelectMode) {
-                            const next = new Set(selectedSessionIds);
-                            if (next.has(session.session_id)) {
-                              next.delete(session.session_id);
-                            } else {
-                              next.add(session.session_id);
-                            }
-                            setSelectedSessionIds(next);
-                          } else {
-                            if (session.session_id !== sessionId) void handleSelectSession(session.session_id);
-                          }
-                        }}
-                        disabled={busy || isBatchDeleting}
-                        title={title}
-                      >
-                        {isSelectMode && (
-                          <div className="chat-session-item-checkbox">
-                            {selectedSessionIds.has(session.session_id) ? (
-                              <CheckSquare size={16} color="var(--primary)" fill="rgba(99, 102, 241, 0.2)" />
-                            ) : (
-                              <Square size={16} color="var(--muted)" />
-                            )}
-                          </div>
-                        )}
-                        <div className="chat-session-item-main">
-                          <div className="chat-session-item-title" title={title}>{title}</div>
-                          <div className="chat-session-item-subtitle" title={session.session_id}>{subtitle}</div>
-                        </div>
-                        <div className="chat-session-item-meta">
-                          <span>{formatRelativeTime(session.updated_at || session.created_at)}</span>
-                        </div>
-                      </button>
-                      
-                      {!isSelectMode && (
-                        <div
-                          ref={activeActionMenu === menuId ? actionMenuRef : null}
-                          className={`chat-session-item-actions ${activeActionMenu === menuId ? 'open' : ''}`}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <button
-                            className={`chat-session-icon-btn ${activeActionMenu === menuId ? 'active' : ''}`}
-                            onClick={() => toggleActionMenu(menuId)}
-                            disabled={busy}
-                            title="会话操作"
-                            aria-label="会话操作"
-                          >
-                            <MoreHorizontal size={14} />
-                          </button>
-                          {activeActionMenu === menuId && (
-                            <div className="chat-session-menu">
-                              <button className="chat-session-menu-item" onClick={() => openRenameDialog(session)}>
-                                <Pencil size={14} /> 重命名
-                              </button>
-                              <button className="chat-session-menu-item danger" onClick={() => { closeActionMenu(); setDeleteTarget(session); }}>
-                                <Trash2 size={14} /> 删除
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-          ))}
-          {ready && !sessionListLoading && sessions.length === 0 && (
-            <div className="chat-session-empty">暂无历史会话，发送第一条消息后会自动记录。</div>
-          )}
-          {ready && !sessionListLoading && sessions.length > 0 && filteredSessions.length === 0 && (
-            <div className="chat-session-empty">没有匹配的历史会话。</div>
-          )}
-        </div>
-
-        {isSelectMode && (
-          <div className="chat-session-batch-toolbar">
-            <div className="batch-toolbar-info">
-              已选 <span>{selectedSessionIds.size}</span> 项
-            </div>
-            <div className="batch-toolbar-actions">
-              <button
-                className="btn btn-ghost btn-sm"
-                onClick={() => {
-                  if (selectedSessionIds.size === filteredSessions.length) {
-                    setSelectedSessionIds(new Set());
-                  } else {
-                    setSelectedSessionIds(new Set(filteredSessions.map(s => s.session_id)));
-                  }
-                }}
-                disabled={isBatchDeleting}
-              >
-                {selectedSessionIds.size === filteredSessions.length && filteredSessions.length > 0 ? '全不选' : '全选'}
-              </button>
-              <button
-                className="btn btn-danger btn-sm"
-                onClick={() => void handleBatchDeleteSessions()}
-                disabled={selectedSessionIds.size === 0 || isBatchDeleting}
-              >
-                {isBatchDeleting ? <div className="loader" style={{ width: 14, height: 14, borderWidth: 2 }} /> : <Trash2 size={14} />}
-                {isBatchDeleting ? '删除中...' : '删除'}
-              </button>
-            </div>
-          </div>
-        )}
-      </aside>
+      <SessionSidebar
+        sessions={sessions}
+        sessionId={sessionId}
+        ready={ready}
+        busy={busy}
+        sessionListLoading={sessionListLoading}
+        currentIdentityLabel={currentIdentityLabel}
+        onSelectSession={(id) => { void handleSelectSession(id); }}
+        onNewSession={handleNewSession}
+        onRefreshSessions={() => { void loadSessions(sessionId); }}
+        onRenameSession={openRenameDialog}
+        onDeleteSession={(session) => { setDeleteTarget(session); }}
+        onBatchDelete={handleBatchDeleteSessions}
+        getSessionTitle={getSessionTitle}
+        getSessionSubtitle={getSessionSubtitle}
+      />
 
       <div className="chat-main-panel">
         <div className="chat-config-bar">
