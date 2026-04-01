@@ -3,13 +3,13 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      target: server-runtime
       args:
         # 版本号: git tag 或 commit hash
         OPENVIKING_VERSION: ${OPENVIKING_VERSION:-0.0.0}
-    image: openviking:${OPENVIKING_VERSION:-latest}
+    image: ${OPENVIKING_SERVER_IMAGE:-openviking-server}:${OPENVIKING_VERSION:-latest}
     container_name: openviking-${OPENVIKING_VERSION:-dev}
     restart: unless-stopped
-    command: ["openviking-server", "--with-bot", "--bot-log-dir", "/app/data/bot/logs"]
     ports:
       - "1933:1933"
     volumes:
@@ -21,6 +21,33 @@ services:
       - OPENVIKING_CONFIG_FILE=/app/ov.conf
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1933/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    networks:
+      - openviking-net
+
+  vikingbot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: bot-runtime
+      args:
+        OPENVIKING_VERSION: ${OPENVIKING_VERSION:-0.0.0}
+    image: ${VIKINGBOT_IMAGE:-vikingbot}:${OPENVIKING_VERSION:-latest}
+    container_name: vikingbot-${OPENVIKING_VERSION:-dev}
+    restart: unless-stopped
+    depends_on:
+      openviking:
+        condition: service_healthy
+    volumes:
+      - ./ov.conf:/app/ov.conf:ro
+      - openviking-data:/app/data
+    environment:
+      - OPENVIKING_CONFIG_FILE=/app/ov.conf
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18790/bot/v1/health"]
       interval: 30s
       timeout: 5s
       start_period: 30s

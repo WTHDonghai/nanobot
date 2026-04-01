@@ -5,7 +5,6 @@ set -euo pipefail
 
 # 默认版本：从 git tag 获取，如果没有 tag 则使用 commit hash
 VERSION=${1:-$(git describe --tags --always --dirty 2>/dev/null || echo "dev")}
-IMAGE_NAME=${IMAGE_NAME:-"openviking"}
 REGISTRY=${REGISTRY:-""}  # 可选：私有镜像仓库前缀
 DOCKERFILE=${DOCKERFILE:-"Dockerfile"}
 BUILD_CONTEXT=${BUILD_CONTEXT:-"."}
@@ -16,10 +15,37 @@ CACHE_TO=${CACHE_TO:-""}
 OUTPUT=${OUTPUT:-""}
 BUILD_BASE_IMAGE=${BUILD_BASE_IMAGE:-""}
 PY_DEPS_IMAGE=${PY_DEPS_IMAGE:-""}
+BOT_PY_DEPS_IMAGE=${BOT_PY_DEPS_IMAGE:-""}
 ADMIN_DEPS_IMAGE=${ADMIN_DEPS_IMAGE:-""}
 PUSH=${PUSH:-0}
 LOAD=${LOAD:-""}
 MULTI_PLATFORM=0
+
+if [[ -z "${IMAGE_NAME:-}" ]]; then
+    case "$BUILD_TARGET" in
+        ""|"server-runtime")
+            IMAGE_NAME="openviking-server"
+            ;;
+        "bot-runtime")
+            IMAGE_NAME="vikingbot"
+            ;;
+        "build-base")
+            IMAGE_NAME="openviking-build-base"
+            ;;
+        "py-deps")
+            IMAGE_NAME="openviking-py-deps"
+            ;;
+        "bot-py-deps")
+            IMAGE_NAME="vikingbot-py-deps"
+            ;;
+        "admin-deps")
+            IMAGE_NAME="openviking-admin-deps"
+            ;;
+        *)
+            IMAGE_NAME="openviking"
+            ;;
+    esac
+fi
 
 if [[ -n "$PLATFORM" && "$PLATFORM" == *","* ]]; then
     MULTI_PLATFORM=1
@@ -51,6 +77,9 @@ if [[ -n "$BUILD_BASE_IMAGE" ]]; then
 fi
 if [[ -n "$PY_DEPS_IMAGE" ]]; then
     echo "Python deps image: ${PY_DEPS_IMAGE}"
+fi
+if [[ -n "$BOT_PY_DEPS_IMAGE" ]]; then
+    echo "Bot deps image: ${BOT_PY_DEPS_IMAGE}"
 fi
 if [[ -n "$ADMIN_DEPS_IMAGE" ]]; then
     echo "Admin deps image: ${ADMIN_DEPS_IMAGE}"
@@ -109,6 +138,10 @@ fi
 
 if [[ -n "$PY_DEPS_IMAGE" ]]; then
     build_cmd+=(--build-arg "PY_DEPS_IMAGE=${PY_DEPS_IMAGE}")
+fi
+
+if [[ -n "$BOT_PY_DEPS_IMAGE" ]]; then
+    build_cmd+=(--build-arg "BOT_PY_DEPS_IMAGE=${BOT_PY_DEPS_IMAGE}")
 fi
 
 if [[ -n "$ADMIN_DEPS_IMAGE" ]]; then

@@ -7,6 +7,7 @@ ARG UV_BUILD_IMAGE=ghcr.io/astral-sh/uv:python3.13-trixie-slim
 ARG PYTHON_RUNTIME_IMAGE=python:3.13-slim-trixie
 ARG BUILD_BASE_IMAGE=build-base-source
 ARG PY_DEPS_IMAGE=py-deps-source
+ARG BOT_PY_DEPS_IMAGE=bot-py-deps-source
 ARG ADMIN_DEPS_IMAGE=admin-deps-source
 
 # Stage 1: provide Go toolchain (required by setup.py -> build_agfs_artifacts -> make build)
@@ -72,7 +73,7 @@ ENV UV_LINK_MODE=copy
 ENV UV_NO_DEV=1
 WORKDIR /app
 
-# Stage 8: install Python dependencies from lockfile without copying application code.
+# Stage 8: install OpenViking server dependencies from lockfile without copying application code.
 FROM build-base AS py-deps-source
 
 ARG TARGETPLATFORM
@@ -82,12 +83,27 @@ COPY pyproject.toml uv.lock setup.py README.md ./
 COPY third_party/agfs/agfs-sdk/python third_party/agfs/agfs-sdk/python
 
 RUN --mount=type=cache,target=/root/.cache/uv,id=uv-${TARGETPLATFORM} \
-    uv sync --locked --no-install-project --no-editable --extra bot-full
+    uv sync --locked --no-install-project --no-editable
 
-# Stage 9: optionally allow a prebuilt Python dependency image.
+# Stage 9: optionally allow a prebuilt OpenViking server dependency image.
 FROM ${PY_DEPS_IMAGE} AS py-deps
 
-# Stage 10: install project code on top of the cached dependency environment.
+# Stage 10: install Vikingbot dependencies from lockfile without copying application code.
+FROM build-base AS bot-py-deps-source
+
+ARG TARGETPLATFORM
+
+COPY Cargo.toml Cargo.lock ./
+COPY pyproject.toml uv.lock setup.py README.md ./
+COPY third_party/agfs/agfs-sdk/python third_party/agfs/agfs-sdk/python
+
+RUN --mount=type=cache,target=/root/.cache/uv,id=uv-${TARGETPLATFORM} \
+    uv sync --locked --no-install-project --no-editable --extra bot --extra bot-dingtalk
+
+# Stage 11: optionally allow a prebuilt Vikingbot dependency image.
+FROM ${BOT_PY_DEPS_IMAGE} AS bot-py-deps
+
+# Stage 12: install OpenViking server project code on top of the cached dependency environment.
 FROM build-base AS py-builder
 
 ARG OPENVIKING_VERSION=0.0.0
@@ -109,10 +125,33 @@ COPY third_party/ third_party/
 COPY bot/ bot/
 
 RUN --mount=type=cache,target=/root/.cache/uv,id=uv-${TARGETPLATFORM} \
-    uv sync --locked --no-editable --extra bot-full
+    uv sync --locked --no-editable
 
-# Stage 11: runtime
-FROM ${PYTHON_RUNTIME_IMAGE}
+# Stage 13: install Vikingbot project code on top of the cached bot dependency environment.
+FROM build-base AS bot-py-builder
+
+ARG OPENVIKING_VERSION=0.0.0
+ARG TARGETPLATFORM
+
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OPENVIKING=${OPENVIKING_VERSION}
+
+COPY --from=bot-py-deps /app/.venv /app/.venv
+
+COPY Cargo.toml Cargo.lock ./
+COPY pyproject.toml uv.lock setup.py README.md ./
+COPY build_support/ build_support/
+COPY crates/ crates/
+COPY openviking/ openviking/
+COPY openviking_cli/ openviking_cli/
+COPY src/ src/
+COPY third_party/ third_party/
+COPY bot/ bot/
+
+RUN --mount=type=cache,target=/root/.cache/uv,id=uv-${TARGETPLATFORM} \
+    uv sync --locked --no-editable --extra bot --extra bot-dingtalk
+
+# Stage 14: shared runtime base
+FROM ${PYTHON_RUNTIME_IMAGE} AS runtime-base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -122,16 +161,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY --from=py-builder /app/.venv /app/.venv
-COPY --from=admin-builder /admin/dist /app/admin/dist
 ENV PATH="/app/.venv/bin:$PATH"
 ENV OPENVIKING_CONFIG_FILE="/app/ov.conf"
+
+# Stage 15: Vikingbot runtime image
+FROM runtime-base AS bot-runtime
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:18790/bot/v1/health || exit 1
+
+COPY --from=bot-py-builder /app/.venv /app/.venv
+
+EXPOSE 18790
+
+CMD ["vikingbot", "gateway", "--config", "/app/ov.conf"]
+
+# Stage 16: OpenViking server runtime image (default final target)
+FROM runtime-base AS server-runtime
+
+COPY --from=py-builder /app/.venv /app/.venv
+COPY --from=admin-builder /admin/dist /app/admin/dist
 
 EXPOSE 1933
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsS http://127.0.0.1:1933/health || exit 1
 
-# Default runs server; override command to run CLI, e.g.:
-# docker run --rm <image> -v "$HOME/.openviking/ovcli.conf:/root/.openviking/ovcli.conf" openviking --help
 CMD ["openviking-server"]

@@ -1,0 +1,60 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 1933,
+    "root_api_key": "replace-with-a-strong-secret",
+    "cors_origins": ["*"],
+    "with_bot": true,
+    "bot_api_url": "http://vikingbot:18790"
+  },
+  "storage": {
+    "workspace": "/app/data",
+    "vectordb": {
+      "name": "context",
+      "backend": "local",
+      "project": "default"
+    },
+    "agfs": {
+      "port": 1833,
+      "log_level": "warn",
+      "backend": "local",
+      "timeout": 10,
+      "retry_times": 3
+    }
+  },
+  "embedding": {
+    "dense": {
+      "model": "doubao-embedding-vision-250615",
+      "api_key": "replace-with-your-embedding-api-key",
+      "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+      "dimension": 1024,
+      "provider": "volcengine",
+      "input": "multimodal"
+    }
+  },
+  "vlm": {
+    "model": "doubao-seed-2-0-pro-260215",
+    "api_key": "replace-with-your-vlm-api-key",
+    "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+    "temperature": 0.0,
+    "max_retries": 3,
+    "provider": "volcengine",
+    "thinking": false
+  },
+  "bot": {
+    "gateway": {
+      "host": "0.0.0.0",
+      "port": 18790
+    },
+    "ov_server": {
+      "server_url": "http://openviking:1933",
+      "account_id": "01-account",
+      "admin_user_id": "01-user-admin"
+    }
+  },
+  "log": {
+    "level": "INFO",
+    "output": "stdout",
+    "rotation": false
+  }
+}
