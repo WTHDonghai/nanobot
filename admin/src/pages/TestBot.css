@@ -12,7 +12,7 @@
 }
 
 /* ── Chat layout overrides for the testbot context ── */
-.testbot-chat-layout {
+.testbot-root .chat-layout {
   flex: 1;
   min-height: 0;
   /* Override the absolute positioning from .chat-layout */
