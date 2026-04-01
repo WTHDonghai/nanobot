@@ -51,12 +51,16 @@ const AppRoutes = () => {
   );
 };
 
+import { ThemeProvider } from './contexts/ThemeContext';
+
 const App = () => {
   return (
     <BrowserRouter basename="/admin">
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <AppRoutes />
+        </AuthProvider>
+      </ThemeProvider>
     </BrowserRouter>
   );
 };

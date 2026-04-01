@@ -59,6 +59,17 @@
   font-weight: 600;
 }
 
+.theme-toggle-btn {
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--muted);
+  transition: color 0.2s, background 0.2s;
+}
+
+.theme-toggle-btn:hover {
+  color: var(--text);
+}
+
 .content-container {
   flex: 1;
   overflow-y: auto;
