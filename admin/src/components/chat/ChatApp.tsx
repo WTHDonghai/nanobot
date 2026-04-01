@@ -1177,7 +1177,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
               value={input}
               onChange={handleInput}
               onKeyDown={handleKeyDown}
-              placeholder={selectedUserId ? '给 Bot 发送消息...' : '正在同步用户信息...'}
+              placeholder={selectedUserId ? '请描述您遇到的问题，例如：如何办理入住？' : '正在准备服务，请稍候...'}
               disabled={loading || !selectedUserId}
               rows={1}
             />

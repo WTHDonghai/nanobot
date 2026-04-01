@@ -58,6 +58,20 @@ const TestBot: React.FC = () => {
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(true);
 
+  // Force light theme for the public test page; restore whatever was set before on unmount.
+  useEffect(() => {
+    const root = document.documentElement;
+    const previousTheme = root.getAttribute('data-theme');
+    root.setAttribute('data-theme', 'light');
+    return () => {
+      if (previousTheme) {
+        root.setAttribute('data-theme', previousTheme);
+      } else {
+        root.removeAttribute('data-theme');
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!apiKey) {
       setAuthLoading(false);
