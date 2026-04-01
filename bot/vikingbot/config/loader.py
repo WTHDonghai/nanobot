@@ -145,7 +145,7 @@ def _merge_ov_server_config(bot_data: dict, ov_data: dict) -> None:
     Merge ov_server config into bot config.
     """
     if "server_url" not in bot_data or not bot_data["server_url"]:
-        host = ov_data.get("host", "127.0.0.1")
+        host = _resolve_server_url_host(ov_data.get("host", "127.0.0.1"))
         port = ov_data.get("port", "1933")
         bot_data["server_url"] = f"http://{host}:{port}"
     if "root_api_key" not in bot_data or not bot_data["root_api_key"]:
@@ -154,6 +154,26 @@ def _merge_ov_server_config(bot_data: dict, ov_data: dict) -> None:
         bot_data["mode"] = "remote"
     else:
         bot_data["mode"] = "local"
+
+
+def _resolve_server_url_host(host: Any) -> str:
+    """Return a bot-reachable host for server_url defaults.
+
+    When OpenViking binds to a wildcard interface (for example 0.0.0.0 inside
+    Docker), Vikingbot still needs a concrete loopback address to call back into
+    the server from the same container or machine.
+    """
+    if host is None:
+        return "127.0.0.1"
+
+    host_str = str(host).strip()
+    if not host_str:
+        return "127.0.0.1"
+
+    if host_str in {"0.0.0.0", "::", "[::]", "*"}:
+        return "127.0.0.1"
+
+    return host_str
 
 
 def save_config(

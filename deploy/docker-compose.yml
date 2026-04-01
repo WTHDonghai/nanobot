@@ -9,6 +9,7 @@ services:
     image: openviking:${OPENVIKING_VERSION:-latest}
     container_name: openviking-${OPENVIKING_VERSION:-dev}
     restart: unless-stopped
+    command: ["openviking-server", "--with-bot", "--bot-log-dir", "/app/data/bot/logs"]
     ports:
       - "1933:1933"
     volumes:

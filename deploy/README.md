@@ -110,8 +110,29 @@ PLATFORM=linux/amd64 ./scripts/build-docker.sh 1.2.3
 ```bash
 cd deploy
 
-# 使用 docker-compose 部署
+# 使用 docker-compose 部署（默认同时启动 OpenViking + Vikingbot gateway）
 OPENVIKING_VERSION=1.2.3 docker-compose up -d
+```
+
+说明：
+
+- `docker-compose.yml` 默认使用 `openviking-server --with-bot`
+- Vikingbot gateway 运行在容器内部 `18790` 端口，通过 OpenViking 的 `/bot/v1/*` 代理对外提供服务
+- bot 日志会写到持久化目录 `/app/data/bot/logs`
+- 当 `ov.conf` 的 `server.host` 是 `0.0.0.0` 时，bot 会自动回连 `http://127.0.0.1:1933`
+
+如果你不用 Compose，也可以直接这样启动单容器联动模式：
+
+```bash
+docker run -d \
+  --name openviking \
+  -p 1933:1933 \
+  -e OPENVIKING_CONFIG_FILE=/app/ov.conf \
+  -v /absolute/path/ov.conf:/app/ov.conf:ro \
+  -v /data/openviking:/app/data \
+  --restart unless-stopped \
+  openviking:1.2.3 \
+  openviking-server --with-bot --bot-log-dir /app/data/bot/logs
 ```
 
 ## 镜像标签规范
