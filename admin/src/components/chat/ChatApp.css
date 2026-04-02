@@ -618,6 +618,39 @@
   border-top-left-radius: 6px;
 }
 
+.chat-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.chat-bot-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.chat-transfer-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: transparent;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+  text-decoration: none;
+  border: 1px solid transparent;
+}
+
+.chat-transfer-btn:hover {
+  color: var(--text);
+  background: var(--card);
+  border-color: var(--border);
+}
+
 .chat-meta {
   margin-top: 8px;
   font-size: 0.75rem;
@@ -627,6 +660,10 @@
 
 .chat-meta.align-right {
   text-align: right;
+}
+
+.chat-footer .chat-meta {
+  margin-top: 0;
 }
 
 .chat-input-wrapper {

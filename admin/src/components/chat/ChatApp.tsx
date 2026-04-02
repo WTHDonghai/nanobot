@@ -10,6 +10,7 @@ import {
   Trash2,
   User,
   Zap,
+  Headphones,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -1233,12 +1234,37 @@ const ChatApp: React.FC<ChatAppProps> = ({
                       </div>
                     )}
                   </div>
-                  {(message.createdAt || message.elapsedMs !== undefined) && (
-                    <div className={`chat-meta ${message.role === 'user' ? 'align-right' : ''}`}>
-                      {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
-                        .filter(Boolean)
-                        .join(' · ')}
+                  {message.role === 'bot' ? (
+                    <div className="chat-footer">
+                      {(message.createdAt || message.elapsedMs !== undefined) && (
+                        <div className="chat-meta">
+                          {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </div>
+                      )}
+                      {!message.loading && (
+                        <div className="chat-bot-actions">
+                          <a
+                            href="https://cschat.antcloud.com.cn/index.htm?tntlnstld=yLS_FlpK&scene=SCE01228243"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="chat-transfer-btn"
+                            title="转人工服务"
+                          >
+                            <Headphones size={13} /> 转人工
+                          </a>
+                        </div>
+                      )}
                     </div>
+                  ) : (
+                    (message.createdAt || message.elapsedMs !== undefined) && (
+                      <div className="chat-meta align-right">
+                        {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
+                    )
                   )}
                 </div>
               </div>
