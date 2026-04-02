@@ -396,6 +396,16 @@
   font-size: 0.88rem;
 }
 
+.chat-inline-notice {
+  margin: 16px 24px 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  background: rgba(59, 130, 246, 0.1);
+  color: #bfdbfe;
+  font-size: 0.88rem;
+}
+
 .chat-feed-container {
   flex: 1;
   overflow-y: auto;
@@ -643,12 +653,19 @@
   transition: all 0.2s ease;
   text-decoration: none;
   border: 1px solid transparent;
+  cursor: pointer;
+  appearance: none;
 }
 
 .chat-transfer-btn:hover {
   color: var(--text);
   background: var(--card);
   border-color: var(--border);
+}
+
+.chat-transfer-btn:disabled {
+  opacity: 0.64;
+  cursor: not-allowed;
 }
 
 .chat-meta {

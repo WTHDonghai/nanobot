@@ -28,3 +28,23 @@ def test_register_default_tools_knowledge_base_profile_only_keeps_openviking_qa_
         "openviking_grep",
         "openviking_glob",
     }
+
+
+def test_register_default_tools_full_profile_includes_human_handoff() -> None:
+    registry = ToolRegistry()
+    config = Config()
+    config.agents.capability_profile = CapabilityProfile.FULL
+
+    register_default_tools(
+        registry=registry,
+        config=config,
+        send_callback=None,
+        subagent_manager=None,
+        cron_service=None,
+        include_message_tool=False,
+        include_spawn_tool=False,
+        include_cron_tool=False,
+        include_image_tool=False,
+    )
+
+    assert "human_handoff" in registry.tool_names

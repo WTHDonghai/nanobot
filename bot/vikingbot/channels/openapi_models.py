@@ -61,6 +61,40 @@ class ChatResponse(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now, description="Response timestamp")
 
 
+class HumanHandoffRequest(BaseModel):
+    """Request body for creating a human handoff."""
+
+    session_id: Optional[str] = Field(default=None, description="Conversation session ID")
+    user_id: Optional[str] = Field(default=None, description="User identifier")
+    reason: Optional[str] = Field(default=None, description="Reason for the handoff")
+    summary: Optional[str] = Field(default=None, description="Short issue summary")
+    latest_user_message: Optional[str] = Field(
+        default=None,
+        description="Latest user message that triggered the handoff",
+    )
+    latest_assistant_message: Optional[str] = Field(
+        default=None,
+        description="Latest assistant message shown before the handoff",
+    )
+    source: str = Field(default="api", description="Caller source identifier")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+
+
+class HumanHandoffResponse(BaseModel):
+    """Response for a human handoff request."""
+
+    success: bool = Field(..., description="Whether the handoff request succeeded")
+    status: str = Field(..., description="Service status for the handoff")
+    message: str = Field(..., description="Human-readable status message")
+    handoff_id: Optional[str] = Field(default=None, description="Created handoff/ticket id")
+    entry_url: Optional[str] = Field(default=None, description="URL for the human handoff flow")
+    service_response: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Raw normalized response returned by the handoff service",
+    )
+    timestamp: datetime = Field(default_factory=datetime.now, description="Response timestamp")
+
+
 class ChatStreamEvent(BaseModel):
     """A single event in the chat stream (SSE)."""
 

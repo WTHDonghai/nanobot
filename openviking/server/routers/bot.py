@@ -262,3 +262,53 @@ async def chat_stream(
             "Connection": "keep-alive",
         },
     )
+
+
+@router.post("/handoff")
+async def handoff(
+    request: Request,
+    _ctx: RequestContext = Depends(get_request_context),
+):
+    """Create a human handoff via the bot service."""
+    bot_url = get_bot_url()
+    auth_token = extract_auth_token(request)
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON in request body",
+        )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            headers = {"Content-Type": "application/json"}
+            if auth_token:
+                headers["X-API-Key"] = auth_token
+
+            response = await client.post(
+                f"{bot_url}/bot/v1/handoff",
+                json=body,
+                headers=headers,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.RequestError as e:
+        logger.error(f"Failed to connect to bot service: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Bot service unavailable: {str(e)}",
+        )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Bot service returned error: {e}")
+        if e.response.status_code < 500:
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=e.response.text,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Bot service error: {e.response.text}",
+        )

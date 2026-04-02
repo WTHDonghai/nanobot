@@ -23,6 +23,8 @@ from vikingbot.channels.openapi_models import (
     ChatStreamEvent,
     EventType,
     HealthResponse,
+    HumanHandoffRequest,
+    HumanHandoffResponse,
     SessionCreateRequest,
     SessionCreateResponse,
     SessionDetailResponse,
@@ -30,6 +32,7 @@ from vikingbot.channels.openapi_models import (
     SessionListResponse,
 )
 from vikingbot.config.schema import BaseChannelConfig, Config, SessionKey
+from vikingbot.services.human_handoff import HumanHandoffPayload, HumanHandoffService
 
 
 class OpenAPIChannelConfig(BaseChannelConfig):
@@ -87,14 +90,17 @@ class OpenAPIChannel(BaseChannel):
         bus: MessageBus,
         workspace_path: Path | None = None,
         app: "FastAPI | None" = None,
+        bot_config: Config | None = None,
     ):
         super().__init__(config, bus, workspace_path)
         self.config = config
+        self.bot_config = bot_config or Config()
         self._pending: Dict[str, PendingResponse] = {}
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._router: Optional[APIRouter] = None
         self._app = app  # External FastAPI app to register routes on
         self._server: Optional[asyncio.Task] = None  # Server task
+        self._human_handoff_service = HumanHandoffService(self.bot_config.tools.human_handoff)
 
     async def start(self) -> None:
         """Start the channel - register routes to external FastAPI app if provided."""
@@ -263,6 +269,14 @@ class OpenAPIChannel(BaseChannel):
             if not request.stream:
                 request.stream = True
             return await channel._handle_chat_stream(request)
+
+        @router.post("/handoff", response_model=HumanHandoffResponse)
+        async def handoff(
+            request: HumanHandoffRequest,
+            authorized: bool = Depends(verify_api_key),
+        ):
+            """Create a human support handoff for the current session."""
+            return await channel._handle_handoff(request)
 
         @router.get("/sessions", response_model=SessionListResponse)
         async def list_sessions(
@@ -484,6 +498,34 @@ class OpenAPIChannel(BaseChannel):
             },
         )
 
+    async def _handle_handoff(self, request: HumanHandoffRequest) -> HumanHandoffResponse:
+        """Handle a human handoff request."""
+        session_data = self._sessions.get(request.session_id or "", {})
+        result = await self._human_handoff_service.request_handoff(
+            HumanHandoffPayload(
+                session_id=request.session_id,
+                user_id=request.user_id or session_data.get("user_id"),
+                reason=request.reason,
+                summary=request.summary,
+                latest_user_message=request.latest_user_message,
+                latest_assistant_message=request.latest_assistant_message,
+                source=request.source,
+                metadata={
+                    "channel_type": "cli",
+                    "channel_id": self.config.channel_id(),
+                    **request.metadata,
+                },
+            )
+        )
+        return HumanHandoffResponse(
+            success=result.success,
+            status=result.status,
+            message=result.message,
+            handoff_id=result.handoff_id,
+            entry_url=result.entry_url,
+            service_response=result.service_response,
+        )
+
 
 def get_openapi_router(bus: MessageBus, config: Config) -> APIRouter:
     """
@@ -511,6 +553,7 @@ def get_openapi_router(bus: MessageBus, config: Config) -> APIRouter:
         config=openapi_config,
         bus=bus,
         workspace_path=config.workspace_path,
+        bot_config=config,
     )
 
     # Register channel's send method as subscriber for outbound messages

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Callable
 
 from vikingbot.agent.tools.cron import CronTool
 from vikingbot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from vikingbot.agent.tools.human_handoff import HumanHandoffTool
 from vikingbot.agent.tools.image import ImageGenerationTool
 from vikingbot.agent.tools.message import MessageTool
 from vikingbot.agent.tools.ov_file import (
@@ -21,6 +22,7 @@ from vikingbot.agent.tools.shell import ExecTool
 from vikingbot.agent.tools.web import WebFetchTool
 from vikingbot.agent.tools.websearch import WebSearchTool
 from vikingbot.config.schema import CapabilityProfile
+from vikingbot.services.human_handoff import HumanHandoffService
 
 if TYPE_CHECKING:
     from vikingbot.agent.subagent import SubagentManager
@@ -40,6 +42,7 @@ def register_default_tools(
     include_cron_tool: bool = True,
     include_image_tool: bool = True,
     include_viking_tools: bool = True,
+    include_human_handoff_tool: bool = True,
 ) -> None:
     """
     Register default tools to a tool registry.
@@ -122,6 +125,9 @@ def register_default_tools(
             )
         )
 
+    if include_human_handoff_tool:
+        registry.register(HumanHandoffTool(HumanHandoffService(config.tools.human_handoff)))
+
     # Message tool
     if include_message_tool and send_callback:
         message_tool = MessageTool(send_callback=send_callback)
@@ -158,4 +164,5 @@ def register_subagent_tools(
         include_cron_tool=False,
         include_image_tool=False,
         include_viking_tools=False,
+        include_human_handoff_tool=False,
     )
