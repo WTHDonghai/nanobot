@@ -144,6 +144,10 @@ class AgentLoop:
         )
 
         self._running = False
+        self._max_concurrent_inbound = self._resolve_max_concurrent_inbound()
+        self._inbound_semaphore = asyncio.Semaphore(self._max_concurrent_inbound)
+        self._inflight_message_tasks: set[asyncio.Task[None]] = set()
+        self._session_locks: dict[str, asyncio.Lock] = {}
         self._register_default_tools()
 
     async def _publish_thinking_event(
@@ -184,6 +188,26 @@ class AgentLoop:
         """Register built-in hooks."""
         hook_manager.register_path(self.config.hooks)
 
+    def _resolve_max_concurrent_inbound(self) -> int:
+        """Resolve the maximum number of inbound messages to process concurrently."""
+        if not self.config:
+            return 1
+
+        try:
+            channel_configs = self.config.channels_config.get_all_channels()
+        except Exception:
+            channel_configs = self.config.channels or []
+
+        limits: list[int] = []
+        for channel in channel_configs:
+            if not getattr(channel, "enabled", True):
+                continue
+            limit = getattr(channel, "max_concurrent_requests", None)
+            if isinstance(limit, int) and limit > 0:
+                limits.append(limit)
+
+        return max(limits, default=1)
+
     def _register_default_tools(self) -> None:
         """Register default set of tools."""
         register_default_tools(
@@ -197,21 +221,60 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
-        logger.info("Agent loop started")
+        logger.info(
+            "Agent loop started (max_concurrent_inbound={})",
+            self._max_concurrent_inbound,
+        )
 
-        while self._running:
-            try:
-                # Wait for next message
-                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+        try:
+            while self._running:
+                try:
+                    await asyncio.wait_for(self._inbound_semaphore.acquire(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
 
-                # Process it
+                try:
+                    msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    self._inbound_semaphore.release()
+                    continue
+
+                task = asyncio.create_task(self._process_inbound_message(msg))
+                self._inflight_message_tasks.add(task)
+                task.add_done_callback(self._on_inflight_message_done)
+        finally:
+            for task in list(self._inflight_message_tasks):
+                task.cancel()
+            if self._inflight_message_tasks:
+                await asyncio.gather(*self._inflight_message_tasks, return_exceptions=True)
+
+    def stop(self) -> None:
+        """Stop the agent loop."""
+        self._running = False
+        logger.info("Agent loop stopping")
+
+    def _on_inflight_message_done(self, task: asyncio.Task[None]) -> None:
+        """Remove completed inbound tasks from the tracking set."""
+        self._inflight_message_tasks.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception(f"Unhandled error in inbound task: {e}")
+
+    async def _process_inbound_message(self, msg: InboundMessage) -> None:
+        """Process one inbound message with per-session ordering guarantees."""
+        session_lock = self._session_locks.setdefault(msg.session_key.safe_name(), asyncio.Lock())
+
+        try:
+            async with session_lock:
                 try:
                     response = await self._process_message(msg)
                     if response:
                         await self.bus.publish_outbound(response)
                 except Exception as e:
                     logger.exception(f"Error processing message: {e}")
-                    # Send error response
                     await self.bus.publish_outbound(
                         OutboundMessage(
                             session_key=msg.session_key,
@@ -219,13 +282,8 @@ class AgentLoop:
                             metadata=msg.metadata,
                         )
                     )
-            except asyncio.TimeoutError:
-                continue
-
-    def stop(self) -> None:
-        """Stop the agent loop."""
-        self._running = False
-        logger.info("Agent loop stopping")
+        finally:
+            self._inbound_semaphore.release()
 
     async def _run_agent_loop(
         self,

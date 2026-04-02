@@ -3,16 +3,20 @@
 
 """Regression tests for OpenAPI stream event timing."""
 
+import asyncio
 import json
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 
 from vikingbot.agent.loop import AgentLoop
-from vikingbot.bus.events import OutboundEventType, OutboundMessage
+from vikingbot.bus.events import InboundMessage, OutboundEventType, OutboundMessage
 from vikingbot.bus.queue import MessageBus
 from vikingbot.channels.openapi import OpenAPIChannel, OpenAPIChannelConfig, PendingResponse
+from vikingbot.cli.commands import prepare_channel
 from vikingbot.channels.openapi_models import ChatRequest, EventType
 from vikingbot.config.schema import CapabilityProfile, Config, SessionKey
 from vikingbot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -80,6 +84,27 @@ async def test_chat_stream_emits_immediate_progress_event() -> None:
     assert first_event["data"] == "Request received. Preparing context..."
 
     await response.body_iterator.aclose()
+
+
+def test_prepare_channel_registers_dynamic_openapi_config_for_agent_loop() -> None:
+    config = Config()
+    config.channels = []
+
+    prepare_channel(
+        config,
+        MessageBus(),
+        fastapi_app=FastAPI(),
+        enable_openapi=True,
+        openapi_port=18790,
+    )
+
+    channel_configs = config.channels_config.get_all_channels()
+    assert any(
+        isinstance(channel_config, OpenAPIChannelConfig)
+        and channel_config.channel_key() == "cli__default"
+        and channel_config.max_concurrent_requests == 100
+        for channel_config in channel_configs
+    )
 
 
 @pytest.mark.asyncio
@@ -257,3 +282,136 @@ async def test_agent_loop_requires_tool_call_on_first_kb_iteration() -> None:
     assert token_usage["total_tokens"] == 0
     assert iteration == 1
     assert provider.calls[0]["tool_choice"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_processes_different_sessions_concurrently() -> None:
+    config = Config()
+    config.channels = [OpenAPIChannelConfig(max_concurrent_requests=2)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=StubProvider([]),
+            workspace=workspace,
+            config=config,
+        )
+
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        allow_first_to_finish = asyncio.Event()
+
+        async def fake_process(msg: InboundMessage) -> OutboundMessage:
+            if msg.session_key.chat_id == "session-1":
+                first_started.set()
+                await allow_first_to_finish.wait()
+            else:
+                second_started.set()
+                allow_first_to_finish.set()
+
+            return OutboundMessage(session_key=msg.session_key, content=f"done:{msg.session_key.chat_id}")
+
+        loop._process_message = fake_process  # type: ignore[method-assign]
+        runner = asyncio.create_task(loop.run())
+
+        try:
+            await loop.bus.publish_inbound(
+                InboundMessage(
+                    sender_id="user-1",
+                    content="first",
+                    session_key=SessionKey(type="cli", channel_id="default", chat_id="session-1"),
+                )
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+
+            await loop.bus.publish_inbound(
+                InboundMessage(
+                    sender_id="user-2",
+                    content="second",
+                    session_key=SessionKey(type="cli", channel_id="default", chat_id="session-2"),
+                )
+            )
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
+
+            results = {
+                (await asyncio.wait_for(loop.bus.consume_outbound(), timeout=1.0)).content,
+                (await asyncio.wait_for(loop.bus.consume_outbound(), timeout=1.0)).content,
+            }
+        finally:
+            loop.stop()
+            runner.cancel()
+            with suppress(asyncio.CancelledError):
+                await runner
+
+    assert results == {"done:session-1", "done:session-2"}
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_keeps_same_session_messages_serialized() -> None:
+    config = Config()
+    config.channels = [OpenAPIChannelConfig(max_concurrent_requests=2)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=StubProvider([]),
+            workspace=workspace,
+            config=config,
+        )
+
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        allow_first_to_finish = asyncio.Event()
+
+        async def fake_process(msg: InboundMessage) -> OutboundMessage:
+            if msg.metadata.get("seq") == 1:
+                first_started.set()
+                await allow_first_to_finish.wait()
+            else:
+                second_started.set()
+
+            return OutboundMessage(session_key=msg.session_key, content=f"done:{msg.metadata.get('seq')}")
+
+        loop._process_message = fake_process  # type: ignore[method-assign]
+        runner = asyncio.create_task(loop.run())
+
+        try:
+            session_key = SessionKey(type="cli", channel_id="default", chat_id="same-session")
+            await loop.bus.publish_inbound(
+                InboundMessage(
+                    sender_id="user-1",
+                    content="first",
+                    session_key=session_key,
+                    metadata={"seq": 1},
+                )
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+
+            await loop.bus.publish_inbound(
+                InboundMessage(
+                    sender_id="user-1",
+                    content="second",
+                    session_key=session_key,
+                    metadata={"seq": 2},
+                )
+            )
+
+            await asyncio.sleep(0.1)
+            assert not second_started.is_set()
+
+            allow_first_to_finish.set()
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
+
+            results = [
+                (await asyncio.wait_for(loop.bus.consume_outbound(), timeout=1.0)).content,
+                (await asyncio.wait_for(loop.bus.consume_outbound(), timeout=1.0)).content,
+            ]
+        finally:
+            loop.stop()
+            runner.cancel()
+            with suppress(asyncio.CancelledError):
+                await runner
+
+    assert results == ["done:1", "done:2"]
