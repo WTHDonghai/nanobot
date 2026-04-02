@@ -101,18 +101,18 @@ BUILD_TARGET=server-runtime \
 多架构发布需要推仓库或导出 OCI：
 
 ```bash
-PUSH=1 \
 PLATFORM=linux/amd64,linux/arm64 \
-REGISTRY=registry.example.com/ \
+BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
+BOT_PY_DEPS_IMAGE=vikingbot-py-deps:uvlock-bot-20260401 \
 IMAGE_NAME=openviking-server \
 BUILD_TARGET=server-runtime \
 ./scripts/build-docker.sh 1.2.3
 ```
 
 ```bash
-PUSH=1 \
 PLATFORM=linux/amd64,linux/arm64 \
-REGISTRY=registry.example.com/ \
+BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
+BOT_PY_DEPS_IMAGE=vikingbot-py-deps:uvlock-bot-20260401 \
 IMAGE_NAME=vikingbot \
 BUILD_TARGET=bot-runtime \
 ./scripts/build-docker.sh 1.2.3
