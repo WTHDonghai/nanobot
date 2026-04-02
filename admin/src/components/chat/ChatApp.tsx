@@ -1098,12 +1098,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
       setHandoffNotice(response.message || '已为您准备转人工服务入口。');
 
-      if (response.entry_url) {
-        const openedWindow = window.open(response.entry_url, '_blank', 'noopener,noreferrer');
-        if (!openedWindow) {
-          window.location.assign(response.entry_url);
-        }
-      }
+      window.alert(`转人工接口调用成功！\n\n获取到的跳转链接：${response.entry_url || '无'}`);
     } catch (err) {
       setSessionError(err instanceof Error ? err.message : '转人工失败，请稍后重试。');
     } finally {
