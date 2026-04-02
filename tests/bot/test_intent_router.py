@@ -170,7 +170,10 @@ def test_run_agent_loop_continues_search_when_kb_answer_has_no_document_evidence
 
     assert tools_used == []
     assert iteration == 2
-    assert final_content == "Reached 2 iterations without completion."
+    assert (
+        final_content
+        == "抱歉，我暂时没有在现有支持资料中找到足够依据来回答这个问题。需要的话，我可以帮您转人工继续跟进，您看需要吗？"
+    )
     assert any(
         message.get("role") == "assistant" and message.get("content") == "这是模型自行生成的答案。"
         for message in provider.calls[1]["messages"]

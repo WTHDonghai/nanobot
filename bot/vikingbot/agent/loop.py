@@ -495,7 +495,10 @@ class AgentLoop:
             isinstance(final_content, str) and not final_content.strip()
         ):
             if iteration >= self.max_iterations:
-                final_content = f"Reached {self.max_iterations} iterations without completion."
+                final_content = self._build_iteration_limit_fallback(
+                    messages=messages,
+                    has_kb_read_evidence=has_kb_read_evidence,
+                )
             else:
                 final_content = "I've completed processing but have no response to give."
 
@@ -543,6 +546,65 @@ class AgentLoop:
             else:
                 lines.append(f"- {tool_name}")
         return "\n".join(lines[-6:]) if lines else "No KB tool evidence collected yet."
+
+    @staticmethod
+    def _extract_user_text(messages: list[dict]) -> str:
+        """Collect user-authored text for lightweight reply-language detection."""
+        texts: list[str] = []
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content.strip()
+                if text:
+                    texts.append(text)
+                continue
+
+            if not isinstance(content, list):
+                continue
+
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                text = str(block.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+
+        return "\n".join(texts)
+
+    @classmethod
+    def _detect_reply_language(cls, messages: list[dict]) -> str:
+        """Infer a small set of reply languages from the user's latest text."""
+        user_text = cls._extract_user_text(messages)
+        if re.search(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]", user_text):
+            return "ja"
+        if re.search(r"[\u4e00-\u9fff]", user_text):
+            return "zh-CN"
+        return "en"
+
+    def _build_iteration_limit_fallback(
+        self, messages: list[dict], has_kb_read_evidence: bool
+    ) -> str:
+        """Return a user-facing fallback when the loop hits the iteration limit."""
+        if not self.context._is_knowledge_base_mode():
+            return f"Reached {self.max_iterations} iterations without completion."
+
+        language = self._detect_reply_language(messages)
+        if has_kb_read_evidence:
+            fallbacks = {
+                "zh-CN": "抱歉，我暂时还没能根据现有资料整理出明确答复。需要的话，我可以帮您转人工继续跟进，您看需要吗？",
+                "ja": "申し訳ありません。現在の資料だけでは明確な回答をまとめきれませんでした。必要であれば担当者へ引き継げますが、ご希望ですか。",
+                "en": "Sorry, I still couldn't produce a clear answer from the current materials. If you'd like, I can help transfer this to a human agent. Would you like me to do that?",
+            }
+        else:
+            fallbacks = {
+                "zh-CN": "抱歉，我暂时没有在现有支持资料中找到足够依据来回答这个问题。需要的话，我可以帮您转人工继续跟进，您看需要吗？",
+                "ja": "申し訳ありません。現在のサポート資料では、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば担当者へ引き継げますが、ご希望ですか。",
+                "en": "Sorry, I couldn't find enough supporting information in the current support materials to answer this clearly. If you'd like, I can help transfer this to a human agent. Would you like me to do that?",
+            }
+        return fallbacks.get(language, fallbacks["en"])
 
     def _select_tool_choice(
         self,

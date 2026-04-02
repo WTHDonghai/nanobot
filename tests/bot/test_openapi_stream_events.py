@@ -236,7 +236,10 @@ async def test_agent_loop_publishes_kb_text_draft_as_reasoning_before_retry() ->
             sender_id="user-1",
         )
 
-    assert final_content == "Reached 2 iterations without completion."
+    assert (
+        final_content
+        == "抱歉，我暂时没有在现有支持资料中找到足够依据来回答这个问题。需要的话，我可以帮您转人工继续跟进，您看需要吗？"
+    )
     assert tools_used == []
     assert token_usage["total_tokens"] == 0
     assert iteration == 2
@@ -277,7 +280,10 @@ async def test_agent_loop_requires_tool_call_on_first_kb_iteration() -> None:
             sender_id="user-1",
         )
 
-    assert final_content == "Reached 1 iterations without completion."
+    assert (
+        final_content
+        == "抱歉，我暂时没有在现有支持资料中找到足够依据来回答这个问题。需要的话，我可以帮您转人工继续跟进，您看需要吗？"
+    )
     assert tools_used == []
     assert token_usage["total_tokens"] == 0
     assert iteration == 1
