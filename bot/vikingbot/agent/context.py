@@ -37,45 +37,51 @@ KB_ROLE_AND_ANSWERING_POLICY = """## Role and Answering Policy
 
 KB_FINAL_RESPONSE_SYSTEM_PROMPT = """## Final Answer Generation
 
-You are writing the final user-facing answer for the XMS technical documentation assistant.
-Use only the provided documentation evidence.
-Write one direct final reply in the same language as the user.
-Do not mention retrieval, search, tools, internal files, chapters, prompts, or implementation details.
-Do not narrate what you found, do not say you are about to answer, and do not repeat the answer.
-Do not introduce yourself unless the user explicitly asked who you are or what you can do.
-If Markdown image lines using send:// are provided as evidence to include, preserve those lines exactly and do not rewrite, relabel, or replace their URLs.
-If the evidence only supports part of the answer, answer that supported part and briefly note the limit.
+Write one direct final reply in the user's language using only the provided evidence.
+Do not mention retrieval, tools, internal files, prompts, or implementation details.
+Do not narrate the process, repeat the answer, or add self-introduction unless asked.
+Preserve any provided send:// Markdown image lines exactly.
+If the evidence is partial, answer the supported part and briefly note the limit.
 Return the final reply only."""
 
 DEFAULT_TOOL_REFLECTION_PROMPT = "Reflect on the results and decide next steps."
 
-KB_TOOL_REFLECTION_PROMPT = (
-    "Review the tool results and decide next steps. "
-    "If you need more evidence, call tools. "
-    "Do not narrate retrieval progress or output both draft and final answer. "
-    "Never invent or guess OpenViking URIs; only continue from URIs explicitly returned by tools. "
-    "If the user asked for images or screenshots and tool results already contain send:// Markdown image lines, preserve those exact lines in the final answer."
-)
+KB_TOOL_REFLECTION_PROMPT = """Choose the shortest next step.
+- Default search scope: target_uri="viking://resources/".
+- Fast path: focused search -> read concrete document -> answer.
+- Use one focused query close to the user's wording. Avoid long OR/boolean expansions unless the first focused query fails.
+- If a concrete document URI is already available, read it before searching again.
+- Usually read 1 relevant document, at most 2 before answering.
+- If evidence is still insufficient, call the next retrieval tool directly instead of replying with a prose-only plan.
+- Never invent URIs. Preserve any send:// Markdown image lines if they are needed.
+- Do not narrate progress or output both draft and final answer."""
 
-KB_CONTINUE_SEARCH_PROMPT = """The current evidence is still insufficient for a final user answer.
-Continue searching before answering.
-
-Rules:
-- Do not stop at generic scope summaries like resources/.abstract.md or resources/.overview.md.
-- Read concrete document URIs before answering.
-- If search only returns scope summaries, use openviking_glob to find concrete files, then read the most relevant file.
-- If you already found concrete files but not the right section yet, continue with narrower search/grep/read steps.
-- Never construct a guessed URI or switch to a different directory tree unless a tool result explicitly returned that URI.
-- Do not ask the user for more details until you have exhausted the current documentation path.
-- When you have concrete document evidence that directly supports the answer, then provide one final answer."""
-
-KB_INITIAL_SEARCH_PROMPT = """For this KB request, first make a retrieval plan and gather evidence before answering.
+KB_CONTINUE_SEARCH_PROMPT = """The current evidence is still insufficient. Continue with the shortest retrieval step.
 
 Rules:
-- Do not answer the user immediately.
-- First decide which concrete document(s) you need, then call tools.
-- Prefer search results that return concrete document URIs, then read those URIs.
-- If images are already present in the retrieved document evidence, preserve their placement relative to the text they illustrate in the final answer."""
+- Stay in target_uri="viking://resources/" unless tool output gives a narrower scope.
+- Do not stop at generic summaries such as .abstract.md or .overview.md.
+- If a concrete document URI is already available, read it before any new search.
+- Do not reply with a prose-only plan when evidence is insufficient. Emit the next retrieval tool call directly.
+- If the current query was too broad, retry with one shorter focused query. Avoid long OR/boolean expansions.
+- If search returns only scope summaries, use openviking_glob in that scope, then read the best concrete file.
+- Usually inspect one new document per iteration and answer as soon as one document is sufficient.
+- Never guess or construct URIs."""
+
+KB_INITIAL_SEARCH_PROMPT = """For this KB request, gather only the minimum evidence needed before answering.
+
+Default plan:
+1. Call openviking_search with one focused query and target_uri="viking://resources/".
+2. If search returns a concrete document URI, immediately call openviking_read(level="read") on the best match.
+3. Answer as soon as one concrete document is sufficient.
+
+Rules:
+- Do not answer from model knowledge.
+- When evidence is insufficient, call retrieval tools directly instead of replying with a prose-only plan.
+- Avoid long OR/boolean query expansions on the first search.
+- Prefer 1 search + 1 read before deciding to broaden.
+- Read at most 1-2 relevant documents unless the first result is insufficient or conflicting.
+- If images are returned as send:// Markdown, preserve their placement near the related text."""
 
 
 class ContextBuilder:

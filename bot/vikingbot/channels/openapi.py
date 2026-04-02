@@ -183,6 +183,8 @@ class OpenAPIChannel(BaseChannel):
             await pending.close_stream()
         elif msg.event_type == OutboundEventType.REASONING:
             await pending.add_event("reasoning", msg.content)
+        elif msg.event_type == OutboundEventType.ITERATION:
+            await pending.add_event("iteration", msg.content)
         elif msg.event_type == OutboundEventType.TOOL_CALL:
             await pending.add_event("tool_call", msg.content)
         elif msg.event_type == OutboundEventType.TOOL_RESULT:
@@ -436,6 +438,10 @@ class OpenAPIChannel(BaseChannel):
 
         async def event_generator():
             try:
+                # Emit an immediate progress event so streaming clients receive a first SSE
+                # packet before queueing, classification, or the first model/tool round finishes.
+                await pending.add_event("reasoning", "Request received. Preparing context...")
+
                 # Build session key and send message
                 session_key = SessionKey(
                     type="cli",

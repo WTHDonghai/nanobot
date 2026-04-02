@@ -267,9 +267,16 @@ class AgentLoop:
                     )
                 )
 
+            tool_definitions = self.tools.get_definitions()
+            tool_choice = self._select_tool_choice(
+                iteration=iteration,
+                tools=tool_definitions,
+                has_kb_read_evidence=has_kb_read_evidence,
+            )
             response = await self.provider.chat(
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=tool_definitions,
+                tool_choice=tool_choice,
                 model=self.model,
                 session_id=session_key.safe_name(),
             )
@@ -287,6 +294,31 @@ class AgentLoop:
                         event_type=OutboundEventType.REASONING,
                     )
                 )
+            elif publish_events and response.has_tool_calls:
+                plan_summary = self._build_tool_plan_summary(response.tool_calls)
+                if plan_summary:
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            session_key=session_key,
+                            content=plan_summary,
+                            event_type=OutboundEventType.REASONING,
+                        )
+                    )
+            elif (
+                publish_events
+                and self.context._is_knowledge_base_mode()
+                and not has_kb_read_evidence
+                and not response.has_tool_calls
+            ):
+                plan_summary = self._summarize_non_tool_kb_response(response.content)
+                if plan_summary:
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            session_key=session_key,
+                            content=plan_summary,
+                            event_type=OutboundEventType.REASONING,
+                        )
+                    )
 
             if response.has_tool_calls:
                 args_list = [tc.arguments for tc in response.tool_calls]
@@ -307,6 +339,19 @@ class AgentLoop:
                     tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
+
+                # Publish tool-call events before execution so streaming clients can
+                # see which tools are starting rather than waiting for results.
+                if publish_events:
+                    for tool_call in response.tool_calls:
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        await self.bus.publish_outbound(
+                            OutboundMessage(
+                                session_key=session_key,
+                                content=f"{tool_call.name}({args_str})",
+                                event_type=OutboundEventType.TOOL_CALL,
+                            )
+                        )
 
                 # Stage 2: Execute all tools in parallel
                 async def execute_single_tool(idx: int, tool_call):
@@ -336,13 +381,6 @@ class AgentLoop:
                     logger.info(f"[RESULT]: {str(result)[:600]}")
 
                     if publish_events:
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                session_key=session_key,
-                                content=f"{tool_call.name}({args_str})",
-                                event_type=OutboundEventType.TOOL_CALL,
-                            )
-                        )
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 session_key=session_key,
@@ -377,6 +415,12 @@ class AgentLoop:
                 )
             else:
                 if self.context._is_knowledge_base_mode() and not has_kb_read_evidence:
+                    if response.content or response.reasoning_content:
+                        messages = self.context.add_assistant_message(
+                            messages,
+                            response.content,
+                            reasoning_content=response.reasoning_content,
+                        )
                     messages.append(
                         {
                             "role": "system",
@@ -441,6 +485,93 @@ class AgentLoop:
             else:
                 lines.append(f"- {tool_name}")
         return "\n".join(lines[-6:]) if lines else "No KB tool evidence collected yet."
+
+    def _select_tool_choice(
+        self,
+        iteration: int,
+        tools: list[dict] | None,
+        has_kb_read_evidence: bool,
+    ) -> str | None:
+        """Select tool-choice mode for the current LLM turn."""
+        if (
+            self.context._is_knowledge_base_mode()
+            and iteration == 1
+            and not has_kb_read_evidence
+            and tools
+        ):
+            return "required"
+        return None
+
+    @staticmethod
+    def _build_tool_plan_summary(tool_calls: list) -> str | None:
+        """Build a short user-facing summary of the model's planned tool steps."""
+        if not tool_calls:
+            return None
+
+        def _clean_text(value: object, max_len: int = 36) -> str:
+            text = str(value or "").strip().replace("\n", " ")
+            text = re.sub(r"\s+", " ", text)
+            if len(text) > max_len:
+                return f"{text[: max_len - 3]}..."
+            return text
+
+        def _short_name_from_path(value: object) -> str:
+            text = _clean_text(value)
+            if not text:
+                return ""
+            return text.rsplit("/", 1)[-1] or text
+
+        plan_steps: list[str] = []
+        for tool_call in tool_calls[:3]:
+            args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+            name = str(getattr(tool_call, "name", "") or "")
+
+            if name == "openviking_search":
+                query = _clean_text(
+                    args.get("query") or args.get("keyword") or args.get("q") or "当前问题"
+                )
+                plan_steps.append(f"先搜索相关资料：{query}")
+            elif name == "openviking_read":
+                target = _short_name_from_path(args.get("uri"))
+                plan_steps.append(f"再读取文档内容{f'：{target}' if target else ''}")
+            elif name == "openviking_glob":
+                plan_steps.append("先定位具体文档")
+            elif "search" in name:
+                query = _clean_text(
+                    args.get("query") or args.get("keyword") or args.get("q") or "相关信息"
+                )
+                plan_steps.append(f"先检索信息：{query}")
+            elif "read" in name:
+                target = _short_name_from_path(
+                    args.get("uri") or args.get("path") or args.get("file_path")
+                )
+                plan_steps.append(f"再读取内容{f'：{target}' if target else ''}")
+            elif "exec" in name or "shell" in name or "python" in name:
+                plan_steps.append("执行必要的检查和计算")
+            else:
+                plan_steps.append(f"执行 {name}")
+
+        if not plan_steps:
+            return None
+
+        summary = "规划：" + " -> ".join(plan_steps)
+        if len(tool_calls) > len(plan_steps):
+            summary += f" 等 {len(tool_calls)} 个步骤"
+        return summary
+
+    @staticmethod
+    def _summarize_non_tool_kb_response(content: str | None, max_len: int = 240) -> str | None:
+        """Surface a KB model draft when it failed to emit a tool call."""
+        if not isinstance(content, str):
+            return None
+
+        text = re.sub(r"\s+", " ", content).strip()
+        if not text:
+            return None
+
+        if len(text) > max_len:
+            return f"{text[: max_len - 3]}..."
+        return text
 
     @classmethod
     def _extract_image_evidence_blocks(cls, messages: list[dict]) -> list[str]:

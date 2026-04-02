@@ -129,6 +129,38 @@ export type ChatAppProps = {
   hideUserSelector?: boolean;
 };
 
+function summarizeReasoningEvent(data: unknown): string {
+  const raw = typeof data === 'string' ? data : JSON.stringify(data ?? '');
+  const trimmed = raw.trim();
+  if (!trimmed) return '正在规划回答路径...';
+
+  if (trimmed === 'Request received. Preparing context...') {
+    return '已接收请求，正在准备上下文...';
+  }
+
+  const segments = trimmed
+    .split(/\r?\n+/)
+    .map((line) => line.replace(/^[-*#\d.\s]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 3);
+
+  const summary = (segments.length > 0 ? segments.join(' · ') : trimmed)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!summary) return '正在规划回答路径...';
+  return summary.length > 120 ? `${summary.slice(0, 117)}...` : summary;
+}
+
+function summarizeIterationEvent(data: unknown): string {
+  const raw = typeof data === 'string' ? data : JSON.stringify(data ?? '');
+  const match = raw.match(/Iteration\s+(\d+)\/(\d+)/i);
+  if (match) {
+    return `第 ${match[1]} / ${match[2]} 轮规划中...`;
+  }
+  return '正在进入下一轮分析...';
+}
+
 const ChatApp: React.FC<ChatAppProps> = ({
   serverUrl,
   apiKey,
@@ -878,7 +910,11 @@ const ChatApp: React.FC<ChatAppProps> = ({
           try {
             const evt = JSON.parse(line.slice(6));
             let status = '思考中...';
-            if (evt.event === 'tool_call') {
+            if (evt.event === 'reasoning') {
+              status = summarizeReasoningEvent(evt.data);
+            } else if (evt.event === 'iteration') {
+              status = summarizeIterationEvent(evt.data);
+            } else if (evt.event === 'tool_call') {
               let displayStatus = '正在调用工具...';
               try {
                 let name = '';
