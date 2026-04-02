@@ -8,9 +8,11 @@ import json
 from typing import AsyncGenerator, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
+from openviking.server.auth import get_request_context
+from openviking.server.identity import RequestContext
 from openviking_cli.utils.logger import get_logger
 
 router = APIRouter(prefix="", tags=["bot"])
@@ -66,8 +68,6 @@ def require_auth_token(request: Request) -> str:
             detail="Missing authentication token",
         )
     return auth_token
-
-
 @router.get("/health")
 async def health_check(request: Request):
     """Health check endpoint for Bot API.
@@ -107,7 +107,7 @@ async def proxy_image(image_name: str, request: Request):
     Proxy an image request to the actual Bot API.
     """
     bot_url = get_bot_url()
-    
+
     import mimetypes
     media_type, _ = mimetypes.guess_type(image_name)
     media_type = media_type or "application/octet-stream"
@@ -138,13 +138,16 @@ async def proxy_image(image_name: str, request: Request):
 
 
 @router.post("/chat")
-async def chat(request: Request):
+async def chat(
+    request: Request,
+    _ctx: RequestContext = Depends(get_request_context),
+):
     """Send a message to the bot and get a response.
 
     Proxies the request to Vikingbot OpenAPIChannel.
     """
     bot_url = get_bot_url()
-    auth_token = require_auth_token(request)
+    auth_token = extract_auth_token(request)
 
     # Read request body
     try:
@@ -157,8 +160,10 @@ async def chat(request: Request):
 
     try:
         async with httpx.AsyncClient() as client:
-            # Build headers
-            headers = {"Content-Type": "application/json", "X-API-Key": auth_token}
+            # Build headers - only include X-API-Key if provided
+            headers = {"Content-Type": "application/json"}
+            if auth_token:
+                headers["X-API-Key"] = auth_token
 
             # Forward to Vikingbot OpenAPIChannel chat endpoint
             response = await client.post(
@@ -190,13 +195,16 @@ async def chat(request: Request):
 
 
 @router.post("/chat/stream")
-async def chat_stream(request: Request):
+async def chat_stream(
+    request: Request,
+    _ctx: RequestContext = Depends(get_request_context),
+):
     """Send a message to the bot and get a streaming response.
 
     Proxies the request to Vikingbot OpenAPIChannel with SSE streaming.
     """
     bot_url = get_bot_url()
-    auth_token = require_auth_token(request)
+    auth_token = extract_auth_token(request)
 
     # Read request body
     try:
@@ -211,8 +219,10 @@ async def chat_stream(request: Request):
         """Generate SSE events from bot response stream."""
         try:
             async with httpx.AsyncClient() as client:
-                # Build headers
-                headers = {"Content-Type": "application/json", "X-API-Key": auth_token}
+                # Build headers - only include X-API-Key if provided
+                headers = {"Content-Type": "application/json"}
+                if auth_token:
+                    headers["X-API-Key"] = auth_token
 
                 # Forward to Vikingbot OpenAPIChannel stream endpoint
                 async with client.stream(

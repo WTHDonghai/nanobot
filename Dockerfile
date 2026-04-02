@@ -50,6 +50,10 @@ COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV PATH="/usr/local/cargo/bin:/usr/local/go/bin:${PATH}"
+ARG OPENVIKING_VERSION=0.0.0
+ARG TARGETPLATFORM
+ARG UV_LOCK_STRATEGY=auto
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OPENVIKING=${OPENVIKING_VERSION}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -117,6 +121,7 @@ COPY --from=py-deps /app/.venv /app/.venv
 COPY Cargo.toml Cargo.lock ./
 COPY pyproject.toml uv.lock setup.py README.md ./
 COPY build_support/ build_support/
+COPY bot/ bot/
 COPY crates/ crates/
 COPY openviking/ openviking/
 COPY openviking_cli/ openviking_cli/
@@ -124,8 +129,26 @@ COPY src/ src/
 COPY third_party/ third_party/
 COPY bot/ bot/
 
+# Install project and dependencies (triggers setup.py artifact builds + build_extension).
+# Default to auto-refreshing uv.lock inside the ephemeral build context when it is
+# stale, so Docker builds stay unblocked after dependency changes. Set
+# UV_LOCK_STRATEGY=locked to keep fail-fast reproducibility checks.
 RUN --mount=type=cache,target=/root/.cache/uv,id=uv-${TARGETPLATFORM} \
-    uv sync --locked --no-editable
+    case "${UV_LOCK_STRATEGY}" in \
+        locked) \
+            uv sync --locked --no-editable --extra bot \
+            ;; \
+        auto) \
+            if ! uv lock --check; then \
+                uv lock; \
+            fi; \
+            uv sync --locked --no-editable --extra bot \
+            ;; \
+        *) \
+            echo "Unsupported UV_LOCK_STRATEGY: ${UV_LOCK_STRATEGY}" >&2; \
+            exit 2 \
+            ;; \
+    esac
 
 # Stage 13: install Vikingbot project code on top of the cached bot dependency environment.
 FROM build-base AS bot-py-builder
@@ -181,10 +204,14 @@ FROM runtime-base AS server-runtime
 
 COPY --from=py-builder /app/.venv /app/.venv
 COPY --from=admin-builder /admin/dist /app/admin/dist
+COPY docker/openviking-console-entrypoint.sh /usr/local/bin/openviking-console-entrypoint
+RUN chmod +x /usr/local/bin/openviking-console-entrypoint
 
-EXPOSE 1933
+EXPOSE 1933 8020
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsS http://127.0.0.1:1933/health || exit 1
 
-CMD ["openviking-server"]
+# Default runs server + console; override command to run CLI, e.g.:
+# docker run --rm <image> -v "$HOME/.openviking/ovcli.conf:/root/.openviking/ovcli.conf" openviking --help
+ENTRYPOINT ["openviking-console-entrypoint"]
