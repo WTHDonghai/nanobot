@@ -144,6 +144,10 @@ class AgentLoop:
         )
 
         self._running = False
+        self._max_concurrent_inbound = self._resolve_max_concurrent_inbound()
+        self._inbound_semaphore = asyncio.Semaphore(self._max_concurrent_inbound)
+        self._inflight_message_tasks: set[asyncio.Task[None]] = set()
+        self._session_locks: dict[str, asyncio.Lock] = {}
         self._register_default_tools()
 
     async def _publish_thinking_event(
@@ -184,6 +188,26 @@ class AgentLoop:
         """Register built-in hooks."""
         hook_manager.register_path(self.config.hooks)
 
+    def _resolve_max_concurrent_inbound(self) -> int:
+        """Resolve the maximum number of inbound messages to process concurrently."""
+        if not self.config:
+            return 1
+
+        try:
+            channel_configs = self.config.channels_config.get_all_channels()
+        except Exception:
+            channel_configs = self.config.channels or []
+
+        limits: list[int] = []
+        for channel in channel_configs:
+            if not getattr(channel, "enabled", True):
+                continue
+            limit = getattr(channel, "max_concurrent_requests", None)
+            if isinstance(limit, int) and limit > 0:
+                limits.append(limit)
+
+        return max(limits, default=1)
+
     def _register_default_tools(self) -> None:
         """Register default set of tools."""
         register_default_tools(
@@ -197,21 +221,60 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
-        logger.info("Agent loop started")
+        logger.info(
+            "Agent loop started (max_concurrent_inbound={})",
+            self._max_concurrent_inbound,
+        )
 
-        while self._running:
-            try:
-                # Wait for next message
-                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+        try:
+            while self._running:
+                try:
+                    await asyncio.wait_for(self._inbound_semaphore.acquire(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
 
-                # Process it
+                try:
+                    msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    self._inbound_semaphore.release()
+                    continue
+
+                task = asyncio.create_task(self._process_inbound_message(msg))
+                self._inflight_message_tasks.add(task)
+                task.add_done_callback(self._on_inflight_message_done)
+        finally:
+            for task in list(self._inflight_message_tasks):
+                task.cancel()
+            if self._inflight_message_tasks:
+                await asyncio.gather(*self._inflight_message_tasks, return_exceptions=True)
+
+    def stop(self) -> None:
+        """Stop the agent loop."""
+        self._running = False
+        logger.info("Agent loop stopping")
+
+    def _on_inflight_message_done(self, task: asyncio.Task[None]) -> None:
+        """Remove completed inbound tasks from the tracking set."""
+        self._inflight_message_tasks.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception(f"Unhandled error in inbound task: {e}")
+
+    async def _process_inbound_message(self, msg: InboundMessage) -> None:
+        """Process one inbound message with per-session ordering guarantees."""
+        session_lock = self._session_locks.setdefault(msg.session_key.safe_name(), asyncio.Lock())
+
+        try:
+            async with session_lock:
                 try:
                     response = await self._process_message(msg)
                     if response:
                         await self.bus.publish_outbound(response)
                 except Exception as e:
                     logger.exception(f"Error processing message: {e}")
-                    # Send error response
                     await self.bus.publish_outbound(
                         OutboundMessage(
                             session_key=msg.session_key,
@@ -219,13 +282,8 @@ class AgentLoop:
                             metadata=msg.metadata,
                         )
                     )
-            except asyncio.TimeoutError:
-                continue
-
-    def stop(self) -> None:
-        """Stop the agent loop."""
-        self._running = False
-        logger.info("Agent loop stopping")
+        finally:
+            self._inbound_semaphore.release()
 
     async def _run_agent_loop(
         self,
@@ -267,9 +325,16 @@ class AgentLoop:
                     )
                 )
 
+            tool_definitions = self.tools.get_definitions()
+            tool_choice = self._select_tool_choice(
+                iteration=iteration,
+                tools=tool_definitions,
+                has_kb_read_evidence=has_kb_read_evidence,
+            )
             response = await self.provider.chat(
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=tool_definitions,
+                tool_choice=tool_choice,
                 model=self.model,
                 session_id=session_key.safe_name(),
             )
@@ -287,6 +352,31 @@ class AgentLoop:
                         event_type=OutboundEventType.REASONING,
                     )
                 )
+            elif publish_events and response.has_tool_calls:
+                plan_summary = self._build_tool_plan_summary(response.tool_calls)
+                if plan_summary:
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            session_key=session_key,
+                            content=plan_summary,
+                            event_type=OutboundEventType.REASONING,
+                        )
+                    )
+            elif (
+                publish_events
+                and self.context._is_knowledge_base_mode()
+                and not has_kb_read_evidence
+                and not response.has_tool_calls
+            ):
+                plan_summary = self._summarize_non_tool_kb_response(response.content)
+                if plan_summary:
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            session_key=session_key,
+                            content=plan_summary,
+                            event_type=OutboundEventType.REASONING,
+                        )
+                    )
 
             if response.has_tool_calls:
                 args_list = [tc.arguments for tc in response.tool_calls]
@@ -307,6 +397,19 @@ class AgentLoop:
                     tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
+
+                # Publish tool-call events before execution so streaming clients can
+                # see which tools are starting rather than waiting for results.
+                if publish_events:
+                    for tool_call in response.tool_calls:
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        await self.bus.publish_outbound(
+                            OutboundMessage(
+                                session_key=session_key,
+                                content=f"{tool_call.name}({args_str})",
+                                event_type=OutboundEventType.TOOL_CALL,
+                            )
+                        )
 
                 # Stage 2: Execute all tools in parallel
                 async def execute_single_tool(idx: int, tool_call):
@@ -336,13 +439,6 @@ class AgentLoop:
                     logger.info(f"[RESULT]: {str(result)[:600]}")
 
                     if publish_events:
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                session_key=session_key,
-                                content=f"{tool_call.name}({args_str})",
-                                event_type=OutboundEventType.TOOL_CALL,
-                            )
-                        )
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 session_key=session_key,
@@ -377,6 +473,12 @@ class AgentLoop:
                 )
             else:
                 if self.context._is_knowledge_base_mode() and not has_kb_read_evidence:
+                    if response.content or response.reasoning_content:
+                        messages = self.context.add_assistant_message(
+                            messages,
+                            response.content,
+                            reasoning_content=response.reasoning_content,
+                        )
                     messages.append(
                         {
                             "role": "system",
@@ -393,7 +495,10 @@ class AgentLoop:
             isinstance(final_content, str) and not final_content.strip()
         ):
             if iteration >= self.max_iterations:
-                final_content = f"Reached {self.max_iterations} iterations without completion."
+                final_content = self._build_iteration_limit_fallback(
+                    messages=messages,
+                    has_kb_read_evidence=has_kb_read_evidence,
+                )
             else:
                 final_content = "I've completed processing but have no response to give."
 
@@ -441,6 +546,152 @@ class AgentLoop:
             else:
                 lines.append(f"- {tool_name}")
         return "\n".join(lines[-6:]) if lines else "No KB tool evidence collected yet."
+
+    @staticmethod
+    def _extract_user_text(messages: list[dict]) -> str:
+        """Collect user-authored text for lightweight reply-language detection."""
+        texts: list[str] = []
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content.strip()
+                if text:
+                    texts.append(text)
+                continue
+
+            if not isinstance(content, list):
+                continue
+
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                text = str(block.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+
+        return "\n".join(texts)
+
+    @classmethod
+    def _detect_reply_language(cls, messages: list[dict]) -> str:
+        """Infer a small set of reply languages from the user's latest text."""
+        user_text = cls._extract_user_text(messages)
+        if re.search(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]", user_text):
+            return "ja"
+        if re.search(r"[\u4e00-\u9fff]", user_text):
+            return "zh-CN"
+        return "en"
+
+    def _build_iteration_limit_fallback(
+        self, messages: list[dict], has_kb_read_evidence: bool
+    ) -> str:
+        """Return a user-facing fallback when the loop hits the iteration limit."""
+        if not self.context._is_knowledge_base_mode():
+            return f"Reached {self.max_iterations} iterations without completion."
+
+        language = self._detect_reply_language(messages)
+        if has_kb_read_evidence:
+            fallbacks = {
+                "zh-CN": "抱歉，我暂时还没能根据现有资料整理出明确答复。需要的话，我可以帮您转人工继续跟进，您看需要吗？",
+                "ja": "申し訳ありません。現在の資料だけでは明確な回答をまとめきれませんでした。必要であれば担当者へ引き継げますが、ご希望ですか。",
+                "en": "Sorry, I still couldn't produce a clear answer from the current materials. If you'd like, I can help transfer this to a human agent. Would you like me to do that?",
+            }
+        else:
+            fallbacks = {
+                "zh-CN": "抱歉，我暂时没有在现有支持资料中找到足够依据来回答这个问题。需要的话，我可以帮您转人工继续跟进，您看需要吗？",
+                "ja": "申し訳ありません。現在のサポート資料では、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば担当者へ引き継げますが、ご希望ですか。",
+                "en": "Sorry, I couldn't find enough supporting information in the current support materials to answer this clearly. If you'd like, I can help transfer this to a human agent. Would you like me to do that?",
+            }
+        return fallbacks.get(language, fallbacks["en"])
+
+    def _select_tool_choice(
+        self,
+        iteration: int,
+        tools: list[dict] | None,
+        has_kb_read_evidence: bool,
+    ) -> str | None:
+        """Select tool-choice mode for the current LLM turn."""
+        if (
+            self.context._is_knowledge_base_mode()
+            and iteration == 1
+            and not has_kb_read_evidence
+            and tools
+        ):
+            return "required"
+        return None
+
+    @staticmethod
+    def _build_tool_plan_summary(tool_calls: list) -> str | None:
+        """Build a short user-facing summary of the model's planned tool steps."""
+        if not tool_calls:
+            return None
+
+        def _clean_text(value: object, max_len: int = 36) -> str:
+            text = str(value or "").strip().replace("\n", " ")
+            text = re.sub(r"\s+", " ", text)
+            if len(text) > max_len:
+                return f"{text[: max_len - 3]}..."
+            return text
+
+        def _short_name_from_path(value: object) -> str:
+            text = _clean_text(value)
+            if not text:
+                return ""
+            return text.rsplit("/", 1)[-1] or text
+
+        plan_steps: list[str] = []
+        for tool_call in tool_calls[:3]:
+            args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+            name = str(getattr(tool_call, "name", "") or "")
+
+            if name == "openviking_search":
+                query = _clean_text(
+                    args.get("query") or args.get("keyword") or args.get("q") or "当前问题"
+                )
+                plan_steps.append(f"先搜索相关资料：{query}")
+            elif name == "openviking_read":
+                target = _short_name_from_path(args.get("uri"))
+                plan_steps.append(f"再读取文档内容{f'：{target}' if target else ''}")
+            elif name == "openviking_glob":
+                plan_steps.append("先定位具体文档")
+            elif "search" in name:
+                query = _clean_text(
+                    args.get("query") or args.get("keyword") or args.get("q") or "相关信息"
+                )
+                plan_steps.append(f"先检索信息：{query}")
+            elif "read" in name:
+                target = _short_name_from_path(
+                    args.get("uri") or args.get("path") or args.get("file_path")
+                )
+                plan_steps.append(f"再读取内容{f'：{target}' if target else ''}")
+            elif "exec" in name or "shell" in name or "python" in name:
+                plan_steps.append("执行必要的检查和计算")
+            else:
+                plan_steps.append(f"执行 {name}")
+
+        if not plan_steps:
+            return None
+
+        summary = "规划：" + " -> ".join(plan_steps)
+        if len(tool_calls) > len(plan_steps):
+            summary += f" 等 {len(tool_calls)} 个步骤"
+        return summary
+
+    @staticmethod
+    def _summarize_non_tool_kb_response(content: str | None, max_len: int = 240) -> str | None:
+        """Surface a KB model draft when it failed to emit a tool call."""
+        if not isinstance(content, str):
+            return None
+
+        text = re.sub(r"\s+", " ", content).strip()
+        if not text:
+            return None
+
+        if len(text) > max_len:
+            return f"{text[: max_len - 3]}..."
+        return text
 
     @classmethod
     def _extract_image_evidence_blocks(cls, messages: list[dict]) -> list[str]:

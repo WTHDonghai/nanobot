@@ -442,6 +442,12 @@ def prepare_channel(
             app=fastapi_app,  # Pass the external FastAPI app
         )
         channels.add_channel(openapi_channel)
+        existing_channel_keys = {
+            channel_config.channel_key()
+            for channel_config in config.channels_config.get_all_channels()
+        }
+        if openapi_config.channel_key() not in existing_channel_keys:
+            config.channels = [*config.channels, openapi_config]
         logger.info(f"OpenAPI channel enabled on port {openapi_port}")
 
     if channels.enabled_channels:

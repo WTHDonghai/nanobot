@@ -140,14 +140,14 @@ def test_session_history_excludes_skip_history_messages() -> None:
     ]
 
 
-def test_run_agent_loop_uses_semantic_no_evidence_response_without_document_tools() -> None:
+def test_run_agent_loop_continues_search_when_kb_answer_has_no_document_evidence() -> None:
     config = Config()
     config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
 
     provider = StubProvider(
         [
             LLMResponse(content="这是模型自行生成的答案。"),
-            LLMResponse(content="当前知识库尚无足够依据直接回答这个问题，请补充更具体的模块名、菜单名或报错信息。"),
+            LLMResponse(content="第二轮依然没有拿到具体文档。"),
         ]
     )
 
@@ -157,18 +157,30 @@ def test_run_agent_loop_uses_semantic_no_evidence_response_without_document_tool
             provider=provider,
             workspace=Path(tmpdir),
             config=config,
-            max_iterations=1,
+            max_iterations=2,
         )
 
-        final_content, tools_used, _token_usage = asyncio.run(
+        final_content, tools_used, _token_usage, iteration = asyncio.run(
             loop._run_agent_loop(
                 messages=[{"role": "user", "content": "XMS宾客状态有哪些？"}],
                 session_key=SessionKey(type="cli", channel_id="default", chat_id="no-evidence"),
                 publish_events=False,
-                user_request="XMS宾客状态有哪些？",
-                require_document_evidence=True,
             )
         )
 
     assert tools_used == []
-    assert final_content == "当前知识库尚无足够依据直接回答这个问题，请补充更具体的模块名、菜单名或报错信息。"
+    assert iteration == 2
+    assert (
+        final_content
+        == "抱歉，我暂时没有在现有支持资料中找到足够依据来回答这个问题。需要的话，我可以帮您转人工继续跟进，您看需要吗？"
+    )
+    assert any(
+        message.get("role") == "assistant" and message.get("content") == "这是模型自行生成的答案。"
+        for message in provider.calls[1]["messages"]
+    )
+    assert any(
+        isinstance(message.get("content"), str)
+        and "The current evidence is still insufficient." in message["content"]
+        for call in provider.calls
+        for message in call["messages"]
+    )

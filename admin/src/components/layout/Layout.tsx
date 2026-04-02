@@ -1,11 +1,13 @@
 import React from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database } from 'lucide-react';
+import { useTheme } from '../../contexts/ThemeContext';
+import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database, Sun, Moon } from 'lucide-react';
 import './Layout.css';
 
 const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { serverUrl, role, accountId, userId, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -84,6 +86,9 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       <main className="main-content">
         <header className="topbar">
           <h1 className="page-title">{currentPageLabel}</h1>
+          <button className="btn btn-ghost theme-toggle-btn" onClick={toggleTheme} title="切换主题">
+            {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
         </header>
         <div className="content-container">
           {children}

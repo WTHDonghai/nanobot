@@ -108,6 +108,7 @@ class OpenAICompatibleProvider(LLMProvider):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
@@ -119,6 +120,7 @@ class OpenAICompatibleProvider(LLMProvider):
         Args:
             messages: List of message dicts with 'role' and 'content'.
             tools: Optional list of tool definitions in OpenAI format.
+            tool_choice: Optional forced tool choice configuration.
             model: Model identifier.
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
@@ -141,7 +143,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = tool_choice if tool_choice is not None else "auto"
 
         # Langfuse integration
         langfuse_observation = None

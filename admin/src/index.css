@@ -14,6 +14,22 @@
   --light: #94a3b8;
 }
 
+:root[data-theme="light"] {
+  --bg: #f1f5f9;
+  --bg2: #ffffff;
+  --bg3: #e8edf5;
+  --card: rgba(0,0,0,0.03);
+  --border: rgba(0,0,0,0.09);
+  --primary: #4f46e5;
+  --primary-dim: rgba(79,70,229,0.10);
+  --success: #059669;
+  --danger: #dc2626;
+  --warning: #d97706;
+  --text: #0f172a;
+  --muted: #64748b;
+  --light: #475569;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
