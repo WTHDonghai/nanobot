@@ -622,6 +622,7 @@
   margin-top: 8px;
   font-size: 0.75rem;
   color: var(--muted);
+  line-height: 1.5;
 }
 
 .chat-meta.align-right {
@@ -1134,4 +1135,3 @@
   background-color: rgba(15, 23, 42, 0.06);
   color: #1e293b;
 }
-

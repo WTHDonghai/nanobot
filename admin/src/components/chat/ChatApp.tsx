@@ -26,6 +26,7 @@ import {
 import {
   MAX_SESSION_CONTEXT_BUDGET,
   deriveSessionTitleFromMessages,
+  formatDuration,
   formatDateTime,
   formatRelativeTime,
   getArchiveIndex,
@@ -33,6 +34,7 @@ import {
   getSessionId,
   makeWelcomeMessages,
   mapSessionMessages,
+  mergeCachedMessageMetadata,
   readStoredSessionMessages,
   readStoredSessionTitles,
   unwrapResult,
@@ -595,7 +597,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
       rememberSessionTitle(targetSessionId, derivedTitle);
       const nextMessages = mergedMessages.length > 0
-        ? mapSessionMessages(mergedMessages)
+        ? mergeCachedMessageMetadata(mapSessionMessages(mergedMessages), cachedMessages || [])
         : (cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages));
 
       setCachedSessionMessages(targetSessionId, nextMessages);
@@ -856,6 +858,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
     if (!input.trim() || loading || !selectedUserId) return;
 
     const userMsg = input.trim();
+    const userCreatedAt = new Date().toISOString();
     setInput('');
     resetInputHeight();
     setLoading(true);
@@ -863,11 +866,13 @@ const ChatApp: React.FC<ChatAppProps> = ({
     const botId = `bot-${Date.now()}`;
     const userMessageKey = `user-${Date.now()}`;
     let activeSessionId = sessionId;
+    let streamStartedAt: number | null = null;
+    let latestEventTimestamp = userCreatedAt;
 
     setMessages((prev) => [
       ...prev,
-      { key: userMessageKey, role: 'user', text: userMsg },
-      { key: botId, role: 'bot', text: '', status: '思考中...', loading: true, steps: [] },
+      { key: userMessageKey, role: 'user', text: userMsg, createdAt: userCreatedAt },
+      { key: botId, role: 'bot', text: '', status: '思考中...', loading: true, createdAt: userCreatedAt, steps: [] },
     ]);
 
     try {
@@ -883,6 +888,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
       }
 
       const url = `${serverUrl}/bot/v1/chat/stream`;
+      streamStartedAt = performance.now();
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
@@ -909,6 +915,9 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
           try {
             const evt = JSON.parse(line.slice(6));
+            if (typeof evt.timestamp === 'string') {
+              latestEventTimestamp = evt.timestamp;
+            }
             let status = '思考中...';
             if (evt.event === 'reasoning') {
               status = summarizeReasoningEvent(evt.data);
@@ -996,7 +1005,13 @@ const ChatApp: React.FC<ChatAppProps> = ({
                 const currentSteps = message.steps || [];
                 const isNewStep = status !== '思考中...' && status !== 'Bot 回复' && currentSteps[currentSteps.length - 1] !== status;
                 const nextSteps = isNewStep ? [...currentSteps, status] : currentSteps;
-                return { ...message, status, text: finalContent || '', steps: nextSteps };
+                return {
+                  ...message,
+                  status,
+                  text: finalContent || '',
+                  createdAt: latestEventTimestamp,
+                  steps: nextSteps,
+                };
               }
               return message;
             }));
@@ -1006,12 +1021,36 @@ const ChatApp: React.FC<ChatAppProps> = ({
         }
       }
 
+      const elapsedMs = streamStartedAt === null
+        ? undefined
+        : Math.max(0, Math.round(performance.now() - streamStartedAt));
       setMessages((prev) => prev.map((message) => (
-        message.key === botId ? { ...message, text: finalContent || '（无回复）', loading: false } : message
+        message.key === botId
+          ? {
+            ...message,
+            text: finalContent || '（无回复）',
+            status: 'Bot 回复',
+            loading: false,
+            createdAt: latestEventTimestamp,
+            elapsedMs,
+          }
+          : message
       )));
     } catch (err: any) {
+      const elapsedMs = streamStartedAt === null
+        ? undefined
+        : Math.max(0, Math.round(performance.now() - streamStartedAt));
       setMessages((prev) => prev.map((message) => (
-        message.key === botId ? { ...message, text: `错误: ${err.message}`, status: 'Error', loading: false } : message
+        message.key === botId
+          ? {
+            ...message,
+            text: `错误: ${err.message}`,
+            status: 'Error',
+            loading: false,
+            createdAt: latestEventTimestamp,
+            elapsedMs,
+          }
+          : message
       )));
     } finally {
       setLoading(false);
@@ -1194,9 +1233,11 @@ const ChatApp: React.FC<ChatAppProps> = ({
                       </div>
                     )}
                   </div>
-                  {message.createdAt && (
+                  {(message.createdAt || message.elapsedMs !== undefined) && (
                     <div className={`chat-meta ${message.role === 'user' ? 'align-right' : ''}`}>
-                      {formatDateTime(message.createdAt)}
+                      {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
+                        .filter(Boolean)
+                        .join(' · ')}
                     </div>
                   )}
                 </div>

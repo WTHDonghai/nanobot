@@ -53,6 +53,17 @@ export const formatDateTime = (value?: string): string => {
   });
 };
 
+export const formatDuration = (value?: number): string => {
+  if (value === undefined || Number.isNaN(value) || value < 0) return '--';
+  if (value < 1000) return `${Math.round(value)} 毫秒`;
+  if (value < 60_000) return `${(value / 1000).toFixed(value >= 10_000 ? 1 : 2)} 秒`;
+
+  const totalSeconds = Math.round(value / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes} 分 ${seconds} 秒`;
+};
+
 export const formatRelativeTime = (value?: string): string => {
   if (!value) return '时间未知';
   const timestamp = new Date(value).getTime();
@@ -151,6 +162,34 @@ export const mapSessionMessages = (sessionMessages: SessionContextMessage[]): Ch
   }));
 };
 
+export const mergeCachedMessageMetadata = (
+  messages: ChatMessage[],
+  cachedMessages: ChatMessage[] = [],
+): ChatMessage[] => {
+  if (messages.length === 0 || cachedMessages.length === 0) return messages;
+
+  const metadataBySignature = new Map<string, ChatMessage>();
+  cachedMessages.forEach((message) => {
+    metadataBySignature.set(
+      `${message.role}|${message.createdAt || ''}|${message.text}`,
+      message,
+    );
+  });
+
+  return messages.map((message) => {
+    const cached = metadataBySignature.get(
+      `${message.role}|${message.createdAt || ''}|${message.text}`,
+    );
+    if (!cached) return message;
+
+    return {
+      ...message,
+      elapsedMs: message.elapsedMs ?? cached.elapsedMs,
+      steps: message.steps ?? cached.steps,
+    };
+  });
+};
+
 export const readStoredSessionTitles = (storageKey: string | null): Record<string, string> => {
   if (!storageKey) return {};
 
@@ -197,6 +236,10 @@ export const readStoredSessionMessages = (storageKey: string | null): Record<str
           status: typeof record.status === 'string' ? record.status : undefined,
           loading: typeof record.loading === 'boolean' ? record.loading : undefined,
           createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
+          elapsedMs: typeof record.elapsedMs === 'number' ? record.elapsedMs : undefined,
+          steps: Array.isArray(record.steps)
+            ? record.steps.filter((step): step is string => typeof step === 'string')
+            : undefined,
         });
         return items;
       }, []);
