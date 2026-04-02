@@ -134,6 +134,12 @@ COPY bot/ bot/
 # stale, so Docker builds stay unblocked after dependency changes. Set
 # UV_LOCK_STRATEGY=locked to keep fail-fast reproducibility checks.
 RUN --mount=type=cache,target=/root/.cache/uv,id=uv-${TARGETPLATFORM} \
+    --mount=type=cache,target=/root/.cache/go-build,id=go-build-${TARGETPLATFORM} \
+    --mount=type=cache,target=/root/go/pkg/mod,id=go-mod-${TARGETPLATFORM} \
+    --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETPLATFORM} \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETPLATFORM} \
+    --mount=type=cache,target=/app/target,id=cargo-target-${TARGETPLATFORM} \
+    --mount=type=cache,target=/app/build,id=cmake-build-${TARGETPLATFORM} \
     case "${UV_LOCK_STRATEGY}" in \
         locked) \
             uv sync --locked --no-editable --extra bot \
@@ -171,6 +177,12 @@ COPY third_party/ third_party/
 COPY bot/ bot/
 
 RUN --mount=type=cache,target=/root/.cache/uv,id=uv-${TARGETPLATFORM} \
+    --mount=type=cache,target=/root/.cache/go-build,id=go-build-${TARGETPLATFORM} \
+    --mount=type=cache,target=/root/go/pkg/mod,id=go-mod-${TARGETPLATFORM} \
+    --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETPLATFORM} \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETPLATFORM} \
+    --mount=type=cache,target=/app/target,id=cargo-target-${TARGETPLATFORM} \
+    --mount=type=cache,target=/app/build,id=cmake-build-${TARGETPLATFORM} \
     uv sync --locked --no-editable --extra bot --extra bot-dingtalk
 
 # Stage 14: shared runtime base

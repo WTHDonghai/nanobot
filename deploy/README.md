@@ -26,51 +26,124 @@
 - `server-runtime`
 - `bot-runtime`
 
-推荐分别构建成两张镜像：
+部署到 `linux/amd64` 机器时，依赖镜像和最终运行镜像也都必须是 `linux/amd64`。
 
-```bash
-IMAGE_NAME=openviking-server BUILD_TARGET=server-runtime ./scripts/build-docker.sh 1.2.3
-IMAGE_NAME=vikingbot BUILD_TARGET=bot-runtime ./scripts/build-docker.sh 1.2.3
-```
+- `server-runtime` 依赖 `BUILD_BASE_IMAGE`、`PY_DEPS_IMAGE`、`ADMIN_DEPS_IMAGE`
+- `bot-runtime` 依赖 `BUILD_BASE_IMAGE`、`BOT_PY_DEPS_IMAGE`
 
-如果使用私有仓库：
-
-```bash
-REGISTRY=registry.example.com/ \
-IMAGE_NAME=openviking-server \
-BUILD_TARGET=server-runtime \
-./scripts/build-docker.sh 1.2.3
-
-REGISTRY=registry.example.com/ \
-IMAGE_NAME=vikingbot \
-BUILD_TARGET=bot-runtime \
-./scripts/build-docker.sh 1.2.3
-```
+如果本地没有对应 tag，或者 tag 的架构不是 `linux/amd64`，BuildKit 会尝试去远端拉取这个 tag，通常会报 `pull access denied`。
 
 ## 依赖缓存层
 
-当前 `Dockerfile` 仍然保留可复用的缓存层：
+当前 `Dockerfile` 保留了几层可复用镜像：
 
 - `build-base`
 - `py-deps`
 - `bot-py-deps`
 - `admin-deps`
 
-可先单独预构建：
+### 第一次准备
+
+第一次建议按下面顺序构建依赖镜像。
+
+1. 构建基础工具链镜像 `build-base`
+2. 构建 `server-runtime` 需要的 Python 依赖镜像 `py-deps`
+3. 构建 `server-runtime` 需要的前端依赖镜像 `admin-deps`
+4. 如果还要构建 `vikingbot`，再构建 `bot-py-deps`
 
 ```bash
-BUILD_TARGET=build-base ./scripts/build-docker.sh 2026.03
-BUILD_TARGET=py-deps ./scripts/build-docker.sh uvlock-server-20260401
-BUILD_TARGET=bot-py-deps ./scripts/build-docker.sh uvlock-bot-20260401
-BUILD_TARGET=admin-deps ./scripts/build-docker.sh npmlock-20260401
+PLATFORM=linux/amd64 \
+IMAGE_NAME=openviking-build-base \
+BUILD_TARGET=build-base \
+./scripts/build-docker.sh 2026.03
 ```
 
-正式构建时透传：
+```bash
+PLATFORM=linux/amd64 \
+BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
+IMAGE_NAME=openviking-py-deps \
+BUILD_TARGET=py-deps \
+./scripts/build-docker.sh uvlock-server-20260401
+```
+
+```bash
+PLATFORM=linux/amd64 \
+IMAGE_NAME=openviking-admin-deps \
+BUILD_TARGET=admin-deps \
+./scripts/build-docker.sh npmlock-20260401
+```
+
+```bash
+PLATFORM=linux/amd64 \
+BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
+IMAGE_NAME=vikingbot-py-deps \
+BUILD_TARGET=bot-py-deps \
+./scripts/build-docker.sh uvlock-bot-20260401
+```
+
+### 构建 `openviking-server`
+
+```bash
+PLATFORM=linux/amd64 \
+BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
+PY_DEPS_IMAGE=openviking-py-deps:uvlock-server-20260401 \
+ADMIN_DEPS_IMAGE=openviking-admin-deps:npmlock-20260401 \
+IMAGE_NAME=openviking-server \
+BUILD_TARGET=server-runtime \
+./scripts/build-docker.sh 1.0.4
+```
+
+### 构建 `vikingbot`
+
+```bash
+PLATFORM=linux/amd64 \
+BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
+BOT_PY_DEPS_IMAGE=vikingbot-py-deps:uvlock-bot-20260401 \
+IMAGE_NAME=vikingbot \
+BUILD_TARGET=bot-runtime \
+./scripts/build-docker.sh 1.0.4
+```
+
+### 日常发版
+
+依赖镜像准备好之后，后续发布 `1.0.5`、`1.0.6` 这类新版本时，通常只需要重新构建最终运行镜像，不需要每次都先重建依赖镜像。
+
+什么时候需要重建依赖镜像：
+
+- `build-base`：基础工具链或基础镜像发生变化时
+- `py-deps` / `bot-py-deps`：`uv.lock`、`pyproject.toml`、`setup.py`、`Cargo.lock` 或 Python 依赖相关内容变化时
+- `admin-deps`：`admin/package-lock.json` 变化时
+
+### 缓存预热
+
+`Dockerfile` 已经给 `py-builder` / `bot-py-builder` 增加了 `uv`、Go、Cargo、CMake 的 BuildKit cache mount。第一次正式构建会顺带把缓存灌满，后续构建会明显更快。
+
+平时不需要每次发版都先跑 `LOAD=0`。只有在下面这些场景，才建议单独预热：
+
+- 想先灌缓存，但暂时不需要导入最终镜像
+- 怀疑 builder 缓存已经丢失
+- CI 里想把“预热构建”和“正式导出镜像”拆开
+
+示例：
+
+```bash
+LOAD=0 \
+PLATFORM=linux/amd64 \
+BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
+PY_DEPS_IMAGE=openviking-py-deps:uvlock-server-20260401 \
+ADMIN_DEPS_IMAGE=openviking-admin-deps:npmlock-20260401 \
+IMAGE_NAME=openviking-server \
+BUILD_TARGET=server-runtime \
+./scripts/build-docker.sh 1.0.4
+```
+
+### 私有仓库
+
+如果你使用远端 registry，可以把依赖镜像先 push 到仓库，再在正式构建时传完整镜像地址。
 
 ```bash
 BUILD_BASE_IMAGE=registry.example.com/openviking-build-base:2026.03 \
 PY_DEPS_IMAGE=registry.example.com/openviking-py-deps:uvlock-server-20260401 \
-BOT_PY_DEPS_IMAGE=registry.example.com/vikingbot-py-deps:uvlock-bot-20260401 \
 ADMIN_DEPS_IMAGE=registry.example.com/openviking-admin-deps:npmlock-20260401 \
 IMAGE_NAME=openviking-server \
 BUILD_TARGET=server-runtime \
@@ -87,9 +160,9 @@ REGISTRY=registry.example.com/ \
 ./scripts/build-docker.sh 1.2.3
 ```
 
-## 多架构构建
+### 多架构发布
 
-单机本地测试只建议构建单架构：
+本地为 `linux/amd64` 机器准备部署镜像时，建议只构建单架构：
 
 ```bash
 PLATFORM=linux/amd64 \
@@ -98,23 +171,14 @@ BUILD_TARGET=server-runtime \
 ./scripts/build-docker.sh 1.2.3
 ```
 
-多架构发布需要推仓库或导出 OCI：
+如果要正式发布多架构镜像，需要推仓库或导出 OCI，不能用默认的 `--load`：
 
 ```bash
+PUSH=1 \
 PLATFORM=linux/amd64,linux/arm64 \
-BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
-BOT_PY_DEPS_IMAGE=vikingbot-py-deps:uvlock-bot-20260401 \
+REGISTRY=registry.example.com/ \
 IMAGE_NAME=openviking-server \
 BUILD_TARGET=server-runtime \
-./scripts/build-docker.sh 1.2.3
-```
-
-```bash
-PLATFORM=linux/amd64,linux/arm64 \
-BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
-BOT_PY_DEPS_IMAGE=vikingbot-py-deps:uvlock-bot-20260401 \
-IMAGE_NAME=vikingbot \
-BUILD_TARGET=bot-runtime \
 ./scripts/build-docker.sh 1.2.3
 ```
 
