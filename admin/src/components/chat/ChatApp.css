@@ -838,6 +838,8 @@
   font-family: inherit;
   font-size: 0.95rem;
   line-height: 1.7;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .markdown-body p {
@@ -879,6 +881,22 @@
   margin-top: 8px;
   margin-bottom: 8px;
   padding-left: 24px;
+}
+
+.markdown-body li {
+  margin-bottom: 8px;
+}
+
+.markdown-body li:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body li > p {
+  margin: 0;
+}
+
+.markdown-body li > p + p {
+  margin-top: 8px;
 }
 
 .markdown-body a {

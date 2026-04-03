@@ -37,6 +37,7 @@ import {
   makeWelcomeMessages,
   mapSessionMessages,
   mergeCachedMessageMetadata,
+  normalizeMarkdownForDisplay,
   readStoredSessionMessages,
   readStoredSessionTitles,
   unwrapResult,
@@ -1341,7 +1342,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
                               },
                             }}
                           >
-                            {message.text}
+                            {normalizeMarkdownForDisplay(message.text)}
                           </ReactMarkdown>
                         </div>
                         {message.role === 'bot' && message.key !== 'welcome' && (

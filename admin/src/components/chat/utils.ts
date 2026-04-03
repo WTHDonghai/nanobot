@@ -176,6 +176,28 @@ export const renderMessageText = (
   return sections.join('\n\n').trim() || '（空消息）';
 };
 
+export const normalizeMarkdownForDisplay = (value: string): string => {
+  if (!value) return value;
+
+  const normalized = value.replace(/\r\n?/g, '\n');
+  const segments = normalized.split(/(```[\s\S]*?```)/g);
+
+  return segments
+    .map((segment, index) => {
+      if (index % 2 === 1) return segment;
+
+      return segment
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(
+          /(^|\n)(\s*(?:\d+\.|[\-*+])\s*)\n+(?=\S)/g,
+          (_match, prefix: string, marker: string) => `${prefix}${marker.trimEnd()} `,
+        )
+        .trim();
+    })
+    .filter(Boolean)
+    .join('\n\n');
+};
+
 export const mapSessionMessages = (
   sessionMessages: SessionContextMessage[],
   serverUrl = '',
