@@ -387,6 +387,7 @@ class OpenAPIChannel(BaseChannel):
                 session_key=session_key,
                 sender_id=user_id,
                 content=content,
+                metadata={"openviking_session_id": session_id},
             )
 
             await self.bus.publish_inbound(msg)
@@ -453,6 +454,7 @@ class OpenAPIChannel(BaseChannel):
                     session_key=session_key,
                     sender_id=user_id,
                     content=request.message,
+                    metadata={"openviking_session_id": session_id},
                 )
 
                 await self.bus.publish_inbound(msg)
