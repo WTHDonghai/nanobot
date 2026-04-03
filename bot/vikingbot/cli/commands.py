@@ -440,6 +440,7 @@ def prepare_channel(
             openapi_config,
             bus,
             app=fastapi_app,  # Pass the external FastAPI app
+            bot_config=config,
         )
         channels.add_channel(openapi_channel)
         existing_channel_keys = {

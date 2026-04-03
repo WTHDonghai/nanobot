@@ -10,10 +10,11 @@ import {
   Trash2,
   User,
   Zap,
+  Headphones,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { fetchApi } from '../../services/api';
+import { fetchApi, requestHumanHandoff } from '../../services/api';
 import {
   ApiEnvelope,
   ChatMessage,
@@ -187,6 +188,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const [sessionReplayLoading, setSessionReplayLoading] = useState(false);
   const [sessionMutating, setSessionMutating] = useState(false);
   const [sessionError, setSessionError] = useState('');
+  const [handoffNotice, setHandoffNotice] = useState('');
+  const [handoffLoadingKey, setHandoffLoadingKey] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null);
   const [activeActionMenu, setActiveActionMenu] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null);
@@ -215,6 +218,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
     setActiveSessionMeta(null);
     setMessages(makeWelcomeMessages(status));
     setInput('');
+    setHandoffNotice('');
+    setHandoffLoadingKey(null);
     resetInputHeight();
   }
 
@@ -859,6 +864,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
     const userMsg = input.trim();
     const userCreatedAt = new Date().toISOString();
+    setSessionError('');
+    setHandoffNotice('');
     setInput('');
     resetInputHeight();
     setLoading(true);
@@ -1060,6 +1067,50 @@ const ChatApp: React.FC<ChatAppProps> = ({
     }
   };
 
+  const handleHumanHandoff = async (targetMessage?: ChatMessage) => {
+    if (!selectedUserId || handoffLoadingKey) return;
+
+    const fallbackBotMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === 'bot' && !message.loading && message.key !== 'welcome');
+    const latestUserMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === 'user' && message.text.trim() && message.key !== 'welcome');
+    const effectiveBotMessage = targetMessage || fallbackBotMessage;
+    const normalizedBotMessage = effectiveBotMessage ? toSingleLine(effectiveBotMessage.text).slice(0, 1000) : '';
+    const normalizedUserMessage = latestUserMessage ? toSingleLine(latestUserMessage.text).slice(0, 1000) : '';
+    const triggerMessageKey = effectiveBotMessage?.key || 'global-handoff';
+
+    setSessionError('');
+    setHandoffNotice('');
+    setHandoffLoadingKey(triggerMessageKey);
+
+    try {
+      const response = await requestHumanHandoff(serverUrl, apiKey, {
+        session_id: sessionId || undefined,
+        user_id: selectedUserId,
+        reason: 'user_requested_human_handoff',
+        summary: normalizedBotMessage || undefined,
+        latest_user_message: normalizedUserMessage || undefined,
+        latest_assistant_message: normalizedBotMessage || undefined,
+        source: 'admin_chat_ui',
+        metadata: {
+          account_id: role === 'user' ? accountId : selectedAccountId,
+          ui_role: role,
+          trigger_message_key: triggerMessageKey,
+        },
+      });
+
+      setHandoffNotice(response.message || '已为您准备转人工服务入口。');
+
+      window.alert(`转人工接口调用成功！\n\n获取到的跳转链接：${response.entry_url || '无'}`);
+    } catch (err) {
+      setSessionError(err instanceof Error ? err.message : '转人工失败，请稍后重试。');
+    } finally {
+      setHandoffLoadingKey(null);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -1080,6 +1131,11 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const currentIdentityLabel = role === 'user'
     ? (selectedUserId || userId || '当前用户')
     : (selectedUserId || '请选择用户');
+  const latestBotMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === 'bot' && !message.loading && message.key !== 'welcome');
+  const handoffButtonLoading = handoffLoadingKey === 'global-handoff'
+    || handoffLoadingKey === latestBotMessage?.key;
   const activeSessionTitle = sessionId
     ? (renamedSessionTitles[sessionId] || derivedSessionTitles[sessionId] || (activeSessionMeta ? getSessionTitle(activeSessionMeta) : '当前会话'))
     : '未开始新会话';
@@ -1167,6 +1223,9 @@ const ChatApp: React.FC<ChatAppProps> = ({
         {sessionError && (
           <div className="chat-inline-error">{sessionError}</div>
         )}
+        {handoffNotice && (
+          <div className="chat-inline-notice">{handoffNotice}</div>
+        )}
 
         <div className="chat-feed-container">
           <div className="chat-messages">
@@ -1233,12 +1292,24 @@ const ChatApp: React.FC<ChatAppProps> = ({
                       </div>
                     )}
                   </div>
-                  {(message.createdAt || message.elapsedMs !== undefined) && (
-                    <div className={`chat-meta ${message.role === 'user' ? 'align-right' : ''}`}>
-                      {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
-                        .filter(Boolean)
-                        .join(' · ')}
+                  {message.role === 'bot' ? (
+                    <div className="chat-footer">
+                      {(message.createdAt || message.elapsedMs !== undefined) && (
+                        <div className="chat-meta">
+                          {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </div>
+                      )}
                     </div>
+                  ) : (
+                    (message.createdAt || message.elapsedMs !== undefined) && (
+                      <div className="chat-meta align-right">
+                        {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
+                    )
                   )}
                 </div>
               </div>
@@ -1248,6 +1319,22 @@ const ChatApp: React.FC<ChatAppProps> = ({
         </div>
 
         <div className="chat-input-wrapper">
+          <div className="chat-input-actions">
+            <button
+              type="button"
+              className="chat-transfer-btn chat-transfer-btn-inline"
+              title={handoffButtonLoading ? '转人工中...' : '转人工服务'}
+              onClick={() => void handleHumanHandoff(latestBotMessage)}
+              disabled={Boolean(handoffLoadingKey) || !selectedUserId}
+            >
+              {handoffButtonLoading ? (
+                <Loader2 size={13} className="chat-status-icon" />
+              ) : (
+                <Headphones size={13} />
+              )}
+              {handoffButtonLoading ? '转人工中...' : '转人工'}
+            </button>
+          </div>
           <div className="chat-input-box">
             <textarea
               ref={inputRef}

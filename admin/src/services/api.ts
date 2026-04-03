@@ -3,6 +3,27 @@ interface FetchOptions extends RequestInit {
   user?: string;
 }
 
+export interface HumanHandoffRequestPayload {
+  session_id?: string;
+  user_id?: string;
+  reason?: string;
+  summary?: string;
+  latest_user_message?: string;
+  latest_assistant_message?: string;
+  source?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface HumanHandoffResponse {
+  success: boolean;
+  status: string;
+  message: string;
+  handoff_id?: string | null;
+  entry_url?: string | null;
+  service_response?: Record<string, unknown>;
+  timestamp?: string;
+}
+
 export const fetchApi = async <T = any>(
   serverUrl: string,
   apiKey: string,
@@ -49,3 +70,14 @@ export const fetchApi = async <T = any>(
 
   return data as T;
 };
+
+export const requestHumanHandoff = (
+  serverUrl: string,
+  apiKey: string,
+  payload: HumanHandoffRequestPayload
+): Promise<HumanHandoffResponse> => (
+  fetchApi<HumanHandoffResponse>(serverUrl, apiKey, '/bot/v1/handoff', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+);

@@ -396,6 +396,16 @@
   font-size: 0.88rem;
 }
 
+.chat-inline-notice {
+  margin: 16px 24px 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  background: rgba(59, 130, 246, 0.1);
+  color: #bfdbfe;
+  font-size: 0.88rem;
+}
+
 .chat-feed-container {
   flex: 1;
   overflow-y: auto;
@@ -618,6 +628,41 @@
   border-top-left-radius: 6px;
 }
 
+.chat-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.chat-transfer-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: transparent;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+  text-decoration: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+  appearance: none;
+}
+
+.chat-transfer-btn:hover {
+  color: var(--text);
+  background: var(--card);
+  border-color: var(--border);
+}
+
+.chat-transfer-btn:disabled {
+  opacity: 0.64;
+  cursor: not-allowed;
+}
+
 .chat-meta {
   margin-top: 8px;
   font-size: 0.75rem;
@@ -629,6 +674,10 @@
   text-align: right;
 }
 
+.chat-footer .chat-meta {
+  margin-top: 0;
+}
+
 .chat-input-wrapper {
   position: absolute;
   left: 0;
@@ -637,6 +686,24 @@
   padding: 18px 20px 24px;
   background: linear-gradient(0deg, rgba(11, 15, 26, 0.96) 58%, transparent);
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.chat-input-actions {
+  width: 100%;
+  max-width: 920px;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.chat-transfer-btn-inline {
+  padding: 7px 12px;
+  border-radius: 999px;
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
   justify-content: center;
 }
 
@@ -983,6 +1050,11 @@
 
   .chat-input-wrapper {
     padding: 14px 12px 18px;
+    gap: 8px;
+  }
+
+  .chat-input-actions {
+    max-width: 100%;
   }
 
   .chat-input-box {
@@ -1090,6 +1162,11 @@
 
 [data-theme="light"] .chat-input-wrapper {
   background: linear-gradient(0deg, rgba(241, 245, 249, 0.97) 58%, transparent);
+}
+
+[data-theme="light"] .chat-transfer-btn-inline {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: var(--border);
 }
 
 [data-theme="light"] .chat-input-box {

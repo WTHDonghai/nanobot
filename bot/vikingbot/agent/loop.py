@@ -504,6 +504,7 @@ class AgentLoop:
 
         if final_content:
             final_content = await self._finalize_kb_response(final_content, session_key, messages)
+            final_content = self._normalize_final_output_text(final_content)
 
         return final_content, tools_used, token_usage, iteration
 
@@ -692,6 +693,46 @@ class AgentLoop:
         if len(text) > max_len:
             return f"{text[: max_len - 3]}..."
         return text
+
+    @staticmethod
+    def _normalize_final_output_text(content: str | None) -> str | None:
+        """Collapse repeated blank lines in final output while preserving fenced code blocks."""
+        if not isinstance(content, str):
+            return content
+
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        if not normalized.strip():
+            return normalized.strip()
+
+        lines = normalized.split("\n")
+        result_lines: list[str] = []
+        blank_seen = False
+        in_fenced_block = False
+
+        for line in lines:
+            if re.match(r"^\s*```", line):
+                result_lines.append(line)
+                blank_seen = False
+                in_fenced_block = not in_fenced_block
+                continue
+
+            if in_fenced_block:
+                result_lines.append(line)
+                continue
+
+            if not line.strip():
+                if result_lines and not blank_seen:
+                    result_lines.append("")
+                blank_seen = True
+                continue
+
+            result_lines.append(line.rstrip())
+            blank_seen = False
+
+        while result_lines and result_lines[-1] == "":
+            result_lines.pop()
+
+        return "\n".join(result_lines)
 
     @classmethod
     def _extract_image_evidence_blocks(cls, messages: list[dict]) -> list[str]:
@@ -1081,6 +1122,7 @@ class AgentLoop:
                             user_message=msg.content,
                             session_id=session_key.safe_name(),
                         )
+                        response_text = self._normalize_final_output_text(response_text)
                         # Save to session
                         session.add_message("user", msg.content, sender_id=msg.sender_id)
                         session.add_message("assistant", response_text, sender_id=msg.sender_id)

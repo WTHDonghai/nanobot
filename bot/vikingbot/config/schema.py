@@ -481,11 +481,24 @@ class ExecToolConfig(BaseModel):
     timeout: int = 60
 
 
+class HumanHandoffToolConfig(BaseModel):
+    """Human handoff tool/service configuration."""
+
+    enabled: bool = True
+    entry_url: str = (
+        "https://cschat.antcloud.com.cn/index.htm?tntlnstld=yLS_FlpK&scene=SCE01228243"
+    )
+    service_url: str = ""
+    timeout_seconds: int = 10
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    human_handoff: HumanHandoffToolConfig = Field(default_factory=HumanHandoffToolConfig)
 
 
 class SandboxNetworkConfig(BaseModel):
