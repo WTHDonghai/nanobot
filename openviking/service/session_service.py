@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from openviking.server.identity import RequestContext
 from openviking.service.task_tracker import get_task_tracker
 from openviking.session import Session
+from openviking.session.memory_scope import ALL_MEMORY_SCOPE, normalize_memory_scope
 from openviking.session.compressor import SessionCompressor
 from openviking.storage import VikingDBManager
 from openviking.storage.viking_fs import VikingFS
@@ -140,7 +141,13 @@ class SessionService:
             logger.error(f"Failed to delete session {session_id}: {e}")
             raise NotFoundError(session_id, "session")
 
-    async def commit(self, session_id: str, ctx: RequestContext) -> Dict[str, Any]:
+    async def commit(
+        self,
+        session_id: str,
+        ctx: RequestContext,
+        *,
+        memory_scope: str = ALL_MEMORY_SCOPE,
+    ) -> Dict[str, Any]:
         """Commit a session (archive messages and extract memories).
 
         Delegates to commit_async() for true non-blocking behavior.
@@ -151,9 +158,15 @@ class SessionService:
         Returns:
             Commit result
         """
-        return await self.commit_async(session_id, ctx)
+        return await self.commit_async(session_id, ctx, memory_scope=memory_scope)
 
-    async def commit_async(self, session_id: str, ctx: RequestContext) -> Dict[str, Any]:
+    async def commit_async(
+        self,
+        session_id: str,
+        ctx: RequestContext,
+        *,
+        memory_scope: str = ALL_MEMORY_SCOPE,
+    ) -> Dict[str, Any]:
         """Async commit a session.
 
         Phase 1 (archive) always runs inline.  Phase 2 (memory extraction)
@@ -168,14 +181,20 @@ class SessionService:
         """
         self._ensure_initialized()
         session = await self.get(session_id, ctx)
-        return await session.commit_async()
+        return await session.commit_async(memory_scope=normalize_memory_scope(memory_scope))
 
     async def get_commit_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Query background commit task status by task_id."""
         task = get_task_tracker().get(task_id)
         return task.to_dict() if task else None
 
-    async def extract(self, session_id: str, ctx: RequestContext) -> List[Any]:
+    async def extract(
+        self,
+        session_id: str,
+        ctx: RequestContext,
+        *,
+        memory_scope: str = ALL_MEMORY_SCOPE,
+    ) -> List[Any]:
         """Extract memories from a session.
 
         Args:
@@ -195,4 +214,5 @@ class SessionService:
             user=ctx.user,
             session_id=session_id,
             ctx=ctx,
+            memory_scope=normalize_memory_scope(memory_scope),
         )
