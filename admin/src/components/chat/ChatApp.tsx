@@ -1067,18 +1067,23 @@ const ChatApp: React.FC<ChatAppProps> = ({
     }
   };
 
-  const handleHumanHandoff = async (targetMessage: ChatMessage) => {
+  const handleHumanHandoff = async (targetMessage?: ChatMessage) => {
     if (!selectedUserId || handoffLoadingKey) return;
 
+    const fallbackBotMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === 'bot' && !message.loading && message.key !== 'welcome');
     const latestUserMessage = [...messages]
       .reverse()
       .find((message) => message.role === 'user' && message.text.trim() && message.key !== 'welcome');
-    const normalizedBotMessage = toSingleLine(targetMessage.text).slice(0, 1000);
+    const effectiveBotMessage = targetMessage || fallbackBotMessage;
+    const normalizedBotMessage = effectiveBotMessage ? toSingleLine(effectiveBotMessage.text).slice(0, 1000) : '';
     const normalizedUserMessage = latestUserMessage ? toSingleLine(latestUserMessage.text).slice(0, 1000) : '';
+    const triggerMessageKey = effectiveBotMessage?.key || 'global-handoff';
 
     setSessionError('');
     setHandoffNotice('');
-    setHandoffLoadingKey(targetMessage.key);
+    setHandoffLoadingKey(triggerMessageKey);
 
     try {
       const response = await requestHumanHandoff(serverUrl, apiKey, {
@@ -1092,7 +1097,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
         metadata: {
           account_id: role === 'user' ? accountId : selectedAccountId,
           ui_role: role,
-          trigger_message_key: targetMessage.key,
+          trigger_message_key: triggerMessageKey,
         },
       });
 
@@ -1126,6 +1131,11 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const currentIdentityLabel = role === 'user'
     ? (selectedUserId || userId || '当前用户')
     : (selectedUserId || '请选择用户');
+  const latestBotMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === 'bot' && !message.loading && message.key !== 'welcome');
+  const handoffButtonLoading = handoffLoadingKey === 'global-handoff'
+    || handoffLoadingKey === latestBotMessage?.key;
   const activeSessionTitle = sessionId
     ? (renamedSessionTitles[sessionId] || derivedSessionTitles[sessionId] || (activeSessionMeta ? getSessionTitle(activeSessionMeta) : '当前会话'))
     : '未开始新会话';
@@ -1291,24 +1301,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
                             .join(' · ')}
                         </div>
                       )}
-                      {!message.loading && (
-                        <div className="chat-bot-actions">
-                          <button
-                            type="button"
-                            className="chat-transfer-btn"
-                            title={handoffLoadingKey === message.key ? '转人工中...' : '转人工服务'}
-                            onClick={() => void handleHumanHandoff(message)}
-                            disabled={Boolean(handoffLoadingKey) || !selectedUserId}
-                          >
-                            {handoffLoadingKey === message.key ? (
-                              <Loader2 size={13} className="chat-status-icon" />
-                            ) : (
-                              <Headphones size={13} />
-                            )}
-                            {handoffLoadingKey === message.key ? '转人工中...' : '转人工'}
-                          </button>
-                        </div>
-                      )}
                     </div>
                   ) : (
                     (message.createdAt || message.elapsedMs !== undefined) && (
@@ -1327,6 +1319,22 @@ const ChatApp: React.FC<ChatAppProps> = ({
         </div>
 
         <div className="chat-input-wrapper">
+          <div className="chat-input-actions">
+            <button
+              type="button"
+              className="chat-transfer-btn chat-transfer-btn-inline"
+              title={handoffButtonLoading ? '转人工中...' : '转人工服务'}
+              onClick={() => void handleHumanHandoff(latestBotMessage)}
+              disabled={Boolean(handoffLoadingKey) || !selectedUserId}
+            >
+              {handoffButtonLoading ? (
+                <Loader2 size={13} className="chat-status-icon" />
+              ) : (
+                <Headphones size={13} />
+              )}
+              {handoffButtonLoading ? '转人工中...' : '转人工'}
+            </button>
+          </div>
           <div className="chat-input-box">
             <textarea
               ref={inputRef}
