@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Bot,
   ChevronRight,
+  FileDown,
   Loader2,
   MoreHorizontal,
   Pencil,
@@ -43,6 +44,7 @@ import {
   toSingleLine,
   formatShortSessionTime,
 } from './utils';
+import { exportChatSubsetToPdf } from './pdfExport';
 import SessionSidebar from './SessionSidebar';
 import './ChatApp.css';
 
@@ -183,6 +185,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [activeSessionMeta, setActiveSessionMeta] = useState<SessionSummary | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [exportingMessageKey, setExportingMessageKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [sessionListLoading, setSessionListLoading] = useState(false);
   const [sessionReplayLoading, setSessionReplayLoading] = useState(false);
@@ -196,6 +199,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const [renameValue, setRenameValue] = useState('');
   const actionMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const sessionMessageCacheRef = useRef<Record<string, ChatMessage[]>>({});
   const sessionListRequestRef = useRef(0);
@@ -602,8 +606,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
       rememberSessionTitle(targetSessionId, derivedTitle);
       const nextMessages = mergedMessages.length > 0
-        ? mergeCachedMessageMetadata(mapSessionMessages(mergedMessages), cachedMessages || [])
-        : (cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages));
+        ? mergeCachedMessageMetadata(mapSessionMessages(mergedMessages, serverUrl), cachedMessages || [])
+        : (cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages, serverUrl));
 
       setCachedSessionMessages(targetSessionId, nextMessages);
       persistLastActiveSession(targetSessionId);
@@ -767,7 +771,10 @@ const ChatApp: React.FC<ChatAppProps> = ({
   }, [accountId]);
 
   useEffect(() => {
-    if (role === 'user') {
+    if (hideUserSelector && userId) {
+      setUsers([{ user_id: userId }]);
+      setSelectedUserId(userId);
+    } else if (role === 'user') {
       fetchApi<ApiEnvelope<{ user_id?: string }>>(serverUrl, apiKey, '/api/v1/system/whoami')
         .then((res) => {
           const whoami = unwrapResult(res, '获取当前用户失败');
@@ -798,7 +805,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
       setUsers([]);
       setSelectedUserId('');
     }
-  }, [selectedAccountId, serverUrl, apiKey, role]);
+  }, [selectedAccountId, serverUrl, apiKey, role, hideUserSelector, userId]);
 
   useEffect(() => {
     const renamedKey = getSessionTitleStorageKey();
@@ -818,7 +825,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
   useEffect(() => {
     const storageKey = getSessionMessageCacheStorageKey();
-    sessionMessageCacheRef.current = readStoredSessionMessages(storageKey);
+    sessionMessageCacheRef.current = readStoredSessionMessages(storageKey, serverUrl);
   }, [serverUrl, role, accountId, userId, selectedAccountId, selectedUserId]);
 
   useEffect(() => {
@@ -1140,6 +1147,42 @@ const ChatApp: React.FC<ChatAppProps> = ({
     ? (renamedSessionTitles[sessionId] || derivedSessionTitles[sessionId] || (activeSessionMeta ? getSessionTitle(activeSessionMeta) : '当前会话'))
     : '未开始新会话';
 
+  const handleExportPdf = async (message: ChatMessage, index: number) => {
+    if (busy || exportingMessageKey) return;
+
+    const exportNodes = messages
+      .slice(0, index + 1)
+      .filter((item) => item.key !== 'welcome')
+      .map((item) => messageRowRefs.current[item.key])
+      .filter((node): node is HTMLDivElement => Boolean(node));
+
+    if (exportNodes.length === 0) {
+      setSessionError('没有可导出的消息内容');
+      return;
+    }
+
+    const exportTitle = activeSessionTitle === '未开始新会话' ? '会话导出' : activeSessionTitle;
+    const exportTime = formatDateTime(new Date().toISOString());
+    const exportStamp = exportTime.replace(/[^\d]/g, '').slice(0, 14) || `${Date.now()}`;
+
+    setExportingMessageKey(message.key);
+    setSessionError('');
+
+    try {
+      await exportChatSubsetToPdf({
+        title: exportTitle,
+        exportedAtLabel: exportTime,
+        filenameBase: `${exportTitle}-${exportStamp}`,
+        messageNodes: exportNodes,
+        apiKey,
+      });
+    } catch (err: unknown) {
+      setSessionError(err instanceof Error ? `导出 PDF 失败：${err.message}` : '导出 PDF 失败');
+    } finally {
+      setExportingMessageKey(null);
+    }
+  };
+
   return (
     <div className="chat-layout">
       <SessionSidebar
@@ -1236,8 +1279,18 @@ const ChatApp: React.FC<ChatAppProps> = ({
               </div>
             )}
 
-            {messages.map((message) => (
-              <div key={message.key} className={`chat-row ${message.role}`}>
+            {messages.map((message, index) => (
+              <div
+                key={message.key}
+                className={`chat-row ${message.role}`}
+                ref={(node) => {
+                  if (node) {
+                    messageRowRefs.current[message.key] = node;
+                  } else {
+                    delete messageRowRefs.current[message.key];
+                  }
+                }}
+              >
                 <div className={`chat-avatar ${message.role === 'user' ? 'user-av' : 'bot-av'}`}>
                   {message.role === 'user' ? <User size={18} /> : <Bot size={18} />}
                 </div>
@@ -1272,24 +1325,40 @@ const ChatApp: React.FC<ChatAppProps> = ({
                     {message.loading && !message.text ? (
                       <div className="typing-dots"><span /><span /><span /></div>
                     ) : (
-                      <div className="markdown-body">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            img(props) {
-                              return (
-                                <img
-                                  {...props}
-                                  style={{ maxWidth: '100%', borderRadius: '8px', cursor: 'zoom-in', marginTop: '8px' }}
-                                  onClick={() => setPreviewImage(props.src || null)}
-                                />
-                              );
-                            },
-                          }}
-                        >
-                          {message.text}
-                        </ReactMarkdown>
-                      </div>
+                      <>
+                        <div className="markdown-body">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              img(props) {
+                                return (
+                                  <img
+                                    {...props}
+                                    style={{ maxWidth: '100%', borderRadius: '8px', cursor: 'zoom-in', marginTop: '8px' }}
+                                    onClick={() => setPreviewImage(props.src || null)}
+                                  />
+                                );
+                              },
+                            }}
+                          >
+                            {message.text}
+                          </ReactMarkdown>
+                        </div>
+                        {message.role === 'bot' && message.key !== 'welcome' && (
+                          <div className="chat-bubble-actions" data-export-ignore="true">
+                            <button
+                              className="chat-export-btn"
+                              onClick={() => { void handleExportPdf(message, index); }}
+                              disabled={busy || Boolean(exportingMessageKey)}
+                              title="导出从顶部到当前回复的 PDF"
+                              aria-label="导出当前回复之前的会话为 PDF"
+                            >
+                              <FileDown size={14} />
+                              <span>{exportingMessageKey === message.key ? '导出中...' : '导出 PDF'}</span>
+                            </button>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                   {message.role === 'bot' ? (

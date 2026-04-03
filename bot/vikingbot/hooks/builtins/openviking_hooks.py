@@ -4,7 +4,7 @@ from typing import Any
 from loguru import logger
 
 from vikingbot.config.loader import load_config
-from vikingbot.config.schema import SessionKey, AgentMemoryMode
+from vikingbot.config.schema import SessionKey
 
 from ...session import Session
 from ..base import Hook, HookContext
@@ -22,6 +22,10 @@ except Exception:
 # Global singleton client
 _global_client: VikingClient | None = None
 
+ALL_MEMORY_SCOPE = "all"
+USER_MEMORY_SCOPE = "user"
+AGENT_MEMORY_SCOPE = "agent"
+
 
 async def get_global_client() -> VikingClient:
     """Get or create the global singleton VikingClient."""
@@ -31,6 +35,105 @@ async def get_global_client() -> VikingClient:
     return _global_client
 
 
+def resolve_openviking_user_id(
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Resolve the explicit user id that should own an OpenViking session write."""
+    if metadata:
+        user_id = metadata.get("openviking_user_id")
+        if isinstance(user_id, str) and user_id.strip():
+            return user_id.strip()
+    raise ValueError("Missing explicit openviking_user_id for OpenViking sync")
+
+
+def resolve_openviking_agent_owner_user_id(metadata: dict[str, Any] | None = None) -> str:
+    """Resolve the stable user id that owns shared agent-space extractions."""
+    if metadata:
+        user_id = metadata.get("openviking_agent_owner_user_id")
+        if isinstance(user_id, str) and user_id.strip():
+            return user_id.strip()
+    raise ValueError(
+        "Missing explicit openviking_agent_owner_user_id for agent-scoped OpenViking sync"
+    )
+
+
+def resolve_openviking_memory_scope(metadata: dict[str, Any] | None = None) -> str:
+    """Resolve memory extraction scope for a bot session."""
+    if not metadata:
+        return ALL_MEMORY_SCOPE
+
+    scope = metadata.get("openviking_memory_scope")
+    if scope is None:
+        return ALL_MEMORY_SCOPE
+    if isinstance(scope, str):
+        normalized = scope.strip().lower()
+        if normalized in {ALL_MEMORY_SCOPE, USER_MEMORY_SCOPE, AGENT_MEMORY_SCOPE}:
+            return normalized
+    raise ValueError(f"Invalid openviking_memory_scope: {scope}")
+
+
+def resolve_openviking_session_id(
+    session_key: SessionKey,
+    messages: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Resolve the backing OpenViking session id for a bot session."""
+    if metadata:
+        session_id = metadata.get("openviking_session_id")
+        if isinstance(session_id, str) and session_id.strip():
+            return session_id.strip()
+
+    for message in reversed(messages or []):
+        session_id = message.get("openviking_session_id")
+        if isinstance(session_id, str) and session_id.strip():
+            return session_id.strip()
+
+    return session_key.safe_name()
+
+
+async def mirror_messages_to_openviking(
+    session_key: SessionKey,
+    messages: list[dict[str, Any]],
+    *,
+    metadata: dict[str, Any] | None = None,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    """Write new session messages into OpenViking without committing them."""
+    if not HAS_OPENVIKING:
+        return {"success": False, "error": "OpenViking unavailable", "appended_indices": []}
+
+    if not messages:
+        return {"success": True, "appended_indices": []}
+
+    memory_scope = resolve_openviking_memory_scope(metadata)
+    if memory_scope != ALL_MEMORY_SCOPE:
+        return {
+            "success": False,
+            "error": (
+                "OpenViking live session mirroring only supports memory_scope='all'. "
+                f"Received memory_scope='{memory_scope}'."
+            ),
+            "appended_indices": [],
+        }
+
+    session_id = resolve_openviking_session_id(session_key, messages=messages, metadata=metadata)
+    try:
+        resolved_user_id = (
+            user_id.strip()
+            if isinstance(user_id, str) and user_id.strip()
+            else resolve_openviking_user_id(metadata=metadata)
+        )
+    except ValueError as e:
+        return {"success": False, "error": str(e), "appended_indices": []}
+
+    try:
+        client = await get_global_client()
+        return await client.append_messages(session_id, messages, resolved_user_id)
+    except Exception as e:
+        logger.exception(f"Failed to mirror session messages to OpenViking: {e}")
+        return {"success": False, "error": str(e), "appended_indices": []}
+
+
 class OpenVikingCompactHook(Hook):
     name = "openviking_compact"
 
@@ -38,14 +141,33 @@ class OpenVikingCompactHook(Hook):
         # Use global singleton client
         return await get_global_client()
 
-
     async def execute(self, context: HookContext, **kwargs) -> Any:
         vikingbot_session: Session = kwargs.get("session", {})
-        session_id = context.session_key.safe_name()
+        session_id = resolve_openviking_session_id(
+            context.session_key,
+            messages=vikingbot_session.messages,
+            metadata=context.metadata,
+        )
+        memory_scope = resolve_openviking_memory_scope(context.metadata)
 
         try:
             client = await self._get_client(context.workspace_id)
-            result = await client.commit(session_id, vikingbot_session.messages, load_config().ov_server.admin_user_id)
+            if memory_scope == AGENT_MEMORY_SCOPE:
+                owner_user_id = resolve_openviking_agent_owner_user_id(context.metadata)
+                result = await client.commit(
+                    session_id,
+                    vikingbot_session.messages,
+                    owner_user_id,
+                    memory_scope=AGENT_MEMORY_SCOPE,
+                )
+            else:
+                user_id = resolve_openviking_user_id(metadata=context.metadata)
+                result = await client.commit(
+                    session_id,
+                    vikingbot_session.messages,
+                    user_id,
+                    memory_scope=memory_scope,
+                )
             return result
         except Exception as e:
             logger.exception(f"Failed to add message to OpenViking: {e}")

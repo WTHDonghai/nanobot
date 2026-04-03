@@ -20,6 +20,7 @@ from openviking.utils.time_utils import get_current_timestamp
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils import get_logger, run_async
 from openviking_cli.utils.config import get_openviking_config
+from .memory_scope import ALL_MEMORY_SCOPE, normalize_memory_scope
 
 if TYPE_CHECKING:
     from openviking.session.compressor import SessionCompressor
@@ -345,11 +346,11 @@ class Session:
         self._save_tool_result(tool_id, msg, output, status)
         self._update_message_in_jsonl()
 
-    def commit(self) -> Dict[str, Any]:
+    def commit(self, *, memory_scope: str = ALL_MEMORY_SCOPE) -> Dict[str, Any]:
         """Sync wrapper for commit_async()."""
-        return run_async(self.commit_async())
+        return run_async(self.commit_async(memory_scope=memory_scope))
 
-    async def commit_async(self) -> Dict[str, Any]:
+    async def commit_async(self, *, memory_scope: str = ALL_MEMORY_SCOPE) -> Dict[str, Any]:
         """Async commit session: archive immediately, extract memories in background.
 
         Phase 1 (Archive prep, PathLock-protected): Copy messages, clear live
@@ -362,6 +363,8 @@ class Session:
         from openviking.service.task_tracker import get_task_tracker
         from openviking.storage.transaction import LockContext, get_lock_manager
         from openviking_cli.exceptions import FailedPreconditionError
+
+        normalized_memory_scope = normalize_memory_scope(memory_scope)
 
         # ===== Phase 1: Snapshot + clear (PathLock-protected) =====
         # Fast pre-check: skip lock entirely if no messages (common case avoids
@@ -451,6 +454,7 @@ class Session:
                 usage_records=usage_snapshot,
                 first_message_id=first_message_id,
                 last_message_id=last_message_id,
+                memory_scope=normalized_memory_scope,
             )
         )
 
@@ -470,6 +474,7 @@ class Session:
         usage_records: List["Usage"],
         first_message_id: str,
         last_message_id: str,
+        memory_scope: str = ALL_MEMORY_SCOPE,
     ) -> None:
         """Phase 2: Extract memories, write relations, enqueue — runs in background."""
         import uuid
@@ -564,6 +569,7 @@ class Session:
                         session_id=self.session_id,
                         ctx=self.ctx,
                         latest_archive_overview=latest_archive_overview,
+                        memory_scope=memory_scope,
                     )
                     logger.info(f"Extracted {len(extracted)} memories")
                     for ctx_item in extracted:

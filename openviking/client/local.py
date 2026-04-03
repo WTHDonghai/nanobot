@@ -400,13 +400,21 @@ class LocalClient(BaseClient):
         await self._service.sessions.delete(session_id, self._ctx)
 
     async def commit_session(
-        self, session_id: str, telemetry: TelemetryRequest = False
+        self,
+        session_id: str,
+        telemetry: TelemetryRequest = False,
+        *,
+        memory_scope: str = "all",
     ) -> Dict[str, Any]:
         """Commit a session (archive and extract memories)."""
         execution = await run_with_telemetry(
             operation="session.commit",
             telemetry=telemetry,
-            fn=lambda: self._service.sessions.commit(session_id, self._ctx),
+            fn=lambda: self._service.sessions.commit(
+                session_id,
+                self._ctx,
+                memory_scope=memory_scope,
+            ),
         )
         return attach_telemetry_payload(
             execution.result,

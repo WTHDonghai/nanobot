@@ -102,6 +102,7 @@ def test_classify_knowledge_base_intent_uses_router_tool_call() -> None:
             provider=provider,
             model="stub-model",
             user_message="如何办理入住",
+            history=[{"role": "user", "content": "我们刚刚在聊入住流程。"}],
             session_id="test-session",
         )
     )
@@ -109,6 +110,7 @@ def test_classify_knowledge_base_intent_uses_router_tool_call() -> None:
     assert decision.route == IntentRoute.AGENT
     assert provider.calls[0]["tools"] == [ROUTER_TOOL]
     assert provider.calls[0]["tool_choice"] == {"type": "function", "function": {"name": "route_request"}}
+    assert "recent_history:" in provider.calls[0]["messages"][1]["content"]
 
 
 def test_generate_route_response_returns_model_text() -> None:
@@ -125,6 +127,46 @@ def test_generate_route_response_returns_model_text() -> None:
     )
 
     assert content == "请直接告诉我你要查询的 XMS 模块或操作场景。"
+
+
+def test_generate_route_response_includes_recent_history_for_session_recall() -> None:
+    provider = StubProvider([LLMResponse(content="您刚刚问的是“如何办理入住”。")])
+
+    content = asyncio.run(
+        generate_route_response(
+            provider=provider,
+            model="stub-model",
+            route_label="session_recall",
+            user_message="我刚刚问了什么问题？",
+            history=[
+                {"role": "user", "content": "如何办理入住"},
+                {"role": "assistant", "content": "请先打开预订宾客列表。"},
+            ],
+            session_id="test-session",
+        )
+    )
+
+    assert content == "您刚刚问的是“如何办理入住”。"
+    assert "recent_history:" in provider.calls[0]["messages"][1]["content"]
+    assert "- user: 如何办理入住" in provider.calls[0]["messages"][1]["content"]
+
+
+def test_router_tool_accepts_session_recall_label() -> None:
+    decision = _parse_router_tool_call(
+        {
+            "label": "session_recall",
+            "route": "meta_response",
+            "confidence": "high",
+            "reason": "asks about the immediately previous turn",
+        }
+    )
+
+    assert decision == IntentDecision(
+        label="session_recall",
+        route=IntentRoute.META_RESPONSE,
+        confidence="high",
+        reason="asks about the immediately previous turn",
+    )
 
 
 def test_session_history_excludes_skip_history_messages() -> None:

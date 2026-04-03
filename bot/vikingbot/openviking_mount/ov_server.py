@@ -69,14 +69,9 @@ class VikingClient:
             user_exists = await self._check_user_exists(self.admin_user_id)
             if not user_exists:
                 await self._initialize_user(self.admin_user_id, role="admin")
-            admin_user_api_key = await self._get_or_create_user_apikey(self.admin_user_id)
-            if admin_user_api_key:
-                self.admin_user_client = ov.AsyncHTTPClient(
-                    url=self.openviking_config.server_url,
-                    api_key=admin_user_api_key,
-                    agent_id=self.agent_id,
-                )
-                await self.admin_user_client.initialize()
+            # Reuse the root-scoped client with explicit tenant headers instead of
+            # regenerating a user API key, which would invalidate existing user keys.
+            self.admin_user_client = self.client
 
     @classmethod
     async def create(cls, agent_id: Optional[str] = None):
@@ -571,10 +566,8 @@ class VikingClient:
     async def _get_or_create_user_apikey(self, user_id: str) -> Optional[str]:
         """获取或创建用户的 API key。
 
-        优先从本地 json 文件获取，如果本地没有则：
-        1. 删除用户（如果存在）
-        2. 重新创建用户
-        3. 保存新的 API key
+        优先从本地 json 文件获取；如果本地没有缓存，仅在用户尚不存在时创建用户。
+        为了避免隐式轮换线上用户 key，这里不会在缓存缺失时删除并重建已有用户。
 
         Args:
             user_id: 用户ID
@@ -591,17 +584,21 @@ class VikingClient:
             return api_key
 
         try:
-            # 2a. Remove user if exists
             user_exists = await self._check_user_exists(user_id)
             if user_exists:
-                await self.client.admin_remove_user(self.account_id, user_id)
-            # 2b. Recreate user - this will save API key in _initialize_user
-            success = await self._initialize_user(user_id)
-            if not success:
-                logger.warning(f"Failed to recreate user {user_id}")
+                logger.warning(
+                    "No cached API key for existing user {}; refusing to regenerate automatically.",
+                    user_id,
+                )
                 return None
 
-            # 2c. Get API key from local storage (it was saved by _initialize_user)
+            # Create user only when it does not already exist.
+            success = await self._initialize_user(user_id)
+            if not success:
+                logger.warning(f"Failed to create user {user_id}")
+                return None
+
+            # Get API key from local storage (it was saved by _initialize_user)
             api_key = self._apikey_manager.get_apikey(user_id)
             if api_key:
                 return api_key
@@ -670,103 +667,167 @@ class VikingClient:
         """通过 glob 模式匹配文件"""
         return await self.client.glob(pattern, uri=uri)
 
-    async def commit(self, session_id: str, messages: list[dict[str, Any]], user_id: str = None):
-        """提交会话"""
+    async def _get_user_client(self, user_id: str | None):
+        """Get an OpenViking client scoped to the target user."""
+        if user_id:
+            user_exists = await self._check_user_exists(user_id)
+            if not user_exists:
+                success = await self._initialize_user(user_id)
+                if not success:
+                    raise RuntimeError(f"Failed to initialize user: {user_id}")
+
+        client = self.client
+        should_close = False
+        if (
+            self.mode == "remote"
+            and user_id
+            and user_id != self.admin_user_id
+        ):
+            client = ov.AsyncHTTPClient(
+                url=self.openviking_config.server_url,
+                api_key=self.openviking_config.root_api_key,
+                account=self.account_id,
+                user=user_id,
+                agent_id=self.agent_id,
+            )
+            await client.initialize()
+            should_close = True
+
+        return client, should_close
+
+    @staticmethod
+    def _build_message_parts(session_id: str, message: dict[str, Any]) -> list[Any]:
+        """Build OpenViking message parts from a bot session message."""
         import re
         import uuid
 
         from openviking.message.part import TextPart, ToolPart
 
-        user_exists = await self._check_user_exists(user_id)
-        if not user_exists:
-            success = await self._initialize_user(user_id)
-            if not success:
-                return {"error": "Failed to initialize user"}
+        content = message.get("content")
+        tools_used = message.get("tools_used") or []
 
-        # For remote mode, try to get user's API key and create a dedicated client
-        client = self.client
-        start = time.time()
-        if (
-            self.mode == "remote"
-            and user_id
-            and user_id != self.admin_user_id
-            and self._apikey_manager
-        ):
-            user_api_key = await self._get_or_create_user_apikey(user_id)
-            if user_api_key:
-                # Create a new HTTP client with user's API key
-                client = ov.AsyncHTTPClient(
-                    url=self.openviking_config.server_url,
-                    api_key=user_api_key,
-                    agent_id=self.agent_id,
+        parts: list[Any] = []
+
+        if content:
+            parts.append(TextPart(text=content))
+
+        for tool_info in tools_used:
+            tool_name = tool_info.get("tool_name", "")
+            if not tool_name:
+                continue
+
+            tool_id = f"{tool_name}_{uuid.uuid4().hex[:8]}"
+            tool_input = None
+            try:
+                import json
+
+                args_str = tool_info.get("args", "{}")
+                tool_input = json.loads(args_str) if args_str else {}
+            except Exception:
+                tool_input = {"raw_args": tool_info.get("args", "")}
+
+            result_str = str(tool_info.get("result", ""))
+
+            skill_uri = ""
+            if tool_name == "read_file" and result_str:
+                match = re.search(r"^---\s*\nname:\s*(.+?)\s*\n", result_str, re.MULTILINE)
+                if match:
+                    skill_name = match.group(1).strip()
+                    skill_uri = f"viking://agent/skills/{skill_name}"
+
+            execute_success = tool_info.get("execute_success", True)
+            tool_status = "completed" if execute_success else "error"
+            parts.append(
+                ToolPart(
+                    tool_id=tool_id,
+                    tool_name=tool_name,
+                    tool_uri=f"viking://session/{session_id}/tools/{tool_id}",
+                    tool_input=tool_input,
+                    tool_output=result_str[:2000],
+                    tool_status=tool_status,
+                    skill_uri=skill_uri,
+                    duration_ms=float(tool_info.get("duration", 0.0)),
+                    prompt_tokens=tool_info.get("input_token"),
+                    completion_tokens=tool_info.get("output_token"),
                 )
-                await client.initialize()
+            )
 
-        create_res = await client.create_session()
-        session_id = create_res["session_id"]
+        return parts
+
+    async def _append_messages_with_client(
+        self,
+        client,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        appended_indices: list[int] | None = None,
+    ) -> list[int]:
+        """Append unsynced bot session messages with an existing OpenViking client."""
+        appended_indices = appended_indices if appended_indices is not None else []
+        await client.get_session(session_id, auto_create=True)
         session = client.session(session_id)
 
-        for message in messages:
-            role = message.get("role")
-            content = message.get("content")
-            tools_used = message.get("tools_used") or []
-
-            parts: list[Any] = []
-
-            if content:
-                parts.append(TextPart(text=content))
-
-            for tool_info in tools_used:
-                tool_name = tool_info.get("tool_name", "")
-                if not tool_name:
-                    continue
-
-                tool_id = f"{tool_name}_{uuid.uuid4().hex[:8]}"
-                tool_input = None
-                try:
-                    import json
-
-                    args_str = tool_info.get("args", "{}")
-                    tool_input = json.loads(args_str) if args_str else {}
-                except Exception:
-                    tool_input = {"raw_args": tool_info.get("args", "")}
-
-                result_str = str(tool_info.get("result", ""))
-
-                skill_uri = ""
-                if tool_name == "read_file" and result_str:
-                    match = re.search(r"^---\s*\nname:\s*(.+?)\s*\n", result_str, re.MULTILINE)
-                    if match:
-                        skill_name = match.group(1).strip()
-                        skill_uri = f"viking://agent/skills/{skill_name}"
-
-                execute_success = tool_info.get("execute_success", True)
-                tool_status = "completed" if execute_success else "error"
-                parts.append(
-                    ToolPart(
-                        tool_id=tool_id,
-                        tool_name=tool_name,
-                        tool_uri=f"viking://session/{session_id}/tools/{tool_id}",
-                        tool_input=tool_input,
-                        tool_output=result_str[:2000],
-                        tool_status=tool_status,
-                        skill_uri=skill_uri,
-                        duration_ms=float(tool_info.get("duration", 0.0)),
-                        prompt_tokens=tool_info.get("input_token"),
-                        completion_tokens=tool_info.get("output_token"),
-                    )
-                )
-
-            if not parts:
+        for index, message in enumerate(messages):
+            if message.get("openviking_synced"):
                 continue
-            await session.add_message(role=role, parts=parts)
 
-        result = await session.commit_async()
-        if client is not self.client:
-            await client.close()
-        logger.info(f"time spent: {time.time() - start}")
-        logger.debug(f"Message add ed to OpenViking session {session_id}, user: {user_id}")
-        return {"success": result["status"]}
+            role = message.get("role")
+            parts = self._build_message_parts(session_id, message)
+            if not role or not parts:
+                continue
+
+            await session.add_message(role=role, parts=parts)
+            appended_indices.append(index)
+
+        return appended_indices
+
+    async def append_messages(self, session_id: str, messages: list[dict[str, Any]], user_id: str = None):
+        """Append bot session messages into an OpenViking session without committing it."""
+        client, should_close = await self._get_user_client(user_id)
+        start = time.time()
+        appended_indices: list[int] = []
+        try:
+            appended_indices = await self._append_messages_with_client(
+                client,
+                session_id,
+                messages,
+                appended_indices=appended_indices,
+            )
+            logger.info(f"time spent: {time.time() - start}")
+            logger.debug(f"Mirrored messages to OpenViking session {session_id}, user: {user_id}")
+            return {"success": True, "appended_indices": appended_indices}
+        except Exception as e:
+            logger.exception(f"Failed to mirror messages to OpenViking session {session_id}: {e}")
+            return {"success": False, "error": str(e), "appended_indices": appended_indices}
+        finally:
+            if should_close:
+                await client.close()
+
+    async def commit(
+        self,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        user_id: str = None,
+        memory_scope: str = "all",
+    ):
+        """提交会话"""
+        client, should_close = await self._get_user_client(user_id)
+        start = time.time()
+        try:
+            await self._append_messages_with_client(client, session_id, messages)
+            await client.get_session(session_id, auto_create=True)
+            session = client.session(session_id)
+            result = await session.commit_async(memory_scope=memory_scope)
+            logger.info(f"time spent: {time.time() - start}")
+            logger.debug(
+                "Committed OpenViking session {}, user: {}, memory_scope: {}",
+                session_id,
+                user_id,
+                memory_scope,
+            )
+            return {"success": result["status"]}
+        finally:
+            if should_close:
+                await client.close()
 
     async def close(self):
         """关闭客户端"""

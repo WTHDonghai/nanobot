@@ -26,6 +26,7 @@ from .memory_extractor import (
     MemoryExtractor,
     ToolSkillCandidateMemory,
 )
+from .memory_scope import ALL_MEMORY_SCOPE, filter_candidates_by_scope, normalize_memory_scope
 
 logger = get_logger(__name__)
 
@@ -280,10 +281,13 @@ class SessionCompressor:
         ctx: Optional[RequestContext] = None,
         strict_extract_errors: bool = False,
         latest_archive_overview: str = "",
+        memory_scope: str = ALL_MEMORY_SCOPE,
     ) -> List[Context]:
         """Extract long-term memories from messages."""
         if not messages:
             return []
+
+        normalized_memory_scope = normalize_memory_scope(memory_scope)
 
         context = {
             "messages": messages,
@@ -311,6 +315,7 @@ class SessionCompressor:
                 else:
                     candidates = await self.extractor.extract(context, user, session_id)
 
+                candidates = filter_candidates_by_scope(candidates, normalized_memory_scope)
                 if not candidates:
                     return []
 

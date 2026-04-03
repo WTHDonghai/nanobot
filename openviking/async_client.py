@@ -185,11 +185,19 @@ class AsyncOpenViking:
         )
 
     async def commit_session(
-        self, session_id: str, telemetry: TelemetryRequest = False
+        self,
+        session_id: str,
+        telemetry: TelemetryRequest = False,
+        *,
+        memory_scope: str = "all",
     ) -> Dict[str, Any]:
         """Commit a session (archive and extract memories)."""
         await self._ensure_initialized()
-        return await self._client.commit_session(session_id, telemetry=telemetry)
+        return await self._client.commit_session(
+            session_id,
+            telemetry=telemetry,
+            memory_scope=memory_scope,
+        )
 
     async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Query background task status."""

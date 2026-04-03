@@ -58,22 +58,36 @@ class Session:
             return await self._client.add_message(self.session_id, role, parts=parts_dicts)
         return await self._client.add_message(self.session_id, role, content=content)
 
-    async def commit(self, telemetry: TelemetryRequest = False) -> Dict[str, Any]:
+    async def commit(
+        self,
+        telemetry: TelemetryRequest = False,
+        *,
+        memory_scope: str = "all",
+    ) -> Dict[str, Any]:
         """Commit the session (archive messages and extract memories).
 
         Returns:
             Commit result
         """
-        return await self._client.commit_session(self.session_id, telemetry=telemetry)
+        return await self._client.commit_session(
+            self.session_id,
+            telemetry=telemetry,
+            memory_scope=memory_scope,
+        )
 
-    async def commit_async(self, telemetry: TelemetryRequest = False) -> Dict[str, Any]:
+    async def commit_async(
+        self,
+        telemetry: TelemetryRequest = False,
+        *,
+        memory_scope: str = "all",
+    ) -> Dict[str, Any]:
         """Commit the session asynchronously (archive messages and extract memories).
            Used in viking bot for committing.
 
         Returns:
             Commit result
         """
-        return await self.commit(telemetry)
+        return await self.commit(telemetry, memory_scope=memory_scope)
 
     async def delete(self) -> None:
         """Delete the session."""

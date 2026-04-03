@@ -80,6 +80,13 @@ class UsedRequest(BaseModel):
     skill: Optional[Dict[str, Any]] = None
 
 
+class CommitSessionRequest(BaseModel):
+    """Request model for committing a session."""
+
+    telemetry: Optional[Any] = False
+    memory_scope: Literal["all", "user", "agent"] = "all"
+
+
 def _to_jsonable(value: Any) -> Any:
     """Convert internal objects (e.g. Context) into JSON-serializable values."""
     to_dict = getattr(value, "to_dict", None)
@@ -193,6 +200,7 @@ async def delete_session(
 
 @router.post("/{session_id}/commit")
 async def commit_session(
+    request: CommitSessionRequest | None = None,
     session_id: str = Path(..., description="Session ID"),
     _ctx: RequestContext = Depends(get_request_context),
 ):
@@ -203,18 +211,27 @@ async def commit_session(
     polling progress via ``GET /tasks/{task_id}``.
     """
     service = get_service()
-    result = await service.sessions.commit_async(session_id, _ctx)
+    memory_scope = request.memory_scope if request is not None else "all"
+    result = await service.sessions.commit_async(
+        session_id,
+        _ctx,
+        memory_scope=memory_scope,
+    )
     return Response(status="ok", result=result).model_dump(exclude_none=True)
 
 
 @router.post("/{session_id}/extract")
 async def extract_session(
     session_id: str = Path(..., description="Session ID"),
+    memory_scope: Literal["all", "user", "agent"] = Query(
+        "all",
+        description="Which memory categories to extract from the session",
+    ),
     _ctx: RequestContext = Depends(get_request_context),
 ):
     """Extract memories from a session."""
     service = get_service()
-    result = await service.sessions.extract(session_id, _ctx)
+    result = await service.sessions.extract(session_id, _ctx, memory_scope=memory_scope)
     return Response(status="ok", result=_to_jsonable(result))
 
 

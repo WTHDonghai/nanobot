@@ -81,6 +81,30 @@ export const formatRelativeTime = (value?: string): string => {
 
 export const toSingleLine = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
+export const rewriteBotImageUris = (value: string, serverUrl: string): string => {
+  if (!value || !serverUrl || !value.includes('send://')) return value;
+
+  const base = serverUrl.replace(/\/+$/, '');
+  const toImageUrl = (filename: string) => `${base}/bot/v1/images/${filename}`;
+
+  const markdownRewritten = value.replace(
+    /!\[([^\]]*)\]\((send:\/\/[^)\s]+)\)/g,
+    (_match, alt: string, ref: string) => {
+      const filename = ref.slice('send://'.length);
+      return `![${alt}](${toImageUrl(filename)})`;
+    },
+  );
+
+  return markdownRewritten.replace(
+    /send:\/\/[^\s)>"']+/g,
+    (ref) => {
+      const filename = ref.slice('send://'.length);
+      const alt = filename.replace(/\.[^.]+$/, '');
+      return `![${alt}](${toImageUrl(filename)})`;
+    },
+  );
+};
+
 export const shortenSessionId = (value: string): string => {
   if (value.length <= 22) return value;
   return `${value.slice(0, 8)}...${value.slice(-6)}`;
@@ -130,10 +154,13 @@ export const deriveSessionTitleFromMessages = (sessionMessages: SessionContextMe
   return getPrimaryTextFromMessage(candidate).slice(0, 200);
 };
 
-export const renderMessageText = (parts: SessionContextPart[] = []): string => {
+export const renderMessageText = (
+  parts: SessionContextPart[] = [],
+  serverUrl = '',
+): string => {
   const textBlocks = parts
     .filter((part) => part.type === 'text' && part.text?.trim())
-    .map((part) => part.text!.trim());
+    .map((part) => rewriteBotImageUris(part.text!.trim(), serverUrl));
   const contextLines = parts
     .filter((part) => part.type === 'context' && part.abstract?.trim())
     .map((part, index) => `${index + 1}. [${part.context_type || 'context'}] ${part.abstract!.trim()}`);
@@ -149,7 +176,10 @@ export const renderMessageText = (parts: SessionContextPart[] = []): string => {
   return sections.join('\n\n').trim() || '（空消息）';
 };
 
-export const mapSessionMessages = (sessionMessages: SessionContextMessage[]): ChatMessage[] => {
+export const mapSessionMessages = (
+  sessionMessages: SessionContextMessage[],
+  serverUrl = '',
+): ChatMessage[] => {
   if (sessionMessages.length === 0) {
     return makeWelcomeMessages('该会话暂无消息，可以继续提问');
   }
@@ -157,7 +187,7 @@ export const mapSessionMessages = (sessionMessages: SessionContextMessage[]): Ch
   return sessionMessages.map((message, index) => ({
     key: message.id || `${message.role}-${index}`,
     role: message.role === 'assistant' ? 'bot' : 'user',
-    text: renderMessageText(message.parts),
+    text: renderMessageText(message.parts, serverUrl),
     createdAt: message.created_at,
   }));
 };
@@ -210,7 +240,10 @@ export const readStoredSessionTitles = (storageKey: string | null): Record<strin
   }
 };
 
-export const readStoredSessionMessages = (storageKey: string | null): Record<string, ChatMessage[]> => {
+export const readStoredSessionMessages = (
+  storageKey: string | null,
+  serverUrl = '',
+): Record<string, ChatMessage[]> => {
   if (!storageKey) return {};
 
   try {
@@ -232,7 +265,7 @@ export const readStoredSessionMessages = (storageKey: string | null): Record<str
         items.push({
           key: typeof record.key === 'string' ? record.key : `${sessionId}-${index}`,
           role,
-          text,
+          text: rewriteBotImageUris(text, serverUrl),
           status: typeof record.status === 'string' ? record.status : undefined,
           loading: typeof record.loading === 'boolean' ? record.loading : undefined,
           createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,

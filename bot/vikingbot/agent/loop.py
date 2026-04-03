@@ -7,7 +7,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -25,6 +25,7 @@ from vikingbot.bus.events import InboundMessage, OutboundEventType, OutboundMess
 from vikingbot.bus.queue import MessageBus
 from vikingbot.config import load_config
 from vikingbot.config.schema import BotMode, Config, SessionKey
+from vikingbot.hooks.builtins.openviking_hooks import mirror_messages_to_openviking
 from vikingbot.hooks import HookContext
 from vikingbot.hooks.manager import hook_manager
 from vikingbot.openviking_mount.uri_utils import is_generic_scope_summary_uri, is_summary_uri
@@ -148,6 +149,7 @@ class AgentLoop:
         self._inbound_semaphore = asyncio.Semaphore(self._max_concurrent_inbound)
         self._inflight_message_tasks: set[asyncio.Task[None]] = set()
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._openviking_sync_tasks: dict[str, asyncio.Task[None]] = {}
         self._register_default_tools()
 
     async def _publish_thinking_event(
@@ -247,6 +249,11 @@ class AgentLoop:
                 task.cancel()
             if self._inflight_message_tasks:
                 await asyncio.gather(*self._inflight_message_tasks, return_exceptions=True)
+            sync_tasks = list(self._openviking_sync_tasks.values())
+            for task in sync_tasks:
+                task.cancel()
+            if sync_tasks:
+                await asyncio.gather(*sync_tasks, return_exceptions=True)
 
     def stop(self) -> None:
         """Stop the agent loop."""
@@ -284,6 +291,189 @@ class AgentLoop:
                     )
         finally:
             self._inbound_semaphore.release()
+
+    @staticmethod
+    def _message_has_openviking_payload(message: dict[str, Any]) -> bool:
+        """Return True when a session message contains syncable OpenViking content."""
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return True
+        tools_used = message.get("tools_used")
+        return isinstance(tools_used, list) and len(tools_used) > 0
+
+    @staticmethod
+    def _metadata_indicates_shared_session(metadata: dict[str, Any] | None) -> bool:
+        """Detect channel metadata that implies multiple human participants share one session."""
+        if not metadata:
+            return False
+        if metadata.get("chat_type") == "group":
+            return True
+        if metadata.get("is_group") is True:
+            return True
+        for key in ("group_id", "groupId"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+        return False
+
+    def _resolve_openviking_agent_owner_user_id(self) -> str:
+        """Return the configured stable owner used for shared agent-memory extraction."""
+        user_id = getattr(getattr(self.config, "ov_server", None), "admin_user_id", "")
+        if isinstance(user_id, str) and user_id.strip():
+            return user_id.strip()
+        raise ValueError("Missing ov_server.admin_user_id for agent-scoped OpenViking sync")
+
+    def _resolve_session_memory_scope(self, session, msg: InboundMessage) -> str:
+        """Resolve whether this bot session should extract all memories or agent-only memories."""
+        metadata = session.metadata if isinstance(session.metadata, dict) else {}
+        existing_scope = metadata.get("openviking_memory_scope")
+        if isinstance(existing_scope, str):
+            normalized_scope = existing_scope.strip().lower()
+            if normalized_scope == "agent":
+                return "agent"
+            if normalized_scope in {"all", "user"}:
+                existing_scope = normalized_scope
+            else:
+                raise ValueError(f"Invalid openviking_memory_scope stored on session: {existing_scope}")
+
+        if self._metadata_indicates_shared_session(msg.metadata):
+            return "agent"
+
+        historical_senders = {
+            str(sender_id).strip()
+            for sender_id in (message.get("sender_id") for message in session.messages)
+            if isinstance(sender_id, str) and sender_id.strip()
+        }
+        if len(historical_senders) > 1:
+            return "agent"
+
+        current_sender_id = msg.sender_id.strip() if isinstance(msg.sender_id, str) else ""
+        if historical_senders and current_sender_id and current_sender_id not in historical_senders:
+            return "agent"
+
+        if isinstance(existing_scope, str):
+            return existing_scope
+        return "all"
+
+    def _apply_openviking_memory_policy(self, session, msg: InboundMessage) -> None:
+        """Persist the explicit OpenViking extraction policy on the local bot session."""
+        memory_scope = self._resolve_session_memory_scope(session, msg)
+        session.metadata["openviking_memory_scope"] = memory_scope
+
+        if memory_scope == "agent":
+            session.metadata["openviking_agent_owner_user_id"] = (
+                self._resolve_openviking_agent_owner_user_id()
+            )
+            session.metadata.pop("openviking_user_id", None)
+            return
+
+        sender_id = msg.sender_id.strip() if isinstance(msg.sender_id, str) else ""
+        if not sender_id:
+            raise ValueError("Missing sender_id for user-scoped OpenViking session policy")
+        session.metadata["openviking_user_id"] = sender_id
+        session.metadata.pop("openviking_agent_owner_user_id", None)
+
+    def _on_openviking_sync_done(self, session_name: str, task: asyncio.Task[None]) -> None:
+        """Clean up completed background OpenViking sync tasks."""
+        if self._openviking_sync_tasks.get(session_name) is task:
+            self._openviking_sync_tasks.pop(session_name, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception(f"Unhandled OpenViking sync error for {session_name}: {e}")
+
+    def _schedule_openviking_sync(self, session_key: SessionKey) -> None:
+        """Schedule background OpenViking sync with per-session ordering."""
+        session_name = session_key.safe_name()
+        previous_task = self._openviking_sync_tasks.get(session_name)
+
+        async def _runner() -> None:
+            if previous_task is not None:
+                try:
+                    await previous_task
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Preserve the new sync attempt even if the previous one failed.
+                    pass
+            await self._sync_pending_messages_to_openviking(session_key)
+
+        task = asyncio.create_task(_runner())
+        self._openviking_sync_tasks[session_name] = task
+        task.add_done_callback(
+            lambda finished_task, name=session_name: self._on_openviking_sync_done(name, finished_task)
+        )
+
+    async def _sync_pending_messages_to_openviking(self, session_key: SessionKey) -> None:
+        """Synchronize unsynced local session messages to OpenViking in the background."""
+        session_name = session_key.safe_name()
+        session_lock = self._session_locks.setdefault(session_name, asyncio.Lock())
+
+        async with session_lock:
+            session = self.sessions.get_or_create(session_key, skip_heartbeat=session_key.type == "cli")
+            session_metadata = session.metadata if isinstance(session.metadata, dict) else {}
+            openviking_session_id = session_metadata.get("openviking_session_id")
+            if not isinstance(openviking_session_id, str) or not openviking_session_id.strip():
+                return
+            if session_metadata.get("openviking_memory_scope") != "all":
+                raise ValueError(
+                    "OpenViking live session mirroring requires memory_scope='all' for "
+                    f"session {session_name}"
+                )
+
+            sync_candidates: list[tuple[int, dict[str, Any]]] = []
+            for index, message in enumerate(session.messages):
+                if message.get("openviking_synced"):
+                    continue
+                if not self._message_has_openviking_payload(message):
+                    message["openviking_synced"] = True
+                    message.pop("openviking_sync_error", None)
+                    continue
+                sync_candidates.append((index, message))
+
+            if not sync_candidates:
+                session.metadata.pop("openviking_last_sync_error", None)
+                await self.sessions.save(session)
+                return
+
+            sync_messages = [message for _, message in sync_candidates]
+            mirror_result = await mirror_messages_to_openviking(
+                session_key,
+                sync_messages,
+                metadata=session.metadata,
+            )
+
+            if not mirror_result.get("success", False):
+                sync_error = str(mirror_result.get("error", "OpenViking sync failed"))
+                session.metadata["openviking_last_sync_error"] = sync_error
+                for _, message in sync_candidates:
+                    message["openviking_sync_error"] = sync_error
+                await self.sessions.save(session)
+                logger.warning(
+                    "OpenViking background sync failed for {}: {}",
+                    openviking_session_id,
+                    sync_error,
+                )
+                return
+
+            appended_indices = set(mirror_result.get("appended_indices", []))
+            sync_error = ""
+            for relative_index, (_, message) in enumerate(sync_candidates):
+                if relative_index in appended_indices:
+                    message["openviking_synced"] = True
+                    message.pop("openviking_sync_error", None)
+                else:
+                    sync_error = "Message was not appended to OpenViking"
+                    message["openviking_sync_error"] = sync_error
+
+            if sync_error:
+                session.metadata["openviking_last_sync_error"] = sync_error
+            else:
+                session.metadata.pop("openviking_last_sync_error", None)
+
+            await self.sessions.save(session)
 
     async def _run_agent_loop(
         self,
@@ -960,6 +1150,50 @@ class AgentLoop:
 
         return final_content
 
+    async def _persist_session_turn(
+        self,
+        session,
+        msg: InboundMessage,
+        assistant_content: str,
+        *,
+        tools_used: list[dict[str, Any]] | None = None,
+        token_usage: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist one completed user/assistant turn locally and to OpenViking when needed."""
+        memory_scope = ""
+        if isinstance(session.metadata, dict):
+            raw_memory_scope = session.metadata.get("openviking_memory_scope")
+            if isinstance(raw_memory_scope, str):
+                memory_scope = raw_memory_scope.strip().lower()
+
+        openviking_session_id = ""
+        if msg.metadata:
+            raw_session_id = msg.metadata.get("openviking_session_id")
+            if isinstance(raw_session_id, str):
+                openviking_session_id = raw_session_id.strip()
+
+        message_kwargs: dict[str, Any] = {}
+        if openviking_session_id:
+            if memory_scope and memory_scope != "all":
+                raise ValueError(
+                    "OpenViking live session mirroring only supports direct user-scoped sessions"
+                )
+            session.metadata["openviking_session_id"] = openviking_session_id
+            message_kwargs["openviking_session_id"] = openviking_session_id
+
+        session.add_message("user", msg.content, sender_id=msg.sender_id, **message_kwargs)
+
+        assistant_kwargs = dict(message_kwargs)
+        if tools_used:
+            assistant_kwargs["tools_used"] = tools_used
+        if token_usage is not None:
+            assistant_kwargs["token_usage"] = token_usage
+        session.add_message("assistant", assistant_content, sender_id=msg.sender_id, **assistant_kwargs)
+
+        await self.sessions.save(session)
+        if openviking_session_id and memory_scope == "all":
+            self._schedule_openviking_sync(msg.session_key)
+
     @trace(
         name="process_message",
         extract_session_id=lambda msg: msg.session_key.safe_name(),
@@ -1025,9 +1259,10 @@ class AgentLoop:
             # For CLI/direct sessions, skip heartbeat by default
             skip_heartbeat = session_key.type == "cli"
             session = self.sessions.get_or_create(session_key, skip_heartbeat=skip_heartbeat)
+            self._apply_openviking_memory_policy(session, msg)
 
             # Handle slash commands
-            is_group_chat = msg.metadata.get("chat_type") == "group" if msg.metadata else False
+            is_group_chat = self._metadata_indicates_shared_session(msg.metadata)
             if is_group_chat:
                 cmd = msg.content.replace(f"@{msg.sender_id}", "").strip().lower()
             else:
@@ -1106,6 +1341,7 @@ class AgentLoop:
                         provider=self.provider,
                         model=self.fast_model,
                         user_message=msg.content,
+                        history=session.get_history(),
                         session_id=session_key.safe_name(),
                     )
                     logger.info(
@@ -1120,13 +1356,11 @@ class AgentLoop:
                             model=self.model,
                             route_label=decision.label,
                             user_message=msg.content,
+                            history=session.get_history(),
                             session_id=session_key.safe_name(),
                         )
                         response_text = self._normalize_final_output_text(response_text)
-                        # Save to session
-                        session.add_message("user", msg.content, sender_id=msg.sender_id)
-                        session.add_message("assistant", response_text, sender_id=msg.sender_id)
-                        await self.sessions.save(session)
+                        await self._persist_session_turn(session, msg, response_text)
 
                         time_cost = round(time.time() - start_time, 2)
                         return OutboundMessage(
@@ -1163,12 +1397,13 @@ class AgentLoop:
             logger.info(f"Response to {msg.session_key}: {preview}")
 
             # Save to session (include tool names so consolidation sees what happened)
-            session.add_message("user", msg.content, sender_id=msg.sender_id)
-            session.add_message(
-                "assistant", final_content, tools_used=tools_used if tools_used else None, token_usage=token_usage,
-                sender_id=msg.sender_id,
+            await self._persist_session_turn(
+                session,
+                msg,
+                final_content,
+                tools_used=tools_used if tools_used else None,
+                token_usage=token_usage,
             )
-            await self.sessions.save(session)
 
             time_cost = round(time.time() - start_time, 2)
             if tools_used is not None:
@@ -1342,6 +1577,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                     session_id=session.key.safe_name(),
                     workspace_id=self.sandbox_manager.to_workspace_id(session.key),
                     session_key=session.key,
+                    metadata=dict(session.metadata),
                 ),
                 session=session,
             )
