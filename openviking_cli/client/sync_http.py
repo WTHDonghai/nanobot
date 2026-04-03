@@ -130,10 +130,20 @@ class SyncHTTPClient:
         return run_async(self._async_client.get_task(task_id))
 
     def commit_session(
-        self, session_id: str, telemetry: TelemetryRequest = False
+        self,
+        session_id: str,
+        telemetry: TelemetryRequest = False,
+        *,
+        memory_scope: str = "all",
     ) -> Dict[str, Any]:
         """Commit a session (archive and extract memories)."""
-        return run_async(self._async_client.commit_session(session_id, telemetry=telemetry))
+        return run_async(
+            self._async_client.commit_session(
+                session_id,
+                telemetry=telemetry,
+                memory_scope=memory_scope,
+            )
+        )
 
     # ============= Resource =============
 

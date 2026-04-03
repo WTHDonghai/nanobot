@@ -245,7 +245,11 @@ class BaseClient(ABC):
 
     @abstractmethod
     async def commit_session(
-        self, session_id: str, telemetry: TelemetryRequest = False
+        self,
+        session_id: str,
+        telemetry: TelemetryRequest = False,
+        *,
+        memory_scope: str = "all",
     ) -> Dict[str, Any]:
         """Commit a session (archive and extract memories)."""
         ...
