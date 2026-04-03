@@ -597,8 +597,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
       rememberSessionTitle(targetSessionId, derivedTitle);
       const nextMessages = mergedMessages.length > 0
-        ? mergeCachedMessageMetadata(mapSessionMessages(mergedMessages), cachedMessages || [])
-        : (cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages));
+        ? mergeCachedMessageMetadata(mapSessionMessages(mergedMessages, serverUrl), cachedMessages || [])
+        : (cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages, serverUrl));
 
       setCachedSessionMessages(targetSessionId, nextMessages);
       persistLastActiveSession(targetSessionId);
@@ -762,7 +762,10 @@ const ChatApp: React.FC<ChatAppProps> = ({
   }, [accountId]);
 
   useEffect(() => {
-    if (role === 'user') {
+    if (hideUserSelector && userId) {
+      setUsers([{ user_id: userId }]);
+      setSelectedUserId(userId);
+    } else if (role === 'user') {
       fetchApi<ApiEnvelope<{ user_id?: string }>>(serverUrl, apiKey, '/api/v1/system/whoami')
         .then((res) => {
           const whoami = unwrapResult(res, '获取当前用户失败');
@@ -793,7 +796,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
       setUsers([]);
       setSelectedUserId('');
     }
-  }, [selectedAccountId, serverUrl, apiKey, role]);
+  }, [selectedAccountId, serverUrl, apiKey, role, hideUserSelector, userId]);
 
   useEffect(() => {
     const renamedKey = getSessionTitleStorageKey();
@@ -813,7 +816,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
   useEffect(() => {
     const storageKey = getSessionMessageCacheStorageKey();
-    sessionMessageCacheRef.current = readStoredSessionMessages(storageKey);
+    sessionMessageCacheRef.current = readStoredSessionMessages(storageKey, serverUrl);
   }, [serverUrl, role, accountId, userId, selectedAccountId, selectedUserId]);
 
   useEffect(() => {
