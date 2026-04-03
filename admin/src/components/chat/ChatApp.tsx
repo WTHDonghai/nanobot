@@ -36,6 +36,7 @@ import {
   makeWelcomeMessages,
   mapSessionMessages,
   mergeCachedMessageMetadata,
+  normalizeMarkdownForDisplay,
   readStoredSessionMessages,
   readStoredSessionTitles,
   unwrapResult,
@@ -1287,7 +1288,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
                             },
                           }}
                         >
-                          {message.text}
+                          {normalizeMarkdownForDisplay(message.text)}
                         </ReactMarkdown>
                       </div>
                     )}
