@@ -161,19 +161,8 @@ export const renderMessageText = (
   const textBlocks = parts
     .filter((part) => part.type === 'text' && part.text?.trim())
     .map((part) => rewriteBotImageUris(part.text!.trim(), serverUrl));
-  const contextLines = parts
-    .filter((part) => part.type === 'context' && part.abstract?.trim())
-    .map((part, index) => `${index + 1}. [${part.context_type || 'context'}] ${part.abstract!.trim()}`);
-  const toolLines = parts
-    .filter((part) => part.type === 'tool')
-    .map((part, index) => `${index + 1}. ${part.tool_name || 'tool'} (${part.tool_status || 'done'})`);
 
-  const sections: string[] = [];
-  if (textBlocks.length > 0) sections.push(textBlocks.join('\n\n'));
-  if (contextLines.length > 0) sections.push(['**关联上下文**', ...contextLines].join('\n'));
-  if (toolLines.length > 0) sections.push(['**工具调用**', ...toolLines].join('\n'));
-
-  return sections.join('\n\n').trim() || '（空消息）';
+  return textBlocks.join('\n\n').trim() || '（空消息）';
 };
 
 export const normalizeMarkdownForDisplay = (value: string): string => {
