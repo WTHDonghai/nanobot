@@ -61,4 +61,5 @@ export type ChatMessage = {
   createdAt?: string;
   elapsedMs?: number;
   steps?: string[];
+  iterationCount?: number;
 };

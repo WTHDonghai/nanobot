@@ -34,6 +34,7 @@ import {
   getArchiveIndex,
   getSessionSortTime,
   getSessionId,
+  inferIterationCountFromSteps,
   makeWelcomeMessages,
   mapSessionMessages,
   mergeCachedMessageMetadata,
@@ -165,6 +166,15 @@ function summarizeIterationEvent(data: unknown): string {
     return `第 ${match[1]} / ${match[2]} 轮规划中...`;
   }
   return '正在进入下一轮分析...';
+}
+
+function parseIterationCount(data: unknown): number | undefined {
+  const raw = typeof data === 'string' ? data : JSON.stringify(data ?? '');
+  const match = raw.match(/Iteration\s+(\d+)\/(\d+)/i);
+  if (!match) return undefined;
+
+  const currentIteration = Number(match[1]);
+  return Number.isFinite(currentIteration) && currentIteration > 0 ? currentIteration : undefined;
 }
 
 const ChatApp: React.FC<ChatAppProps> = ({
@@ -887,7 +897,16 @@ const ChatApp: React.FC<ChatAppProps> = ({
     setMessages((prev) => [
       ...prev,
       { key: userMessageKey, role: 'user', text: userMsg, createdAt: userCreatedAt },
-      { key: botId, role: 'bot', text: '', status: '思考中...', loading: true, createdAt: userCreatedAt, steps: [] },
+      {
+        key: botId,
+        role: 'bot',
+        text: '',
+        status: '思考中...',
+        loading: true,
+        createdAt: userCreatedAt,
+        steps: [],
+        iterationCount: 0,
+      },
     ]);
 
     try {
@@ -934,6 +953,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
               latestEventTimestamp = evt.timestamp;
             }
             let status = '思考中...';
+            const iterationCount = evt.event === 'iteration' ? parseIterationCount(evt.data) : undefined;
             if (evt.event === 'reasoning') {
               status = summarizeReasoningEvent(evt.data);
             } else if (evt.event === 'iteration') {
@@ -1026,6 +1046,9 @@ const ChatApp: React.FC<ChatAppProps> = ({
                   text: finalContent || '',
                   createdAt: latestEventTimestamp,
                   steps: nextSteps,
+                  iterationCount: iterationCount === undefined
+                    ? message.iterationCount
+                    : Math.max(message.iterationCount ?? 0, iterationCount),
                 };
               }
               return message;
@@ -1280,110 +1303,123 @@ const ChatApp: React.FC<ChatAppProps> = ({
               </div>
             )}
 
-            {messages.map((message, index) => (
-              <div
-                key={message.key}
-                className={`chat-row ${message.role}`}
-                ref={(node) => {
-                  if (node) {
-                    messageRowRefs.current[message.key] = node;
-                  } else {
-                    delete messageRowRefs.current[message.key];
-                  }
-                }}
-              >
-                <div className={`chat-avatar ${message.role === 'user' ? 'user-av' : 'bot-av'}`}>
-                  {message.role === 'user' ? <User size={18} /> : <Bot size={18} />}
-                </div>
-                <div className="chat-content-wrap">
-                  {message.role === 'bot' && message.steps && message.steps.length > 0 && (message.loading || message.steps.length > 1) ? (
-                    <div className="chat-status-container">
-                      <details className="chat-process-details" open={message.loading}>
-                        <summary className="chat-process-summary">
-                          <div className="chat-process-summary-left">
-                            {message.loading ? <Loader2 size={12} className="chat-status-icon" /> : <Zap size={12} className="chat-status-finished-icon" />}
-                            <span>{message.loading ? message.status : `使用了 ${message.steps.length} 个步骤思考`}</span>
-                          </div>
-                          <ChevronRight size={14} className="chat-process-chevron" />
-                        </summary>
-                        <div className="chat-process-timeline">
-                          {message.steps.map((step, i) => (
-                            <div key={i} className="chat-timeline-item">
-                              <div className="chat-timeline-dot" />
-                              <div className="chat-timeline-text">{step}</div>
+            {messages.map((message, index) => {
+              const iterationCount = message.iterationCount ?? inferIterationCountFromSteps(message.steps);
+              const shouldShowProcess = message.role === 'bot'
+                && (message.steps?.length ?? 0) > 0
+                && (message.loading || (message.steps?.length ?? 0) > 1 || (iterationCount ?? 0) > 0);
+
+              return (
+                <div
+                  key={message.key}
+                  className={`chat-row ${message.role}`}
+                  ref={(node) => {
+                    if (node) {
+                      messageRowRefs.current[message.key] = node;
+                    } else {
+                      delete messageRowRefs.current[message.key];
+                    }
+                  }}
+                >
+                  <div className={`chat-avatar ${message.role === 'user' ? 'user-av' : 'bot-av'}`}>
+                    {message.role === 'user' ? <User size={18} /> : <Bot size={18} />}
+                  </div>
+                  <div className="chat-content-wrap">
+                    {shouldShowProcess ? (
+                      <div className="chat-status-container">
+                        <details className="chat-process-details" open={message.loading}>
+                          <summary className="chat-process-summary">
+                            <div className="chat-process-summary-left">
+                              {message.loading ? <Loader2 size={12} className="chat-status-icon" /> : <Zap size={12} className="chat-status-finished-icon" />}
+                              <span>
+                                {message.loading
+                                  ? message.status
+                                  : iterationCount && iterationCount > 0
+                                    ? `进行了 ${iterationCount} 轮规划`
+                                    : `记录了 ${message.steps?.length ?? 0} 条处理轨迹`}
+                              </span>
                             </div>
-                          ))}
-                        </div>
-                      </details>
-                    </div>
-                  ) : message.role === 'bot' && message.status && message.status !== 'Bot 回复' ? (
-                    <div className="chat-status">
-                      {message.loading && <Loader2 size={12} className="chat-status-icon" />}
-                      <span>{message.status}</span>
-                    </div>
-                  ) : null}
-                  <div className="chat-bubble">
-                    {message.loading && !message.text ? (
-                      <div className="typing-dots"><span /><span /><span /></div>
-                    ) : (
-                      <>
-                        <div className="markdown-body">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            components={{
-                              img(props) {
-                                return (
-                                  <img
-                                    {...props}
-                                    style={{ maxWidth: '100%', borderRadius: '8px', cursor: 'zoom-in', marginTop: '8px' }}
-                                    onClick={() => setPreviewImage(props.src || null)}
-                                  />
-                                );
-                              },
-                            }}
-                          >
-                            {normalizeMarkdownForDisplay(message.text)}
-                          </ReactMarkdown>
-                        </div>
-                        {message.role === 'bot' && message.key !== 'welcome' && (
-                          <div className="chat-bubble-actions" data-export-ignore="true">
-                            <button
-                              className="chat-export-btn"
-                              onClick={() => { void handleExportPdf(message, index); }}
-                              disabled={busy || Boolean(exportingMessageKey)}
-                              title="导出从顶部到当前回复的 PDF"
-                              aria-label="导出当前回复之前的会话为 PDF"
+                            <ChevronRight size={14} className="chat-process-chevron" />
+                          </summary>
+                          <div className="chat-process-timeline">
+                            {message.steps?.map((step, i) => (
+                              <div key={i} className="chat-timeline-item">
+                                <div className="chat-timeline-dot" />
+                                <div className="chat-timeline-text">{step}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      </div>
+                    ) : message.role === 'bot' && message.status && message.status !== 'Bot 回复' ? (
+                      <div className="chat-status">
+                        {message.loading && <Loader2 size={12} className="chat-status-icon" />}
+                        <span>{message.status}</span>
+                      </div>
+                    ) : null}
+                    <div className="chat-bubble">
+                      {message.loading && !message.text ? (
+                        <div className="typing-dots"><span /><span /><span /></div>
+                      ) : (
+                        <>
+                          <div className="markdown-body">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                img(props) {
+                                  return (
+                                    <img
+                                      {...props}
+                                      style={{ maxWidth: '100%', borderRadius: '8px', cursor: 'zoom-in', marginTop: '8px' }}
+                                      onClick={() => setPreviewImage(props.src || null)}
+                                    />
+                                  );
+                                },
+                              }}
                             >
-                              <FileDown size={14} />
-                              <span>{exportingMessageKey === message.key ? '导出中...' : '导出 PDF'}</span>
-                            </button>
+                              {normalizeMarkdownForDisplay(message.text)}
+                            </ReactMarkdown>
+                          </div>
+                          {message.role === 'bot' && message.key !== 'welcome' && (
+                            <div className="chat-bubble-actions" data-export-ignore="true">
+                              <button
+                                className="chat-export-btn"
+                                onClick={() => { void handleExportPdf(message, index); }}
+                                disabled={busy || Boolean(exportingMessageKey)}
+                                title="导出从顶部到当前回复的 PDF"
+                                aria-label="导出当前回复之前的会话为 PDF"
+                              >
+                                <FileDown size={14} />
+                                <span>{exportingMessageKey === message.key ? '导出中...' : '导出 PDF'}</span>
+                              </button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    {message.role === 'bot' ? (
+                      <div className="chat-footer">
+                        {(message.createdAt || message.elapsedMs !== undefined) && (
+                          <div className="chat-meta">
+                            {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
+                              .filter(Boolean)
+                              .join(' · ')}
                           </div>
                         )}
-                      </>
-                    )}
-                  </div>
-                  {message.role === 'bot' ? (
-                    <div className="chat-footer">
-                      {(message.createdAt || message.elapsedMs !== undefined) && (
-                        <div className="chat-meta">
+                      </div>
+                    ) : (
+                      (message.createdAt || message.elapsedMs !== undefined) && (
+                        <div className="chat-meta align-right">
                           {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
                             .filter(Boolean)
                             .join(' · ')}
                         </div>
-                      )}
-                    </div>
-                  ) : (
-                    (message.createdAt || message.elapsedMs !== undefined) && (
-                      <div className="chat-meta align-right">
-                        {[message.createdAt ? formatDateTime(message.createdAt) : '', message.elapsedMs !== undefined ? `cost ${formatDuration(message.elapsedMs)}` : '']
-                          .filter(Boolean)
-                          .join(' · ')}
-                      </div>
-                    )
-                  )}
+                      )
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <div ref={messagesEndRef} />
           </div>
         </div>

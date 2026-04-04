@@ -81,6 +81,20 @@ export const formatRelativeTime = (value?: string): string => {
 
 export const toSingleLine = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
+export const inferIterationCountFromSteps = (steps?: string[]): number | undefined => {
+  if (!Array.isArray(steps) || steps.length === 0) return undefined;
+
+  return steps.reduce<number | undefined>((maxIteration, step) => {
+    if (typeof step !== 'string') return maxIteration;
+    const match = step.match(/(?:第\s*)?(\d+)\s*\/\s*(\d+)(?:\s*轮|)/);
+    if (!match) return maxIteration;
+
+    const currentIteration = Number(match[1]);
+    if (!Number.isFinite(currentIteration) || currentIteration <= 0) return maxIteration;
+    return maxIteration === undefined ? currentIteration : Math.max(maxIteration, currentIteration);
+  }, undefined);
+};
+
 export const rewriteBotImageUris = (value: string, serverUrl: string): string => {
   if (!value || !serverUrl || !value.includes('send://')) return value;
 
@@ -246,6 +260,7 @@ export const mergeCachedMessageMetadata = (
       ...message,
       elapsedMs: message.elapsedMs ?? cached.elapsedMs,
       steps: message.steps ?? cached.steps,
+      iterationCount: message.iterationCount ?? cached.iterationCount ?? inferIterationCountFromSteps(message.steps ?? cached.steps),
     };
   });
 };
@@ -303,6 +318,13 @@ export const readStoredSessionMessages = (
           steps: Array.isArray(record.steps)
             ? record.steps.filter((step): step is string => typeof step === 'string')
             : undefined,
+          iterationCount: typeof record.iterationCount === 'number'
+            ? record.iterationCount
+            : inferIterationCountFromSteps(
+              Array.isArray(record.steps)
+                ? record.steps.filter((step): step is string => typeof step === 'string')
+                : undefined,
+            ),
         });
         return items;
       }, []);
