@@ -161,8 +161,27 @@ export const renderMessageText = (
   const textBlocks = parts
     .filter((part) => part.type === 'text' && part.text?.trim())
     .map((part) => rewriteBotImageUris(part.text!.trim(), serverUrl));
+  if (textBlocks.length > 0) {
+    return textBlocks.join('\n\n').trim();
+  }
 
-  return textBlocks.join('\n\n').trim() || '（空消息）';
+  const contextBlocks = parts
+    .filter((part) => part.type === 'context' && part.abstract?.trim())
+    .map((part) => rewriteBotImageUris(part.abstract!.trim(), serverUrl));
+  const toolBlocks = parts
+    .filter((part) => part.type === 'tool')
+    .map((part) => {
+      const output = part.tool_output?.trim();
+      if (output) return rewriteBotImageUris(output, serverUrl);
+
+      const name = part.tool_name?.trim();
+      if (!name) return '';
+
+      return `${name} (${part.tool_status || 'done'})`;
+    })
+    .filter(Boolean);
+
+  return [...contextBlocks, ...toolBlocks].join('\n\n').trim() || '（空消息）';
 };
 
 export const normalizeMarkdownForDisplay = (value: string): string => {

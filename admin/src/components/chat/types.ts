@@ -31,6 +31,7 @@ export type SessionContextPart = {
   context_type?: string;
   tool_name?: string;
   tool_status?: string;
+  tool_output?: string;
 };
 
 export type SessionContextMessage = {
