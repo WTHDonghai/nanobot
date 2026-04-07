@@ -45,6 +45,7 @@ import {
   shortenSessionId,
   toSingleLine,
   formatShortSessionTime,
+  parseIterationFromData,
 } from './utils';
 import { exportChatSubsetToPdf } from './pdfExport';
 import SessionSidebar from './SessionSidebar';
@@ -137,7 +138,7 @@ export type ChatAppProps = {
 };
 
 function summarizeReasoningEvent(data: unknown): string {
-  const raw = typeof data === 'string' ? data : JSON.stringify(data ?? '');
+  const raw = typeof data === 'string' ? data : String(data ?? '');
   const trimmed = raw.trim();
   if (!trimmed) return '正在规划回答路径...';
 
@@ -160,21 +161,11 @@ function summarizeReasoningEvent(data: unknown): string {
 }
 
 function summarizeIterationEvent(data: unknown): string {
-  const raw = typeof data === 'string' ? data : JSON.stringify(data ?? '');
-  const match = raw.match(/Iteration\s+(\d+)\/(\d+)/i);
-  if (match) {
-    return `第 ${match[1]} / ${match[2]} 轮规划中...`;
+  const parsed = parseIterationFromData(data);
+  if (parsed) {
+    return `第 ${parsed.current} / ${parsed.total} 轮规划中...`;
   }
   return '正在进入下一轮分析...';
-}
-
-function parseIterationCount(data: unknown): number | undefined {
-  const raw = typeof data === 'string' ? data : JSON.stringify(data ?? '');
-  const match = raw.match(/Iteration\s+(\d+)\/(\d+)/i);
-  if (!match) return undefined;
-
-  const currentIteration = Number(match[1]);
-  return Number.isFinite(currentIteration) && currentIteration > 0 ? currentIteration : undefined;
 }
 
 const ChatApp: React.FC<ChatAppProps> = ({
@@ -783,40 +774,45 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
   useEffect(() => {
     if (hideUserSelector && userId) {
+      setSessionError('');
       setUsers([{ user_id: userId }]);
       setSelectedUserId(userId);
+    } else if (role !== 'user') {
+      if (userId) {
+        setSessionError('');
+        setUsers([{ user_id: userId }]);
+        setSelectedUserId(userId);
+      } else {
+        setUsers([]);
+        setSelectedUserId('');
+        setSessionError('当前登录身份缺少 user_id，暂时无法加载会话。');
+      }
     } else if (role === 'user') {
+      setSessionError('');
       fetchApi<ApiEnvelope<{ user_id?: string }>>(serverUrl, apiKey, '/api/v1/system/whoami')
         .then((res) => {
           const whoami = unwrapResult(res, '获取当前用户失败');
           if (whoami.user_id) {
+            setSessionError('');
             setUsers([{ user_id: whoami.user_id }]);
             setSelectedUserId(whoami.user_id);
+          } else {
+            setUsers([]);
+            setSelectedUserId('');
+            setSessionError('服务端未返回当前用户身份，暂时无法加载会话。');
           }
         })
         .catch(() => {
           setUsers([]);
           setSelectedUserId('');
-        });
-    } else if (selectedAccountId) {
-      fetchApi<ApiEnvelope<UserOption[]>>(serverUrl, apiKey, `/api/v1/admin/accounts/${selectedAccountId}/users`)
-        .then((res) => {
-          const nextUsers = unwrapResult(res, '获取用户列表失败') || [];
-          setUsers(nextUsers);
-          setSelectedUserId((prev) => {
-            if (prev && nextUsers.some((user) => user.user_id === prev)) return prev;
-            return nextUsers[0]?.user_id || '';
-          });
-        })
-        .catch(() => {
-          setUsers([]);
-          setSelectedUserId('');
+          setSessionError('获取当前身份失败，请刷新页面或重新登录。');
         });
     } else {
       setUsers([]);
       setSelectedUserId('');
+      setSessionError('当前身份未就绪，暂时无法加载会话。');
     }
-  }, [selectedAccountId, serverUrl, apiKey, role, hideUserSelector, userId]);
+  }, [serverUrl, apiKey, role, hideUserSelector, userId]);
 
   useEffect(() => {
     const renamedKey = getSessionTitleStorageKey();
@@ -862,7 +858,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
         resetConversation('');
       }
     } else {
-      resetConversation('正在同步会话上下文');
+      resetConversation('正在同步身份与会话上下文...');
     }
   }, [selectedAccountId, selectedUserId]);
 
@@ -953,11 +949,13 @@ const ChatApp: React.FC<ChatAppProps> = ({
               latestEventTimestamp = evt.timestamp;
             }
             let status = '思考中...';
-            const iterationCount = evt.event === 'iteration' ? parseIterationCount(evt.data) : undefined;
+            let currentIteration: number | undefined;
+
             if (evt.event === 'reasoning') {
               status = summarizeReasoningEvent(evt.data);
             } else if (evt.event === 'iteration') {
               status = summarizeIterationEvent(evt.data);
+              currentIteration = parseIterationFromData(evt.data)?.current;
             } else if (evt.event === 'tool_call') {
               let displayStatus = '正在调用工具...';
               try {
@@ -1040,16 +1038,20 @@ const ChatApp: React.FC<ChatAppProps> = ({
                 const currentSteps = message.steps || [];
                 const isNewStep = status !== '思考中...' && status !== 'Bot 回复' && currentSteps[currentSteps.length - 1] !== status;
                 const nextSteps = isNewStep ? [...currentSteps, status] : currentSteps;
-                return {
+                
+                const nextMessage = {
                   ...message,
                   status,
                   text: finalContent || '',
                   createdAt: latestEventTimestamp,
                   steps: nextSteps,
-                  iterationCount: iterationCount === undefined
-                    ? message.iterationCount
-                    : Math.max(message.iterationCount ?? 0, iterationCount),
                 };
+                
+                if (currentIteration !== undefined) {
+                  nextMessage.iterationCount = Math.max(message.iterationCount ?? 0, currentIteration);
+                }
+                
+                return nextMessage;
               }
               return message;
             }));
@@ -1159,9 +1161,10 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
   const ready = role === 'user' ? Boolean(selectedUserId) : Boolean(selectedAccountId && selectedUserId);
   const busy = loading || sessionReplayLoading || sessionMutating;
-  const currentIdentityLabel = role === 'user'
-    ? (selectedUserId || userId || '当前用户')
-    : (selectedUserId || '请选择用户');
+  const currentIdentityLabel = selectedUserId || userId || '当前身份';
+  const notReadyMessage = sessionError
+    ? '身份未就绪，请先处理上方错误提示。'
+    : '正在同步身份与会话上下文...';
   const latestBotMessage = [...messages]
     .reverse()
     .find((message) => message.role === 'bot' && !message.loading && message.key !== 'welcome');
@@ -1216,6 +1219,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
         busy={busy}
         sessionListLoading={sessionListLoading}
         currentIdentityLabel={currentIdentityLabel}
+        notReadyMessage={notReadyMessage}
         onSelectSession={(id) => { void handleSelectSession(id); }}
         onNewSession={handleNewSession}
         onRefreshSessions={() => { void loadSessions(sessionId); }}
@@ -1263,28 +1267,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
               最近更新 {formatRelativeTime(activeSessionMeta?.updated_at || activeSessionMeta?.created_at)}
             </span>
           </div>
-
-          {!hideUserSelector && role !== 'user' && (
-            <>
-              {role === 'root' && (
-                <div className="chat-config-note">
-                  Bot 使用服务端固定 Account。当前仅展示工作区 <code>{selectedAccountId || 'default'}</code> 的用户与会话。
-                </div>
-              )}
-              <div className="chat-config-selector">
-                <label>User</label>
-                <select
-                  className="select"
-                  value={selectedUserId}
-                  onChange={(e) => setSelectedUserId(e.target.value)}
-                  disabled={busy}
-                >
-                  {users.map((user) => <option key={user.user_id} value={user.user_id}>{user.user_id}</option>)}
-                  {users.length === 0 && <option value="" disabled>无</option>}
-                </select>
-              </div>
-            </>
-          )}
         </div>
 
         {sessionError && (
@@ -1305,9 +1287,14 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
             {messages.map((message, index) => {
               const iterationCount = message.iterationCount ?? inferIterationCountFromSteps(message.steps);
-              const shouldShowProcess = message.role === 'bot'
-                && (message.steps?.length ?? 0) > 0
-                && (message.loading || (message.steps?.length ?? 0) > 1 || (iterationCount ?? 0) > 0);
+              
+              // 决定是否在界面上展示思考过程折叠面板的条件：
+              // 1. 只有 Bot 回复展示思考过程
+              // 2. 至少要有 1 条以上步骤才会展示
+              // 3. 在具备步骤的情况下，如果仍在加载、或者步骤数量大于 1、或者带有迭代次数，则展示详细过程
+              const isBotWithMessage = message.role === 'bot' && (message.steps?.length ?? 0) > 0;
+              const hasComplexProcess = message.loading || (message.steps?.length ?? 0) > 1 || (iterationCount ?? 0) > 0;
+              const shouldShowProcess = isBotWithMessage && hasComplexProcess;
 
               return (
                 <div

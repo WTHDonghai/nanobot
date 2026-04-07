@@ -38,7 +38,7 @@ const AppRoutes = () => {
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/accounts" element={<Accounts />} />
                 <Route path="/sessions" element={<Sessions />} />
-                <Route path="/bot" element={<BotChat />} />
+                {role !== 'root' && <Route path="/bot" element={<BotChat />} />}
                 <Route path="/system" element={<SystemInfo />} />
                 <Route path="/resources" element={<Resources />} />
                 <Route path="*" element={<Navigate to={defaultPage} replace />} />
