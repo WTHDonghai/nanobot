@@ -3,6 +3,7 @@
 
 """Tests for OpenViking bot file tools."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -224,6 +225,38 @@ async def test_viking_read_tool_marks_generic_scope_summary_as_non_evidence() ->
 
 
 @pytest.mark.asyncio
+async def test_viking_read_tool_marks_section_summary_as_non_evidence_and_lists_candidates() -> None:
+    tool = VikingReadTool()
+    mock_client = AsyncMock()
+    mock_client.resolve_read_uri.return_value = (
+        None,
+        [
+            "viking://resources/03-reception/第四节_散客登记/散客登记.md",
+            "viking://resources/03-reception/第四节_散客登记/散客登记_2.md",
+        ],
+    )
+    mock_client.read_content.return_value = "散客登记相关摘要"
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        uri="viking://resources/03-reception/第四节_散客登记/.abstract.md",
+        level="read",
+    )
+
+    assert "这是目录/章节摘要，不是具体文档正文" in result
+    assert "不要直接根据这段摘要回答用户问题" in result
+    assert "散客登记.md" in result
+    assert "摘要内容（仅供定位，不可直接作答）" in result
+    mock_client.resolve_read_uri.assert_awaited_once_with(
+        "viking://resources/03-reception/第四节_散客登记"
+    )
+
+
+@pytest.mark.asyncio
 async def test_viking_search_tool_prioritizes_documents_over_image_assets() -> None:
     tool = VikingSearchTool()
     mock_client = AsyncMock()
@@ -330,8 +363,87 @@ async def test_viking_search_tool_warns_when_only_generic_scope_summaries_are_fo
     )
 
     assert "Generic scope summary only. Not a concrete document." in result
-    assert "only generic scope summaries were found" in result
+    assert "only summary matches were found" in result
     assert "use openviking_glob to locate concrete files" in result
+
+
+@pytest.mark.asyncio
+async def test_viking_search_tool_demotes_non_generic_summary_uris_below_concrete_docs() -> None:
+    tool = VikingSearchTool()
+    mock_client = AsyncMock()
+    mock_client.search.return_value = {
+        "total": 2,
+        "query": "接待流程",
+        "resources": [
+            {
+                "uri": "viking://resources/03-reception/.abstract.md",
+                "abstract": "接待流程目录摘要",
+                "score": 0.95,
+            },
+            {
+                "uri": "viking://resources/03-reception/总览/接待流程总览.md",
+                "abstract": "接待流程总览正文",
+                "score": 0.72,
+            },
+        ],
+        "memories": [],
+        "skills": [],
+    }
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        query="接待流程",
+        target_uri="viking://resources/",
+    )
+
+    assert result.index("viking://resources/03-reception/总览/接待流程总览.md") < result.index(
+        "viking://resources/03-reception/.abstract.md"
+    )
+    assert "Summary only. Not a concrete document." in result
+
+
+@pytest.mark.asyncio
+async def test_viking_search_tool_formats_findresult_like_objects_from_admin_search() -> None:
+    tool = VikingSearchTool()
+    mock_client = AsyncMock()
+    mock_client.admin_user_client = AsyncMock()
+    mock_client._matched_context_to_dict.side_effect = lambda item: {
+        "uri": getattr(item, "uri", ""),
+        "abstract": getattr(item, "abstract", ""),
+        "match_reason": getattr(item, "match_reason", ""),
+        "score": getattr(item, "score", 0.0),
+    }
+    mock_client.admin_user_client.search.return_value = SimpleNamespace(
+        resources=[
+            SimpleNamespace(
+                uri="viking://resources/demo/manual.md",
+                abstract="manual",
+                match_reason="Matched by content",
+                score=0.88,
+            )
+        ],
+        memories=[],
+        skills=[],
+        total=1,
+    )
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        query="manual",
+        target_uri="viking://resources/demo/",
+    )
+
+    assert result.startswith("OpenViking search query: manual")
+    assert "FindResult(" not in result
+    assert "viking://resources/demo/manual.md" in result
 
 
 @pytest.mark.asyncio

@@ -806,7 +806,6 @@ class AgentLoop:
         """Select tool-choice mode for the current LLM turn."""
         if (
             self.context._is_knowledge_base_mode()
-            and iteration == 1
             and not has_kb_read_evidence
             and tools
         ):

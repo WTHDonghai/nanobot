@@ -247,11 +247,16 @@ async def test_agent_loop_publishes_kb_text_draft_as_reasoning_before_retry() ->
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_requires_tool_call_on_first_kb_iteration() -> None:
+async def test_agent_loop_requires_tool_call_until_kb_document_evidence_is_ready() -> None:
     config = Config()
     config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
 
-    provider = StubProvider([LLMResponse(content="Reached by forced tool-choice test.")])
+    provider = StubProvider(
+        [
+            LLMResponse(content="First round still lacks document evidence."),
+            LLMResponse(content="Second round still lacks document evidence."),
+        ]
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         workspace = Path(tmpdir)
@@ -260,7 +265,7 @@ async def test_agent_loop_requires_tool_call_on_first_kb_iteration() -> None:
             provider=provider,
             workspace=workspace,
             config=config,
-            max_iterations=1,
+            max_iterations=2,
         )
         loop.tools.get_definitions = lambda: [
             {
@@ -286,8 +291,10 @@ async def test_agent_loop_requires_tool_call_on_first_kb_iteration() -> None:
     )
     assert tools_used == []
     assert token_usage["total_tokens"] == 0
-    assert iteration == 1
+    assert iteration == 2
+    assert len(provider.calls) == 2
     assert provider.calls[0]["tool_choice"] == "required"
+    assert provider.calls[1]["tool_choice"] == "required"
 
 
 @pytest.mark.asyncio

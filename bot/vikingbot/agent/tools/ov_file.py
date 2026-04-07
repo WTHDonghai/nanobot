@@ -100,14 +100,53 @@ class VikingReadTool(OVFileTool):
                 normalized_uri = self._normalize_non_read_uri(uri, level)
                 return await client.read_content(normalized_uri, level=level)
 
-            if is_generic_scope_summary_uri(uri):
-                content = await client.read_content(uri, level="read")
-                return (
-                    f"这是作用域级摘要，不是具体文档正文：{uri}\n"
-                    "不要直接根据这段摘要回答用户问题。请先用 openviking_glob 查找具体文件，"
-                    "或缩小 target_uri 后重新 search，再对具体文档 URI 调用 openviking_read。\n\n"
-                    f"{content}"
-                )
+            if is_summary_uri(uri):
+                summary_uri = uri.rstrip("/")
+                parent_uri = summary_uri.rsplit("/", 1)[0]
+                resolved = await client.resolve_read_uri(parent_uri)
+                resolved_uri, candidate_uris = self._normalize_resolve_result(resolved)
+                content = await client.read_content(summary_uri, level="read")
+                if resolved_uri and resolved_uri not in candidate_uris:
+                    candidate_uris = [resolved_uri, *candidate_uris]
+
+                prefix = "这是作用域级摘要，不是具体文档正文" if is_generic_scope_summary_uri(
+                    uri
+                ) else "这是目录/章节摘要，不是具体文档正文"
+                lines = [
+                    f"{prefix}：{uri}",
+                    "不要直接根据这段摘要回答用户问题。",
+                ]
+
+                deduped_candidates: list[str] = []
+                seen_candidates: set[str] = set()
+                for candidate_uri in candidate_uris:
+                    normalized_candidate = str(candidate_uri or "").strip()
+                    if not normalized_candidate or normalized_candidate in seen_candidates:
+                        continue
+                    seen_candidates.add(normalized_candidate)
+                    deduped_candidates.append(normalized_candidate)
+
+                if deduped_candidates:
+                    if len(deduped_candidates) == 1:
+                        lines.append("请下一步改为读取以下正文 URI：")
+                    else:
+                        lines.append("请下一步从以下正文 URI 中选择最相关的一项继续读取：")
+                    lines.extend(
+                        f"{index}. {candidate_uri}"
+                        for index, candidate_uri in enumerate(deduped_candidates[:8], start=1)
+                    )
+                else:
+                    lines.append("请先用 openviking_glob 查找具体文件，或缩小 target_uri 后重新 search。")
+
+                if content:
+                    lines.extend(
+                        [
+                            "",
+                            "摘要内容（仅供定位，不可直接作答）:",
+                            content,
+                        ]
+                    )
+                return "\n".join(lines)
 
             stat = await client.stat(uri)
             if self._is_image_like_target(uri, stat):
@@ -143,11 +182,10 @@ class VikingReadTool(OVFileTool):
                 return content
 
             raw_content = content
-            content = await client.materialize_inline_image_refs(content, read_uri)
+            materialized_content = await client.materialize_inline_image_refs(content, read_uri)
+            if isinstance(materialized_content, str):
+                content = materialized_content
             if MARKDOWN_IMAGE_RE.search(content):
-                return content
-
-            if not WORD_IMAGE_ARTIFACT_RE.search(raw_content):
                 return content
 
             image_refs = await client.export_related_images_for_send(read_uri, max_images=max_images)
@@ -176,6 +214,16 @@ class VikingReadTool(OVFileTool):
             ".svg",
             ".tiff",
         }
+
+    @staticmethod
+    def _normalize_resolve_result(result: Any) -> tuple[Optional[str], list[str]]:
+        """Best-effort normalize resolve_read_uri results for mocks and runtime clients."""
+        if isinstance(result, tuple) and len(result) == 2:
+            resolved_uri, candidate_uris = result
+            if not isinstance(candidate_uris, list):
+                candidate_uris = list(candidate_uris or [])
+            return resolved_uri, candidate_uris
+        return None, []
 class VikingListTool(OVFileTool):
     """Tool to list Viking resources."""
 
@@ -269,8 +317,8 @@ class VikingSearchTool(OVFileTool):
     ) -> str:
         try:
             client = await self._get_client(tool_context)
-            search_client = getattr(client, 'admin_user_client', client)
-            results = await search_client.search(query, target_uri=target_uri)
+            raw_results = await client.search(query, target_uri=target_uri)
+            results = self._normalize_search_results(client=client, results=raw_results, query=query, target_uri=target_uri)
 
             if not results:
                 return f"No results found for query: {query}"
@@ -284,6 +332,47 @@ class VikingSearchTool(OVFileTool):
             return str(results)
         except Exception as e:
             return f"Error searching Viking: {str(e)}"
+
+    @staticmethod
+    def _normalize_search_results(
+        client: Any, results: Any, query: str, target_uri: Optional[str] = ""
+    ) -> Any:
+        """Normalize raw search results to the dict shape expected by the formatter."""
+        if isinstance(results, dict) or isinstance(results, list):
+            return results
+
+        if hasattr(results, "resources") or hasattr(results, "memories") or hasattr(results, "skills"):
+            def _convert(items: Any) -> list[dict[str, Any]]:
+                converted: list[dict[str, Any]] = []
+                for item in items or []:
+                    if hasattr(client, "_matched_context_to_dict"):
+                        converted.append(client._matched_context_to_dict(item))
+                        continue
+                    converted.append(
+                        {
+                            "uri": getattr(item, "uri", ""),
+                            "context_type": str(getattr(item, "context_type", "")),
+                            "is_leaf": getattr(item, "is_leaf", False),
+                            "abstract": getattr(item, "abstract", ""),
+                            "overview": getattr(item, "overview", None),
+                            "category": getattr(item, "category", ""),
+                            "score": getattr(item, "score", 0.0),
+                            "match_reason": getattr(item, "match_reason", ""),
+                            "relations": getattr(item, "relations", []),
+                        }
+                    )
+                return converted
+
+            return {
+                "memories": _convert(getattr(results, "memories", [])),
+                "resources": _convert(getattr(results, "resources", [])),
+                "skills": _convert(getattr(results, "skills", [])),
+                "total": getattr(results, "total", len(getattr(results, "resources", []) or [])),
+                "query": query,
+                "target_uri": target_uri,
+            }
+
+        return results
 
     @staticmethod
     def _is_image_uri(uri: str) -> bool:
@@ -326,8 +415,8 @@ class VikingSearchTool(OVFileTool):
                 enumerate(resources),
                 key=lambda item: (
                     cls._is_image_uri(item[1].get("uri", "")),
-                    cls._is_generic_scope_summary_uri(item[1].get("uri", "")),
                     cls._is_summary_uri(item[1].get("uri", "")),
+                    cls._is_generic_scope_summary_uri(item[1].get("uri", "")),
                     -cls._resource_score(item[1]),
                     item[0],
                 ),
@@ -339,12 +428,12 @@ class VikingSearchTool(OVFileTool):
         concrete_document_resources = [
             resource
             for resource in document_resources
-            if not cls._is_generic_scope_summary_uri(resource.get("uri", ""))
+            if not cls._is_summary_uri(resource.get("uri", ""))
         ]
-        generic_scope_summaries = [
+        summary_resources = [
             resource
             for resource in document_resources
-            if cls._is_generic_scope_summary_uri(resource.get("uri", ""))
+            if cls._is_summary_uri(resource.get("uri", ""))
         ]
         image_resources = [
             resource for resource in ordered_resources if cls._is_image_uri(resource.get("uri", ""))
@@ -367,8 +456,11 @@ class VikingSearchTool(OVFileTool):
                 lines.append(f"{idx}. [{resource_type}] {uri}")
                 if match_reason:
                     lines.append(f"   Match reason: {match_reason}")
-                if cls._is_generic_scope_summary_uri(uri):
-                    lines.append("   Generic scope summary only. Not a concrete document.")
+                if cls._is_summary_uri(uri):
+                    if cls._is_generic_scope_summary_uri(uri):
+                        lines.append("   Generic scope summary only. Not a concrete document.")
+                    else:
+                        lines.append("   Summary only. Not a concrete document.")
                     lines.append("   Do not answer from this alone; locate a concrete file first.")
                 else:
                     lines.append("   Content preview omitted. Use openviking_read for evidence.")
@@ -419,12 +511,18 @@ class VikingSearchTool(OVFileTool):
                 lines.append(
                     "Never place raw viking:// image URIs directly inside Markdown image syntax."
                 )
-        elif generic_scope_summaries:
+        elif summary_resources:
             lines.append("")
-            lines.append(
-                "Important: only generic scope summaries were found. They are not concrete "
-                "document evidence and should not be used directly for answering."
-            )
+            if any(cls._is_generic_scope_summary_uri(resource.get("uri", "")) for resource in summary_resources):
+                lines.append(
+                    "Important: only summary matches were found, including generic scope summaries. "
+                    "They are not concrete document evidence and should not be used directly for answering."
+                )
+            else:
+                lines.append(
+                    "Important: only summary matches were found. They are not concrete "
+                    "document evidence and should not be used directly for answering."
+                )
             lines.append(
                 "Next step: use openviking_glob to locate concrete files under the target URI, "
                 "or narrow target_uri and search again."
