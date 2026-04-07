@@ -20,6 +20,7 @@ export type SessionSidebarProps = {
   busy: boolean;
   sessionListLoading: boolean;
   currentIdentityLabel: string;
+  notReadyMessage: string;
   onSelectSession: (id: string) => void;
   onNewSession: () => void;
   onRefreshSessions: () => void;
@@ -37,6 +38,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
   busy,
   sessionListLoading,
   currentIdentityLabel,
+  notReadyMessage,
   onSelectSession,
   onNewSession,
   onRefreshSessions,
@@ -171,7 +173,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
       </div>
 
       <div className="chat-session-list">
-        {!ready && <div className="chat-session-empty">请选择用户后查看会话历史。</div>}
+        {!ready && <div className="chat-session-empty">{notReadyMessage}</div>}
         {ready && sessionListLoading && (
           <div className="chat-session-loading">
             <div className="loader" />

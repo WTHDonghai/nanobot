@@ -81,17 +81,27 @@ export const formatRelativeTime = (value?: string): string => {
 
 export const toSingleLine = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
+export const parseIterationFromData = (data: unknown): { current: number; total: number } | undefined => {
+  const raw = typeof data === 'string' ? data : String(data ?? '');
+  const match = raw.match(/(?:Iteration\s+|第\s*)?(\d+)\s*\/\s*(\d+)(?:\s*轮|)/i);
+  if (!match) return undefined;
+
+  const current = Number(match[1]);
+  const total = Number(match[2]);
+  if (!Number.isFinite(current) || current <= 0) return undefined;
+
+  return { current, total };
+};
+
 export const inferIterationCountFromSteps = (steps?: string[]): number | undefined => {
   if (!Array.isArray(steps) || steps.length === 0) return undefined;
 
   return steps.reduce<number | undefined>((maxIteration, step) => {
     if (typeof step !== 'string') return maxIteration;
-    const match = step.match(/(?:第\s*)?(\d+)\s*\/\s*(\d+)(?:\s*轮|)/);
-    if (!match) return maxIteration;
+    const parsed = parseIterationFromData(step);
+    if (!parsed) return maxIteration;
 
-    const currentIteration = Number(match[1]);
-    if (!Number.isFinite(currentIteration) || currentIteration <= 0) return maxIteration;
-    return maxIteration === undefined ? currentIteration : Math.max(maxIteration, currentIteration);
+    return maxIteration === undefined ? parsed.current : Math.max(maxIteration, parsed.current);
   }, undefined);
 };
 
