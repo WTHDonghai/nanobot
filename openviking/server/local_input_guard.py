@@ -83,6 +83,14 @@ def resolve_uploaded_temp_file_id(temp_file_id: str, upload_temp_dir: Path) -> s
             "HTTP server only accepts temp_file_id values issued from the upload temp directory."
         ) from exc
 
+    if resolved_path.is_dir():
+        entries = [entry for entry in resolved_path.iterdir() if not entry.is_symlink()]
+        if len(entries) != 1 or not entries[0].is_file():
+            raise PermissionDeniedError(
+                "HTTP server only accepts regular files from the upload temp directory."
+            )
+        resolved_path = entries[0]
+
     if not resolved_path.is_file():
         raise PermissionDeniedError(
             "HTTP server only accepts regular files from the upload temp directory."

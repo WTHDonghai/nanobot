@@ -1,22 +1,51 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertTriangle,
+  CheckCircle,
+  ChevronRight,
+  Copy,
+  Eye,
+  File,
+  FileText,
+  FolderOpen,
+  FolderPlus,
+  Home,
+  LayoutGrid,
+  Link as LinkIcon,
+  List,
+  RefreshCw,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { fetchApi } from '../services/api';
-import {
-  Database, Plus, CheckCircle, AlertTriangle, FolderOpen, Link,
-  Upload, X, File, RefreshCw, Trash2, ChevronRight, ChevronDown, Eye,
-} from 'lucide-react';
-import './Pages.css';
+import './Resources.css';
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-type TabMode = 'list' | 'url' | 'upload';
-
-interface ResourceNode {
-  uri: string;
+interface KnowledgeFolder {
+  entry_type: 'folder';
+  folder_id: string;
   name: string;
-  type: 'file' | 'directory';
-  children?: ResourceNode[];
-  size?: number;
+  path: string;
+  parent_path: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface KnowledgeDocument {
+  entry_type: 'document';
+  document_id: string;
+  display_name: string;
+  source_type: string;
+  source_ref: string;
+  resource_root_uri: string;
+  folder_path: string;
+  source_format?: string | null;
+  created_at: string;
+  updated_at: string;
+  reason?: string;
+  instruction?: string;
+  has_local_copy: boolean;
 }
 
 interface UploadItem {
@@ -25,14 +54,114 @@ interface UploadItem {
   error?: string;
 }
 
-// ─── Inline Confirm Modal ────────────────────────────────────────────────────
+type KnowledgeEntry = KnowledgeFolder | KnowledgeDocument;
+type DrawerMode = 'upload' | 'url' | 'new-folder' | null;
+type ViewMode = 'icon' | 'list';
 
-const ConfirmModal = ({ message, onConfirm, onCancel }: {
-  message: string; onConfirm: () => void; onCancel: () => void;
+const ROOT_LABEL = '资源库';
+
+const formatTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+};
+
+const formatSourceType = (sourceType: string) => {
+  switch (sourceType) {
+    case 'file':
+      return '本地文件';
+    case 'directory':
+      return '本地目录';
+    case 'remote':
+      return '远程来源';
+    default:
+      return '未知来源';
+  }
+};
+
+const formatPath = (path: string) => (path ? `/${path}` : '/');
+
+const entryKey = (entry: KnowledgeEntry) => (
+  entry.entry_type === 'folder' ? `folder:${entry.folder_id}` : `document:${entry.document_id}`
+);
+
+const isFolderEntry = (entry: KnowledgeEntry | null | undefined): entry is KnowledgeFolder => (
+  Boolean(entry && entry.entry_type === 'folder')
+);
+
+const isDocumentEntry = (entry: KnowledgeEntry | null | undefined): entry is KnowledgeDocument => (
+  Boolean(entry && entry.entry_type === 'document')
+);
+
+const buildTenantHeaders = (
+  apiKey: string,
+  accountId: string | null,
+  userId: string | null,
+) => {
+  const headers = new Headers();
+  if (apiKey) headers.set('X-API-Key', apiKey);
+  if (accountId) headers.set('X-OpenViking-Account', accountId);
+  if (userId) headers.set('X-OpenViking-User', userId);
+  return headers;
+};
+
+async function uploadTempFile(
+  serverUrl: string,
+  apiKey: string,
+  accountId: string | null,
+  userId: string | null,
+  file: File,
+): Promise<string> {
+  const body = new FormData();
+  body.append('file', file, file.name);
+  const res = await fetch(`${serverUrl}/api/v1/resources/temp_upload`, {
+    method: 'POST',
+    headers: buildTenantHeaders(apiKey, accountId, userId),
+    body,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const detail = data?.error?.message || data?.detail;
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || '上传失败');
+  }
+  return data.result.temp_file_id;
+}
+
+const Toast = ({ msg, type, onClose }: { msg: string; type: 'success' | 'error'; onClose: () => void }) => {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 4000);
+    return () => clearTimeout(timer);
+  }, [onClose]);
+
+  return (
+    <div className={`fm-toast fm-toast-${type}`}>
+      {type === 'success' ? <CheckCircle size={18} /> : <AlertTriangle size={18} />}
+      <span>{msg}</span>
+      <button className="btn btn-ghost btn-sm" onClick={onClose} style={{ padding: '2px' }}>
+        <X size={14} />
+      </button>
+    </div>
+  );
+};
+
+const ConfirmModal = ({
+  message,
+  onConfirm,
+  onCancel,
+}: {
+  message: string;
+  onConfirm: () => void;
+  onCancel: () => void;
 }) => (
-  <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
+  <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
     <div className="modal">
-      <div className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--danger)' }}>
+      <div className="modal-title fm-danger-title">
         <AlertTriangle size={18} /> 操作确认
       </div>
       <div className="modal-body">
@@ -46,56 +175,70 @@ const ConfirmModal = ({ message, onConfirm, onCancel }: {
   </div>
 );
 
-// ─── Preview Modal ───────────────────────────────────────────────────────────
-
-const PreviewModal = ({ uri, name, isDir, serverUrl, apiKey, onClose }: {
-  uri: string; name: string; isDir: boolean; serverUrl: string; apiKey: string; onClose: () => void;
+const PreviewModal = ({
+  document,
+  serverUrl,
+  apiKey,
+  accountId,
+  userId,
+  onClose,
+}: {
+  document: KnowledgeDocument;
+  serverUrl: string;
+  apiKey: string;
+  accountId: string | null;
+  userId: string | null;
+  onClose: () => void;
 }) => {
-  const [content, setContent] = useState<string | null>(null);
+  const [content, setContent] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    let canceled = false;
-    const fetchContent = async () => {
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      setError('');
       try {
-        const endpoint = isDir ? '/api/v1/content/abstract' : '/api/v1/content/read';
-        const params = new URLSearchParams({ uri, limit: '500' });
-        const res = await fetch(`${serverUrl}${endpoint}?${params}`, {
-          headers: { 'X-API-Key': apiKey },
+        const params = new URLSearchParams({ uri: document.resource_root_uri, limit: '500' });
+        const res = await fetch(`${serverUrl}/api/v1/content/abstract?${params}`, {
+          headers: buildTenantHeaders(apiKey, accountId, userId),
         });
         const data = await res.json();
         if (!res.ok) {
           const detail = data?.error?.message || data?.detail;
-          throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || 'Failed to fetch preview');
+          throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || '预览失败');
         }
-        if (!canceled) setContent(typeof data.result === 'string' ? data.result : JSON.stringify(data.result, null, 2));
+        if (!cancelled) {
+          const value = data.result;
+          setContent(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+        }
       } catch (err: any) {
-        if (!canceled) setError(err.message);
+        if (!cancelled) setError(err?.message || '预览失败');
       } finally {
-        if (!canceled) setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
-    fetchContent();
-    return () => { canceled = true; };
-  }, [uri, isDir, serverUrl, apiKey]);
+    run();
+    return () => { cancelled = true; };
+  }, [accountId, apiKey, document.resource_root_uri, serverUrl, userId]);
 
   return (
-    <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal" style={{ maxWidth: 800, width: '90%' }}>
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal" style={{ maxWidth: 840, width: '90%' }}>
         <div className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <Eye size={18} /> 预览: {name} {isDir && <span style={{fontSize:'0.8rem', opacity:0.7}}>(目录摘要)</span>}
+          <Eye size={18} /> 预览: {document.display_name}
         </div>
-        <div className="modal-body" style={{ maxHeight: '60vh', overflowY: 'auto', background: 'var(--bg1)', padding: 16, borderRadius: 6 }}>
-          {loading ? (
-            <div className="loader" style={{ margin: '20px auto' }} />
-          ) : error ? (
-            <div style={{ color: 'var(--danger)' }}>{error}</div>
-          ) : (
-            <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '0.85rem', fontFamily: 'monospace', color: 'var(--text)' }}>
-              {content || '(空)'}
-            </pre>
-          )}
+        <div className="modal-body">
+          <div className="fm-preview-box">
+            {loading ? (
+              <div className="fm-state"><div className="loader" /></div>
+            ) : error ? (
+              <div className="fm-state fm-state-error">{error}</div>
+            ) : (
+              <pre>{content || '(空)'}</pre>
+            )}
+          </div>
         </div>
         <div className="modal-footer">
           <button className="btn btn-ghost" onClick={onClose}>关闭</button>
@@ -105,535 +248,923 @@ const PreviewModal = ({ uri, name, isDir, serverUrl, apiKey, onClose }: {
   );
 };
 
-// ─── Toast notification (no browser alert) ───────────────────────────────────
-
-const Toast = ({ msg, type, onClose }: { msg: string; type: 'success' | 'error'; onClose: () => void }) => {
-  useEffect(() => {
-    const t = setTimeout(onClose, 4000);
-    return () => clearTimeout(t);
-  }, [onClose]);
-  return (
-    <div style={{
-      position: 'fixed', bottom: 32, right: 32, zIndex: 9999,
-      padding: '14px 20px', borderRadius: 10, maxWidth: 420,
-      display: 'flex', alignItems: 'center', gap: 10,
-      background: type === 'success' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
-      border: `1px solid ${type === 'success' ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.4)'}`,
-      color: type === 'success' ? 'var(--success)' : 'var(--danger)',
-      backdropFilter: 'blur(8px)', boxShadow: '0 4px 24px rgba(0,0,0,0.3)',
-    }}>
-      {type === 'success' ? <CheckCircle size={18} /> : <AlertTriangle size={18} />}
-      <span style={{ flex: 1, fontSize: '0.9rem' }}>{msg}</span>
-      <button className="btn btn-ghost btn-sm" style={{ padding: '2px' }} onClick={onClose}>
-        <X size={14} />
-      </button>
-    </div>
-  );
-};
-
-// ─── Resource Tree Node ──────────────────────────────────────────────────────
-
-const ResourceTreeNode = ({ node, depth, onDelete, onPreview }: {
-  node: ResourceNode; depth: number; onDelete: (uri: string, name: string, isDir: boolean) => void; onPreview: (uri: string, name: string, isDir: boolean) => void;
+const UrlDrawer = ({
+  open,
+  onClose,
+  currentPath,
+  onSubmitted,
+}: {
+  open: boolean;
+  onClose: () => void;
+  currentPath: string;
+  onSubmitted: (url: string) => Promise<void>;
 }) => {
-  const [open, setOpen] = useState(depth < 1);
-  const isDir = node.type === 'directory';
+  const [url, setUrl] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  if (!open) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!url.trim()) return;
+    setLoading(true);
+    setError('');
+    try {
+      await onSubmitted(url.trim());
+      setUrl('');
+      onClose();
+    } catch (err: any) {
+      setError(err?.message || '添加失败');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <div>
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '7px 12px', paddingLeft: `${12 + depth * 20}px`,
-        borderRadius: 6, cursor: isDir ? 'pointer' : 'default',
-        background: 'transparent', transition: 'background 0.15s',
-      }}
-        onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg3)'; (e.currentTarget.lastElementChild as HTMLElement).style.opacity = '1'; }}
-        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; (e.currentTarget.lastElementChild as HTMLElement).style.opacity = '0'; }}
-      >
-        {isDir ? (
-          <button
-            className="btn btn-ghost btn-sm"
-            style={{ padding: '2px 4px' }}
-            onClick={() => setOpen(o => !o)}
-          >
-            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+    <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="fm-drawer open">
+        <div className="fm-drawer-header">
+          <div className="fm-drawer-title"><LinkIcon size={18} /> 添加远程文档</div>
+          <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
+            <X size={16} />
           </button>
-        ) : (
-          <span style={{ width: 22 }} />
-        )}
-        {isDir
-          ? <FolderOpen size={16} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-          : <File size={15} style={{ opacity: 0.55, flexShrink: 0 }} />
-        }
-        <span style={{
-          flex: 1, fontSize: '0.88rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          color: isDir ? 'var(--primary)' : 'var(--text)',
-        }}>
-          {node.name}
-        </span>
-        {node.size !== undefined && !isDir && (
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginRight: 8 }}>
-            {node.size >= 1024 * 1024
-              ? `${(node.size / 1024 / 1024).toFixed(1)} MB`
-              : node.size >= 1024
-                ? `${(node.size / 1024).toFixed(1)} KB`
-                : `${node.size} B`}
-          </span>
-        )}
-        <div style={{ display: 'flex', gap: 6, opacity: 0, transition: 'opacity 0.15s' }}>
-          <button
-            className="btn btn-ghost btn-sm"
-            style={{ padding: '3px 8px', fontSize: '0.78rem' }}
-            onClick={(e) => { e.stopPropagation(); onPreview(node.uri, node.name, isDir); }}
-            title="预览内容"
-          >
-            <Eye size={13} />
-          </button>
-          <button
-            className="btn btn-danger btn-sm"
-            style={{ padding: '3px 8px', fontSize: '0.78rem' }}
-            onClick={(e) => { e.stopPropagation(); onDelete(node.uri, node.name, isDir); }}
-            title="删除"
-          >
-            <Trash2 size={13} />
+        </div>
+        <div className="fm-drawer-body">
+          <p className="fm-drawer-desc">
+            文档会被导入到当前目录 <strong>{formatPath(currentPath)}</strong>，用户管理的是原始文档，内部 resource 和向量索引由系统自动同步。
+          </p>
+          <form id="fm-url-form" onSubmit={handleSubmit}>
+            <div className="form-group">
+              <label>远程地址</label>
+              <input
+                type="text"
+                className="input"
+                placeholder="https://example.com/guide.pdf 或 git@github.com:org/repo.git"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                autoFocus
+                required
+              />
+            </div>
+            {error && <div className="fm-inline-error">{error}</div>}
+          </form>
+        </div>
+        <div className="fm-drawer-footer">
+          <button className="btn btn-ghost" onClick={onClose}>取消</button>
+          <button type="submit" form="fm-url-form" className="btn btn-primary" disabled={loading || !url.trim()}>
+            {loading ? '提交中...' : '添加文档'}
           </button>
         </div>
       </div>
-      {isDir && open && node.children?.map(child => (
-        <ResourceTreeNode key={child.uri} node={child} depth={depth + 1} onDelete={onDelete} onPreview={onPreview} />
-      ))}
     </div>
   );
 };
 
-// ─── Upload temp file helper ──────────────────────────────────────────────────
+const NewFolderDrawer = ({
+  open,
+  onClose,
+  currentPath,
+  onSubmitted,
+}: {
+  open: boolean;
+  onClose: () => void;
+  currentPath: string;
+  onSubmitted: (name: string) => Promise<void>;
+}) => {
+  const [name, setName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
-async function uploadTempFile(serverUrl: string, apiKey: string, file: File): Promise<string> {
-  const formData = new FormData();
-  formData.append('file', file, file.name);
-  const response = await fetch(`${serverUrl}/api/v1/resources/temp_upload`, {
-    method: 'POST',
-    headers: { 'X-API-Key': apiKey },
-    body: formData,
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    const detail = data?.error?.message || data?.detail;
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || `Upload failed: ${response.status}`);
-  }
-  return data.result.temp_file_id;
-}
+  if (!open) return null;
 
-// ─── normalize API ls result to ResourceNode[] ───────────────────────────────
-
-function normalizeNodes(items: any[]): ResourceNode[] {
-  if (!items) return [];
-
-  // 1. Build a map of all items by URI
-  const nodeMap = new Map<string, ResourceNode>();
-  items.forEach((item: any) => {
-    const uri: string = item.uri || item.path || '';
-    const name: string = item.name || uri.split('/').filter(Boolean).pop() || uri;
-    const isDir = item.type === 'directory' || item.is_dir === true || item.type === 'dir' || item.isDir === true;
-    
-    nodeMap.set(uri, {
-      uri,
-      name,
-      type: isDir ? 'directory' : 'file',
-      size: item.size,
-      children: isDir ? [] : undefined,
-    });
-  });
-
-  // 2. Reconstruct the tree based on URI hierarchy
-  const roots: ResourceNode[] = [];
-
-  nodeMap.forEach((node, uri) => {
-    // Determine the parent URI by removing the last segment
-    // E.g., viking://resources/foo/bar -> viking://resources/foo
-    // If the path ends with '/', strip it first
-    let sanitizedUri = uri.endsWith('/') ? uri.slice(0, -1) : uri;
-    const parts = sanitizedUri.split('/');
-    
-    // Find parent. Minimum parts should be 3: "viking:", "", "resources"
-    if (parts.length > 3) {
-      parts.pop();
-      let parentUri = parts.join('/');
-      // Make sure parent URI maps exactly (some URIs might end in / in the API)
-      let parentNode = nodeMap.get(parentUri) || nodeMap.get(parentUri + '/');
-      
-      if (parentNode) {
-        if (!parentNode.children) parentNode.children = [];
-        parentNode.children.push(node);
-      } else {
-        roots.push(node);
-      }
-    } else {
-      roots.push(node);
-    }
-  });
-
-  // It's possible the original request started at `viking://resources/` and all elements
-  // consider it their parent, but `viking://resources/` itself might not be in the list.
-  // In that case, top-level items under the root directory will have no parent in the map.
-  return roots;
-}
-
-// ─── Resources Page ──────────────────────────────────────────────────────────
-
-const Resources: React.FC = () => {
-  const { serverUrl, apiKey } = useAuth();
-  const [tab, setTab] = useState<TabMode>('list');
-  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
-
-  // ── Resource List ─────────────────────────────────────────────────────────
-
-  const [resources, setResources] = useState<ResourceNode[]>([]);
-  const [listLoading, setListLoading] = useState(false);
-  const [listError, setListError] = useState('');
-  const [confirmDelete, setConfirmDelete] = useState<{ uri: string; label: string; recursive: boolean } | null>(null);
-  const [previewData, setPreviewData] = useState<{ uri: string; name: string; isDir: boolean } | null>(null);
-
-  const loadResources = useCallback(async () => {
-    setListLoading(true);
-    setListError('');
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setLoading(true);
+    setError('');
     try {
-      const params = new URLSearchParams({ uri: 'viking://resources/', output: 'original', level_limit: '10', node_limit: '2000' });
-      const rawRes = await fetch(`${serverUrl}/api/v1/fs/tree?${params}`, {
-        headers: { 'X-API-Key': apiKey },
-      });
-      const data = await rawRes.json();
-      if (!rawRes.ok) {
-        const detail = data?.error?.message || data?.detail;
-        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || 'Failed to list resources');
-      }
-      const items = Array.isArray(data.result) ? data.result : (data.result?.children || data.result?.items || []);
-      setResources(normalizeNodes(items));
-    } catch (e: any) {
-      setListError(e.message);
+      await onSubmitted(name.trim());
+      setName('');
+      onClose();
+    } catch (err: any) {
+      setError(err?.message || '创建目录失败');
     } finally {
-      setListLoading(false);
+      setLoading(false);
     }
-  }, [serverUrl, apiKey]);
-
-  useEffect(() => { if (tab === 'list') loadResources(); }, [tab, loadResources]);
-
-  const handleDeleteRequest = (uri: string, name: string, isDir: boolean) => {
-    setConfirmDelete({ uri, label: name, recursive: isDir });
   };
 
-  const handlePreviewRequest = (uri: string, name: string, isDir: boolean) => {
-    setPreviewData({ uri, name, isDir });
+  return (
+    <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="fm-drawer open">
+        <div className="fm-drawer-header">
+          <div className="fm-drawer-title"><FolderPlus size={18} /> 新建目录</div>
+          <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+        <div className="fm-drawer-body">
+          <p className="fm-drawer-desc">
+            会在当前目录 <strong>{formatPath(currentPath)}</strong> 下创建一个虚拟文件夹，用来整理知识库原始文档。
+          </p>
+          <form id="fm-folder-form" onSubmit={handleSubmit}>
+            <div className="form-group">
+              <label>目录名称</label>
+              <input
+                type="text"
+                className="input"
+                placeholder="例如：产品手册"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+                required
+              />
+            </div>
+            {error && <div className="fm-inline-error">{error}</div>}
+          </form>
+        </div>
+        <div className="fm-drawer-footer">
+          <button className="btn btn-ghost" onClick={onClose}>取消</button>
+          <button type="submit" form="fm-folder-form" className="btn btn-primary" disabled={loading || !name.trim()}>
+            {loading ? '创建中...' : '创建目录'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const UploadDrawer = ({
+  open,
+  onClose,
+  currentPath,
+  onUploaded,
+}: {
+  open: boolean;
+  onClose: () => void;
+  currentPath: string;
+  onUploaded: (files: File[]) => Promise<void>;
+}) => {
+  const [items, setItems] = useState<UploadItem[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  if (!open) return null;
+
+  const addFiles = (files: FileList | null) => {
+    if (!files) return;
+    setItems((prev) => [...prev, ...Array.from(files).map((file) => ({ file, status: 'pending' as const }))]);
+  };
+
+  const removeItem = (idx: number) => {
+    setItems((prev) => prev.filter((_, index) => index !== idx));
+  };
+
+  const handleUpload = async () => {
+    const files = items.filter((item) => item.status === 'pending').map((item) => item.file);
+    if (!files.length) return;
+    setItems((prev) => prev.map((item) => (
+      item.status === 'pending' ? { ...item, status: 'uploading' } : item
+    )));
+    setUploading(true);
+    try {
+      await onUploaded(files);
+      setItems((prev) => prev.map((item) => (
+        item.status === 'uploading' ? { ...item, status: 'done' } : item
+      )));
+      setItems([]);
+      onClose();
+    } catch (err: any) {
+      const message = err?.message || '上传失败';
+      setItems((prev) => prev.map((item) => (
+        item.status === 'pending' || item.status === 'uploading'
+          ? { ...item, status: 'error', error: message }
+          : item
+      )));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="fm-drawer open">
+        <div className="fm-drawer-header">
+          <div className="fm-drawer-title"><Upload size={18} /> 上传原始文档</div>
+          <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+        <div className="fm-drawer-body">
+          <p className="fm-drawer-desc">
+            文档会导入到当前目录 <strong>{formatPath(currentPath)}</strong>。交互像桌面里的“拖入文件”，内部拆分与向量化仍由系统自动完成。
+          </p>
+          <div
+            className={`fm-dropzone ${dragOver ? 'drag-over' : ''}`}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              addFiles(e.dataTransfer.files);
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Upload size={28} />
+            <div>点击选择文件，或把文档拖到这里</div>
+            <span>支持多选，导入后会自动归档到当前目录</span>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              addFiles(e.target.files);
+              e.currentTarget.value = '';
+            }}
+          />
+
+          {items.length > 0 && (
+            <div className="fm-upload-list">
+              {items.map((item, index) => (
+                <div key={`${item.file.name}-${index}`} className={`fm-upload-item ${item.status}`}>
+                  <div>
+                    <div className="fm-upload-name">{item.file.name}</div>
+                    <div className="fm-upload-meta">
+                      {(item.file.size / 1024).toFixed(1)} KB
+                      {item.error ? ` · ${item.error}` : ''}
+                    </div>
+                  </div>
+                  <div className="fm-upload-actions">
+                    <span className="fm-upload-status">
+                      {item.status === 'done' ? '已完成' : item.status === 'error' ? '失败' : item.status === 'uploading' ? '上传中' : '待上传'}
+                    </span>
+                    {!uploading && (
+                      <button className="btn btn-ghost btn-sm" onClick={() => removeItem(index)}>
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="fm-drawer-footer">
+          <button className="btn btn-ghost" onClick={onClose}>取消</button>
+          <button className="btn btn-primary" disabled={uploading || items.length === 0} onClick={handleUpload}>
+            {uploading ? '处理中...' : `上传 ${items.length} 个文件`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const Resources = () => {
+  const { serverUrl, apiKey, accountId, userId } = useAuth();
+  const [folders, setFolders] = useState<KnowledgeFolder[]>([]);
+  const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [drawer, setDrawer] = useState<DrawerMode>(null);
+  const [confirmDelete, setConfirmDelete] = useState<KnowledgeEntry | null>(null);
+  const [previewDoc, setPreviewDoc] = useState<KnowledgeDocument | null>(null);
+  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>('icon');
+  const [currentPath, setCurrentPath] = useState('');
+
+  const showToast = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
+    setToast({ msg, type });
+  }, []);
+
+  const loadLibrary = useCallback(async () => {
+    if (!serverUrl) return;
+    setLoading(true);
+    setError('');
+    try {
+      const [documentsData, foldersData] = await Promise.all([
+        fetchApi<{ result: KnowledgeDocument[] }>(
+          serverUrl,
+          apiKey,
+          '/api/v1/knowledge-documents',
+          {
+            method: 'GET',
+            account: accountId || undefined,
+            user: userId || undefined,
+          },
+        ),
+        fetchApi<{ result: KnowledgeFolder[] }>(
+          serverUrl,
+          apiKey,
+          '/api/v1/knowledge-folders',
+          {
+            method: 'GET',
+            account: accountId || undefined,
+            user: userId || undefined,
+          },
+        ),
+      ]);
+      const nextDocuments = Array.isArray(documentsData.result) ? documentsData.result : [];
+      const nextFolders = Array.isArray(foldersData.result) ? foldersData.result : [];
+      const validPaths = new Set(nextFolders.map((folder) => folder.path));
+
+      setDocuments(nextDocuments);
+      setFolders(nextFolders);
+      setCurrentPath((prev) => (prev && validPaths.has(prev) ? prev : ''));
+      setSelectedKey((prev) => {
+        if (!prev) return null;
+        const allKeys = new Set([
+          ...nextFolders.map((entry) => entryKey(entry)),
+          ...nextDocuments.map((entry) => entryKey(entry)),
+        ]);
+        return allKeys.has(prev) ? prev : null;
+      });
+    } catch (err: any) {
+      setError(err?.message || '加载资源库失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [accountId, apiKey, serverUrl, userId]);
+
+  useEffect(() => {
+    loadLibrary();
+  }, [loadLibrary]);
+
+  const folderMap = useMemo(() => (
+    new Map(folders.map((folder) => [entryKey(folder), folder]))
+  ), [folders]);
+
+  const documentMap = useMemo(() => (
+    new Map(documents.map((document) => [entryKey(document), document]))
+  ), [documents]);
+
+  const selectedEntry = useMemo<KnowledgeEntry | null>(() => {
+    if (!selectedKey) return null;
+    return folderMap.get(selectedKey) || documentMap.get(selectedKey) || null;
+  }, [documentMap, folderMap, selectedKey]);
+
+  const openPath = useCallback((path: string) => {
+    setCurrentPath(path);
+    setSelectedKey(null);
+  }, []);
+
+  const breadcrumbSegments = useMemo(() => {
+    const parts = currentPath ? currentPath.split('/') : [];
+    return [
+      { label: ROOT_LABEL, path: '' },
+      ...parts.map((segment, index) => ({
+        label: segment,
+        path: parts.slice(0, index + 1).join('/'),
+      })),
+    ];
+  }, [currentPath]);
+
+  const folderTree = useMemo(() => (
+    folders
+      .slice()
+      .sort((a, b) => a.path.localeCompare(b.path, 'zh-CN'))
+      .map((folder) => ({
+        ...folder,
+        depth: folder.path.split('/').length - 1,
+      }))
+  ), [folders]);
+
+  const visibleFolders = useMemo(() => (
+    folders
+      .filter((folder) => folder.parent_path === currentPath)
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+  ), [currentPath, folders]);
+
+  const visibleDocuments = useMemo(() => (
+    documents
+      .filter((document) => (document.folder_path || '') === currentPath)
+      .slice()
+      .sort((a, b) => a.display_name.localeCompare(b.display_name, 'zh-CN'))
+  ), [currentPath, documents]);
+
+  const visibleEntries = useMemo<KnowledgeEntry[]>(() => (
+    [...visibleFolders, ...visibleDocuments]
+  ), [visibleDocuments, visibleFolders]);
+
+  const currentFolderStats = useMemo(() => {
+    if (!isFolderEntry(selectedEntry)) return null;
+    const childFolderCount = folders.filter((folder) => folder.parent_path === selectedEntry.path).length;
+    const childDocumentCount = documents.filter((document) => document.folder_path === selectedEntry.path).length;
+    return { childFolderCount, childDocumentCount };
+  }, [documents, folders, selectedEntry]);
+
+  const handleCopy = async (value: string, successMsg: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast(successMsg);
+    } catch {
+      showToast('复制失败，请检查浏览器权限', 'error');
+    }
+  };
+
+  const handleCreateFolder = async (name: string) => {
+    const data = await fetchApi<{ result: KnowledgeFolder }>(
+      serverUrl,
+      apiKey,
+      '/api/v1/knowledge-folders',
+      {
+        method: 'POST',
+        account: accountId || undefined,
+        user: userId || undefined,
+        body: JSON.stringify({ name, parent_path: currentPath }),
+      },
+    );
+    const folder = data.result;
+    await loadLibrary();
+    openPath(folder.path);
+    setSelectedKey(`folder:${folder.folder_id}`);
+    showToast(`已创建目录：${folder.name}`);
+  };
+
+  const handleAddUrl = async (url: string) => {
+    await fetchApi(serverUrl, apiKey, '/api/v1/resources', {
+      method: 'POST',
+      account: accountId || undefined,
+      user: userId || undefined,
+      body: JSON.stringify({ path: url, wait: false, folder_path: currentPath }),
+    });
+    await loadLibrary();
+    showToast(`文档已导入到 ${formatPath(currentPath)}`);
+  };
+
+  const handleUploadFiles = async (files: File[]) => {
+    let done = 0;
+    let failures = 0;
+    let firstError = '';
+
+    for (const file of files) {
+      try {
+        const tempId = await uploadTempFile(serverUrl, apiKey, accountId, userId, file);
+        await fetchApi(serverUrl, apiKey, '/api/v1/resources', {
+          method: 'POST',
+          account: accountId || undefined,
+          user: userId || undefined,
+          body: JSON.stringify({ temp_file_id: tempId, wait: false, folder_path: currentPath }),
+        });
+        done += 1;
+      } catch (err: any) {
+        failures += 1;
+        if (!firstError) firstError = err?.message || '上传失败';
+      }
+    }
+
+    await loadLibrary();
+    if (failures === 0) {
+      showToast(`已导入 ${done} 个文档到 ${formatPath(currentPath)}`);
+      return;
+    }
+
+    showToast(`成功 ${done} 个，失败 ${failures} 个：${firstError}`, 'error');
+    throw new Error(firstError || '部分文件上传失败');
   };
 
   const doDelete = async () => {
     if (!confirmDelete) return;
-    const { uri, recursive } = confirmDelete;
-    setConfirmDelete(null);
+    const key = entryKey(confirmDelete);
+    setDeletingKey(key);
     try {
-      const params = new URLSearchParams({ uri, recursive: recursive ? 'true' : 'false' });
-      const rawRes = await fetch(`${serverUrl}/api/v1/fs?${params}`, {
-        method: 'DELETE',
-        headers: { 'X-API-Key': apiKey },
-      });
-      const data = await rawRes.json();
-      if (!rawRes.ok) {
-        const detail = data?.error?.message || data?.detail;
-        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || 'Delete failed');
-      }
-      setToast({ msg: `已删除: ${confirmDelete.label}`, type: 'success' });
-      loadResources();
-    } catch (e: any) {
-      setToast({ msg: '删除失败：' + e.message, type: 'error' });
-    }
-  };
-
-  // ── URL mode ──────────────────────────────────────────────────────────────
-
-  const [url, setUrl] = useState('');
-  const [urlLoading, setUrlLoading] = useState(false);
-
-  const handleAddUrl = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!url.trim()) return;
-    setUrlLoading(true);
-    try {
-      await fetchApi(serverUrl, apiKey, '/api/v1/resources', {
-        method: 'POST',
-        body: JSON.stringify({ path: url.trim(), wait: false }),
-      });
-      setToast({ msg: '资源添加任务已提交，后台正在处理中...', type: 'success' });
-      setUrl('');
-    } catch (err: any) {
-      setToast({ msg: '添加失败：' + err.message, type: 'error' });
-    } finally {
-      setUrlLoading(false);
-    }
-  };
-
-  // ── Upload mode ───────────────────────────────────────────────────────────
-
-  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const dirInputRef = useRef<HTMLInputElement>(null);
-
-  const HIDDEN_FILE_RE = /(^|\/)\.([^/]+)/;
-
-  const addFiles = useCallback((files: FileList | null) => {
-    if (!files) return;
-    const filtered = Array.from(files).filter(f => {
-      const pathToCheck = f.webkitRelativePath || f.name;
-      return !HIDDEN_FILE_RE.test(pathToCheck);
-    });
-    const skipped = files.length - filtered.length;
-    setUploadItems(prev => [...prev, ...filtered.map(f => ({ file: f, status: 'pending' as const }))]);
-    if (skipped > 0) setToast({ msg: `已过滤 ${skipped} 个隐藏文件（以 . 开头）`, type: 'success' });
-    setToast(null); // reset so it can show fresh
-    if (skipped > 0) setTimeout(() => setToast({ msg: `已自动过滤 ${skipped} 个隐藏文件（以 . 开头）`, type: 'success' }), 50);
-  }, []);
-
-  const removeItem = (idx: number) => setUploadItems(prev => prev.filter((_, i) => i !== idx));
-
-  const handleUploadAll = async () => {
-    const pending = uploadItems.some(i => i.status === 'pending');
-    if (!pending) return;
-    setUploading(true);
-    let done = 0; let errors = 0;
-
-    for (let idx = 0; idx < uploadItems.length; idx++) {
-      if (uploadItems[idx].status !== 'pending') continue;
-      setUploadItems(prev => prev.map((it, i) => i === idx ? { ...it, status: 'uploading' } : it));
-      try {
-        const tempFileId = await uploadTempFile(serverUrl, apiKey, uploadItems[idx].file);
-        await fetchApi(serverUrl, apiKey, '/api/v1/resources', {
-          method: 'POST',
-          body: JSON.stringify({ temp_file_id: tempFileId, wait: false }),
+      if (isFolderEntry(confirmDelete)) {
+        await fetchApi(serverUrl, apiKey, `/api/v1/knowledge-folders/${confirmDelete.folder_id}`, {
+          method: 'DELETE',
+          account: accountId || undefined,
+          user: userId || undefined,
         });
-        setUploadItems(prev => prev.map((it, i) => i === idx ? { ...it, status: 'done' } : it));
-        done++;
-      } catch (err: any) {
-        setUploadItems(prev => prev.map((it, i) => i === idx ? { ...it, status: 'error', error: err.message } : it));
-        errors++;
+        if (currentPath === confirmDelete.path) {
+          openPath(confirmDelete.parent_path);
+        }
+        showToast(`已删除目录：${confirmDelete.name}`);
+      } else {
+        await fetchApi(serverUrl, apiKey, `/api/v1/knowledge-documents/${confirmDelete.document_id}`, {
+          method: 'DELETE',
+          account: accountId || undefined,
+          user: userId || undefined,
+        });
+        showToast(`已删除文档：${confirmDelete.display_name}`);
       }
+      setConfirmDelete(null);
+      setSelectedKey(null);
+      await loadLibrary();
+    } catch (err: any) {
+      showToast(err?.message || '删除失败', 'error');
+    } finally {
+      setDeletingKey(null);
     }
-    setUploading(false);
-    setToast({
-      msg: errors === 0
-        ? `全部 ${done} 个文件上传成功，后台正在处理...`
-        : `完成 ${done} 个，失败 ${errors} 个`,
-      type: errors === 0 ? 'success' : 'error',
-    });
   };
 
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    addFiles(e.dataTransfer.files);
-  }, [addFiles]);
-
-  const pendingCount = uploadItems.filter(i => i.status === 'pending').length;
-
-  // ─────────────────────────────────────────────────────────────────────────
-
-  return (
-    <div>
-      {/* ── Tab Bar ── */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
-        <button className={`btn ${tab === 'list' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('list')}>
-          <Database size={16} /> 资源列表
+  const emptyState = (
+    <div className="fm-state">
+      <FolderOpen size={34} style={{ opacity: 0.35 }} />
+      <span>{currentPath ? '这个目录下还没有内容' : '资源库还是空的'}</span>
+      <div className="fm-empty-actions">
+        <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); setDrawer('new-folder'); }}>
+          <FolderPlus size={14} /> 新建目录
         </button>
-        <button className={`btn ${tab === 'url' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('url')}>
-          <Link size={16} /> 添加 URL
-        </button>
-        <button className={`btn ${tab === 'upload' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('upload')}>
-          <Upload size={16} /> 上传本地文件
+        <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); setDrawer('upload'); }}>
+          <Upload size={14} /> 上传文档
         </button>
       </div>
+    </div>
+  );
 
-      {/* ── Resource List ── */}
-      {tab === 'list' && (
-        <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-              显示 <code>viking://resources/</code> 下所有已入库的资源
-            </span>
-            <button className="btn btn-ghost btn-sm" onClick={loadResources} disabled={listLoading}>
-              <RefreshCw size={14} style={{ animation: listLoading ? 'spin 1s linear infinite' : 'none' }} /> 刷新
-            </button>
-          </div>
-
-          {listError && (
-            <div style={{ color: 'var(--danger)', padding: 12, border: '1px solid var(--danger)', borderRadius: 8, background: 'rgba(239,68,68,0.1)', marginBottom: 16 }}>
-              {listError}
-            </div>
-          )}
-
-          <div className="table-wrap" style={{ padding: 0 }}>
-            {listLoading ? (
-              <div className="empty"><div className="loader" /></div>
-            ) : resources.length === 0 ? (
-              <div className="empty" style={{ padding: 40 }}>暂无资源，请通过"添加 URL"或"上传本地文件"录入</div>
-            ) : (
-              <div style={{ padding: '8px 0' }}>
-                {resources.map(node => (
-                  <ResourceTreeNode key={node.uri} node={node} depth={0} onDelete={handleDeleteRequest} onPreview={handlePreviewRequest} />
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── URL Mode ── */}
-      {tab === 'url' && (
-        <div className="card" style={{ maxWidth: 620 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, color: 'var(--primary)' }}>
-            <Link size={20} />
-            <h2 style={{ fontSize: '1.2rem', margin: 0 }}>添加远程资源</h2>
-          </div>
-          <p style={{ color: 'var(--text-muted)', marginBottom: 24, fontSize: '0.9rem' }}>
-            支持 HTTP(S) 文档链接、Git 仓库地址等。系统会自动抓取并进行语义向量化处理，异步执行。
-          </p>
-          <form onSubmit={handleAddUrl}>
-            <div className="form-group">
-              <label>资源地址</label>
-              <input
-                type="text"
-                className="input"
-                placeholder="https://example.com/docs  或  git@github.com:org/repo.git"
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                required
-              />
-            </div>
-            <div style={{ marginTop: 24, display: 'flex', justifyContent: 'flex-end' }}>
-              <button type="submit" className="btn btn-primary" disabled={urlLoading || !url.trim()}>
-                {urlLoading
-                  ? <div className="loader" style={{ width: 16, height: 16, borderTopColor: '#fff', borderColor: 'rgba(255,255,255,0.3) rgba(255,255,255,0.3) rgba(255,255,255,0.3) #fff' }} />
-                  : <><Plus size={16} /> 添加并处理</>}
+  return (
+    <div className="fm-root" onClick={() => setSelectedKey(null)}>
+      <div className="fm-toolbar" onClick={(e) => e.stopPropagation()}>
+        <div className="fm-breadcrumb">
+          {breadcrumbSegments.map((segment, index) => (
+            <React.Fragment key={segment.path || '__root__'}>
+              {index > 0 && <span className="fm-breadcrumb-sep"><ChevronRight size={14} /></span>}
+              <button
+                className={`fm-breadcrumb-btn ${index === breadcrumbSegments.length - 1 ? 'active' : ''}`}
+                onClick={() => openPath(segment.path)}
+              >
+                {index === 0 ? <Home size={14} /> : null}
+                <span>{segment.label}</span>
               </button>
-            </div>
-          </form>
+            </React.Fragment>
+          ))}
         </div>
-      )}
 
-      {/* ── Upload Mode ── */}
-      {tab === 'upload' && (
-        <div style={{ maxWidth: 680 }}>
-          <div className="card">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, color: 'var(--primary)' }}>
-              <Upload size={20} />
-              <h2 style={{ fontSize: '1.2rem', margin: 0 }}>上传本地文件或目录</h2>
-            </div>
-            <p style={{ color: 'var(--text-muted)', marginBottom: 20, fontSize: '0.9rem' }}>
-              支持拖拽或选择文件夹。以 <code>.</code> 开头的隐藏文件会自动过滤。文件将先上传至服务器临时区，再批量完成向量化。
-            </p>
-
-            {/* Drag & Drop Zone */}
-            <div
-              onDrop={onDrop}
-              onDragOver={e => e.preventDefault()}
-              onClick={() => fileInputRef.current?.click()}
-              style={{
-                border: '2px dashed var(--border)', borderRadius: 10,
-                padding: '28px 24px', textAlign: 'center', cursor: 'pointer',
-                transition: 'border-color 0.2s, background 0.2s', marginBottom: 10,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--primary)')}
-              onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)')}
+        <div className="fm-toolbar-right">
+          <button className="fm-nav-btn" onClick={loadLibrary} disabled={loading} title="刷新">
+            <RefreshCw size={15} className={loading ? 'fm-spin' : ''} />
+          </button>
+          <div className="fm-view-toggle">
+            <button
+              className={`fm-view-btn ${viewMode === 'icon' ? 'active' : ''}`}
+              onClick={() => setViewMode('icon')}
+              title="图标视图"
             >
-              <FolderOpen size={32} style={{ opacity: 0.35, marginBottom: 10 }} />
-              <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-                拖拽文件到此，或<span style={{ color: 'var(--primary)', marginLeft: 4 }}>点击选择文件</span>
-              </div>
-              <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={e => addFiles(e.target.files)} />
-            </div>
-
-            <button className="btn btn-ghost btn-sm" style={{ marginBottom: 20 }} onClick={() => dirInputRef.current?.click()}>
-              <FolderOpen size={14} /> 选择整个目录
+              <LayoutGrid size={15} />
             </button>
-            <input
-              ref={dirInputRef}
-              type="file"
-              // @ts-ignore
-              webkitdirectory="true"
-              multiple
-              style={{ display: 'none' }}
-              onChange={e => addFiles(e.target.files)}
-            />
+            <button
+              className={`fm-view-btn ${viewMode === 'list' ? 'active' : ''}`}
+              onClick={() => setViewMode('list')}
+              title="列表视图"
+            >
+              <List size={15} />
+            </button>
+          </div>
+          <button className="btn btn-ghost" onClick={() => setDrawer('new-folder')}>
+            <FolderPlus size={15} /> 新建目录
+          </button>
+          <button className="btn btn-ghost" onClick={() => setDrawer('url')}>
+            <LinkIcon size={15} /> 添加远程文档
+          </button>
+          <button className="btn btn-primary" onClick={() => setDrawer('upload')}>
+            <Upload size={15} /> 上传文档
+          </button>
+        </div>
+      </div>
 
-            {uploadItems.length > 0 && (
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                  <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                    已选 {uploadItems.length} 个文件（{pendingCount} 待处理）
-                  </span>
-                  <button className="btn btn-ghost btn-sm" onClick={() => { setUploadItems(prev => prev.filter(i => i.status === 'pending' || i.status === 'error')); }}>
-                    清除已完成
+      <div className="fm-body">
+        <aside className="fm-sidebar" onClick={(e) => e.stopPropagation()}>
+          <div className="fm-sidebar-title">目录树</div>
+          <div className="fm-sidebar-actions">
+            <button className="btn btn-ghost btn-sm" onClick={() => setDrawer('new-folder')}>
+              <FolderPlus size={14} /> 新建目录
+            </button>
+          </div>
+
+          <div className="fm-location-list">
+            <button
+              className={`fm-side-item ${currentPath === '' ? 'active' : ''}`}
+              onClick={() => openPath('')}
+            >
+              <span className="fm-side-icon"><Home size={16} /></span>
+              <span className="fm-side-label">{ROOT_LABEL}</span>
+              <span className="fm-side-count">{visibleEntries.length}</span>
+            </button>
+            {folderTree.map((folder) => (
+              <button
+                key={folder.folder_id}
+                className={`fm-side-item fm-side-folder-tree ${currentPath === folder.path ? 'active' : ''}`}
+                style={{ paddingLeft: `${12 + folder.depth * 16}px` }}
+                onClick={() => openPath(folder.path)}
+                title={folder.path}
+              >
+                <span className="fm-side-icon"><FolderOpen size={16} /></span>
+                <span className="fm-side-label">{folder.name}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="fm-sidebar-note">
+            目录是给用户管理文档用的虚拟文件夹。
+            <br />
+            内部 `resource` 树和向量索引仍由系统自动同步。
+          </div>
+        </aside>
+
+        <section className="fm-content">
+          {loading ? (
+            <div className="fm-state">
+              <div className="loader" />
+              <span>正在加载资源库...</span>
+            </div>
+          ) : error ? (
+            <div className="fm-state fm-state-error">
+              <AlertTriangle size={18} />
+              <span>{error}</span>
+              <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); loadLibrary(); }}>重试</button>
+            </div>
+          ) : visibleEntries.length === 0 ? (
+            emptyState
+          ) : viewMode === 'icon' ? (
+            <div className="fm-icon-grid">
+              {visibleEntries.map((entry) => {
+                const selected = selectedKey === entryKey(entry);
+                const folder = isFolderEntry(entry);
+                return (
+                  <div
+                    key={entryKey(entry)}
+                    className={`fm-icon-item ${selected ? 'selected' : ''}`}
+                    onClick={(e) => { e.stopPropagation(); setSelectedKey(entryKey(entry)); }}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      if (folder) {
+                        openPath(entry.path);
+                      } else {
+                        setPreviewDoc(entry);
+                      }
+                    }}
+                    title={folder ? entry.path : entry.display_name}
+                  >
+                    <div className="fm-icon-img">
+                      {folder ? <FolderOpen size={44} className="fm-folder-icon" /> : <FileText size={40} className="fm-file-icon" />}
+                    </div>
+                    <span className="fm-icon-name">{folder ? entry.name : entry.display_name}</span>
+                    <div className="fm-icon-meta">
+                      <span className="fm-badge">
+                        {folder ? '目录' : formatSourceType(entry.source_type)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <table className="fm-list-table">
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>类型</th>
+                  <th>格式</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleEntries.map((entry) => {
+                  const selected = selectedKey === entryKey(entry);
+                  const folder = isFolderEntry(entry);
+                  return (
+                    <tr
+                      key={entryKey(entry)}
+                      className={`fm-list-row ${selected ? 'selected' : ''}`}
+                      onClick={(e) => { e.stopPropagation(); setSelectedKey(entryKey(entry)); }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        if (folder) {
+                          openPath(entry.path);
+                        } else {
+                          setPreviewDoc(entry);
+                        }
+                      }}
+                      title={folder ? entry.path : entry.display_name}
+                    >
+                      <td>
+                        <div className="fm-list-name-cell">
+                          {folder ? <FolderOpen size={16} className="fm-folder-icon" /> : <File size={15} className="fm-file-icon" />}
+                          <span>{folder ? entry.name : entry.display_name}</span>
+                        </div>
+                      </td>
+                      <td>{folder ? '目录' : formatSourceType(entry.source_type)}</td>
+                      <td>{folder ? '--' : entry.source_format || '待识别'}</td>
+                      <td>{formatTime(entry.updated_at)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </section>
+
+        <aside className="fm-inspector" onClick={(e) => e.stopPropagation()}>
+          {selectedEntry ? (
+            isFolderEntry(selectedEntry) ? (
+              <>
+                <div className="fm-inspector-header">
+                  <div className="fm-inspector-title">
+                    <FolderOpen size={18} />
+                    <span>{selectedEntry.name}</span>
+                  </div>
+                  <span className="fm-badge">目录</span>
+                </div>
+
+                <div className="fm-inspector-actions">
+                  <button className="btn btn-ghost btn-sm" onClick={() => openPath(selectedEntry.path)}>
+                    <FolderOpen size={14} /> 打开
+                  </button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => {
+                    openPath(selectedEntry.path);
+                    setDrawer('new-folder');
+                  }}>
+                    <FolderPlus size={14} /> 新建子目录
+                  </button>
+                  <button className="btn btn-danger btn-sm" disabled={deletingKey === entryKey(selectedEntry)} onClick={() => setConfirmDelete(selectedEntry)}>
+                    <Trash2 size={14} /> 删除
                   </button>
                 </div>
-                <div style={{ maxHeight: 260, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 5 }}>
-                  {uploadItems.map((item, idx) => (
-                    <div key={idx} style={{
-                      display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px',
-                      borderRadius: 8, background: 'var(--bg1)',
-                      border: `1px solid ${item.status === 'done' ? 'rgba(16,185,129,0.3)' : item.status === 'error' ? 'rgba(239,68,68,0.3)' : 'var(--border)'}`,
-                    }}>
-                      <File size={13} style={{ flexShrink: 0, opacity: 0.5 }} />
-                      <span style={{ flex: 1, fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {item.file.webkitRelativePath || item.file.name}
-                      </span>
-                      <span style={{ fontSize: '0.75rem', flexShrink: 0, color: item.status === 'done' ? 'var(--success)' : item.status === 'error' ? 'var(--danger)' : item.status === 'uploading' ? 'var(--primary)' : 'var(--text-muted)' }}>
-                        {item.status === 'done' ? '✓ 完成' : item.status === 'error' ? `✗ ${item.error}` : item.status === 'uploading' ? '上传中...' : '待处理'}
-                      </span>
-                      {item.status === 'pending' && (
-                        <button className="btn btn-ghost btn-sm" style={{ padding: '2px 4px' }} onClick={() => removeItem(idx)}>
-                          <X size={12} />
-                        </button>
-                      )}
-                    </div>
-                  ))}
+
+                <div className="fm-detail-block">
+                  <div className="fm-detail-label">目录路径</div>
+                  <div className="fm-detail-value">{formatPath(selectedEntry.path)}</div>
+                  <button className="btn btn-ghost btn-sm" onClick={() => handleCopy(formatPath(selectedEntry.path), '目录路径已复制')}>
+                    <Copy size={13} /> 复制路径
+                  </button>
                 </div>
-              </div>
-            )}
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-              {uploadItems.length > 0 && (
-                <button className="btn btn-ghost" onClick={() => setUploadItems([])}>全部清除</button>
-              )}
-              <button className="btn btn-primary" disabled={uploading || pendingCount === 0} onClick={handleUploadAll}>
-                {uploading
-                  ? <><div className="loader" style={{ width: 14, height: 14, borderTopColor: '#fff', borderColor: 'rgba(255,255,255,0.3) rgba(255,255,255,0.3) rgba(255,255,255,0.3) #fff' }} /> 处理中...</>
-                  : <><Upload size={16} /> 上传并处理（{pendingCount}）</>}
-              </button>
+                <div className="fm-detail-grid">
+                  <div>
+                    <div className="fm-detail-label">子目录</div>
+                    <div className="fm-detail-value">{currentFolderStats?.childFolderCount ?? 0}</div>
+                  </div>
+                  <div>
+                    <div className="fm-detail-label">文档</div>
+                    <div className="fm-detail-value">{currentFolderStats?.childDocumentCount ?? 0}</div>
+                  </div>
+                  <div>
+                    <div className="fm-detail-label">创建时间</div>
+                    <div className="fm-detail-value">{formatTime(selectedEntry.created_at)}</div>
+                  </div>
+                  <div>
+                    <div className="fm-detail-label">更新时间</div>
+                    <div className="fm-detail-value">{formatTime(selectedEntry.updated_at)}</div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="fm-inspector-header">
+                  <div className="fm-inspector-title">
+                    <FileText size={18} />
+                    <span>{selectedEntry.display_name}</span>
+                  </div>
+                  <span className="fm-badge">{formatSourceType(selectedEntry.source_type)}</span>
+                </div>
+
+                <div className="fm-inspector-actions">
+                  <button className="btn btn-ghost btn-sm" onClick={() => setPreviewDoc(selectedEntry)}>
+                    <Eye size={14} /> 预览
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => openPath(selectedEntry.folder_path || '')}
+                  >
+                    <FolderOpen size={14} /> 打开所在目录
+                  </button>
+                  <button className="btn btn-danger btn-sm" disabled={deletingKey === entryKey(selectedEntry)} onClick={() => setConfirmDelete(selectedEntry)}>
+                    <Trash2 size={14} /> 删除
+                  </button>
+                </div>
+
+                <div className="fm-detail-block">
+                  <div className="fm-detail-label">所在目录</div>
+                  <div className="fm-detail-value">{formatPath(selectedEntry.folder_path || '')}</div>
+                </div>
+
+                <div className="fm-detail-block">
+                  <div className="fm-detail-label">来源</div>
+                  <div className="fm-detail-value" title={selectedEntry.source_ref}>{selectedEntry.source_ref}</div>
+                  <button className="btn btn-ghost btn-sm" onClick={() => handleCopy(selectedEntry.source_ref, '来源已复制')}>
+                    <Copy size={13} /> 复制来源
+                  </button>
+                </div>
+
+                <div className="fm-detail-block">
+                  <div className="fm-detail-label">同步到 resource</div>
+                  <div className="fm-detail-value" title={selectedEntry.resource_root_uri}>{selectedEntry.resource_root_uri}</div>
+                  <button className="btn btn-ghost btn-sm" onClick={() => handleCopy(selectedEntry.resource_root_uri, 'resource URI 已复制')}>
+                    <Copy size={13} /> 复制 URI
+                  </button>
+                </div>
+
+                <div className="fm-detail-grid">
+                  <div>
+                    <div className="fm-detail-label">格式</div>
+                    <div className="fm-detail-value">{selectedEntry.source_format || '待识别'}</div>
+                  </div>
+                  <div>
+                    <div className="fm-detail-label">保存原件</div>
+                    <div className="fm-detail-value">{selectedEntry.has_local_copy ? '是' : '否'}</div>
+                  </div>
+                  <div>
+                    <div className="fm-detail-label">创建时间</div>
+                    <div className="fm-detail-value">{formatTime(selectedEntry.created_at)}</div>
+                  </div>
+                  <div>
+                    <div className="fm-detail-label">更新时间</div>
+                    <div className="fm-detail-value">{formatTime(selectedEntry.updated_at)}</div>
+                  </div>
+                </div>
+
+                {(selectedEntry.reason || selectedEntry.instruction) && (
+                  <div className="fm-detail-block">
+                    <div className="fm-detail-label">备注信息</div>
+                    <div className="fm-detail-value">
+                      {selectedEntry.reason || selectedEntry.instruction}
+                    </div>
+                  </div>
+                )}
+              </>
+            )
+          ) : (
+            <div className="fm-state">
+              <FolderOpen size={30} style={{ opacity: 0.3 }} />
+              <span>选择一个目录或文档查看详情</span>
             </div>
-          </div>
-        </div>
-      )}
+          )}
+        </aside>
+      </div>
 
-      {/* ── Preview Modal ── */}
-      {previewData && (
+      <div className="fm-statusbar">
+        <span>{visibleEntries.length} 个项目</span>
+        <span className="fm-statusbar-sep" />
+        <span className="fm-status-selected">当前位置: {formatPath(currentPath)}</span>
+        {selectedEntry && (
+          <>
+            <span className="fm-statusbar-sep" />
+            <span className="fm-status-path">
+              已选中: {isFolderEntry(selectedEntry) ? selectedEntry.name : selectedEntry.display_name}
+            </span>
+          </>
+        )}
+      </div>
+
+      <UploadDrawer
+        open={drawer === 'upload'}
+        onClose={() => setDrawer(null)}
+        currentPath={currentPath}
+        onUploaded={handleUploadFiles}
+      />
+
+      <UrlDrawer
+        open={drawer === 'url'}
+        onClose={() => setDrawer(null)}
+        currentPath={currentPath}
+        onSubmitted={handleAddUrl}
+      />
+
+      <NewFolderDrawer
+        open={drawer === 'new-folder'}
+        onClose={() => setDrawer(null)}
+        currentPath={currentPath}
+        onSubmitted={handleCreateFolder}
+      />
+
+      {previewDoc && (
         <PreviewModal
-          uri={previewData.uri}
-          name={previewData.name}
-          isDir={previewData.isDir}
+          document={previewDoc}
           serverUrl={serverUrl}
           apiKey={apiKey}
-          onClose={() => setPreviewData(null)}
+          accountId={accountId}
+          userId={userId}
+          onClose={() => setPreviewDoc(null)}
         />
       )}
 
-      {/* ── Delete Confirm ── */}
       {confirmDelete && (
         <ConfirmModal
-          message={`确定删除资源 "${confirmDelete.label}"？${confirmDelete.recursive ? '（包含目录下所有内容）' : ''}此操作不可恢复。`}
+          message={
+            isFolderEntry(confirmDelete)
+              ? `确定删除目录 "${confirmDelete.name}"？仅空目录允许删除。`
+              : `确定删除 "${confirmDelete.display_name}"？系统会同步删除对应的 resource 内容与向量数据，此操作不可恢复。`
+          }
           onConfirm={doDelete}
           onCancel={() => setConfirmDelete(null)}
         />
       )}
 
-      {/* ── Toast ── */}
-      {toast && <Toast msg={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
+      {toast && (
+        <Toast
+          msg={toast.msg}
+          type={toast.type}
+          onClose={() => setToast(null)}
+        />
+      )}
     </div>
   );
 };

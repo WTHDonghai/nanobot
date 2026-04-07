@@ -26,13 +26,13 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const adminItems = [
     { path: '/dashboard', label: '工作区概览', icon: <LayoutGrid size={18} /> },
     { path: '/accounts', label: '账号组成员', icon: <Users size={18} /> },
-    { path: '/resources', label: '资源库 (Resources)', icon: <Database size={18} /> },
+    { path: '/resources', label: '资源库管理', icon: <Database size={18} /> },
     { path: '/sessions', label: '工作区会话', icon: <MessagesSquare size={18} /> },
     { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
   ];
 
   const userItems = [
-    { path: '/resources', label: '资源库 (Resources)', icon: <Database size={18} /> },
+    { path: '/resources', label: '资源库管理', icon: <Database size={18} /> },
     { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
   ];
 
@@ -89,7 +89,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
             {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           </button>
         </header>
-        <div className="content-container">
+        <div className={`content-container${location.pathname === '/resources' ? ' content-container--flush' : ''}`}>
           {children}
         </div>
       </main>

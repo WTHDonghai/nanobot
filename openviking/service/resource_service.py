@@ -6,11 +6,15 @@ Resource Service for OpenViking.
 Provides resource management operations: add_resource, add_skill, wait_processed.
 """
 
+import asyncio
 import json
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from openviking.server.identity import RequestContext
+from openviking.service.knowledge_document_registry import KnowledgeDocumentRegistry
 from openviking.storage import VikingDBManager
 from openviking.storage.queuefs import get_queue_manager
 from openviking.storage.viking_fs import VikingFS
@@ -21,6 +25,7 @@ from openviking.telemetry.resource_summary import (
     register_wait_telemetry,
     unregister_wait_telemetry,
 )
+from openviking.utils import parse_code_hosting_url
 from openviking.utils.resource_processor import ResourceProcessor
 from openviking.utils.skill_processor import SkillProcessor
 from openviking_cli.exceptions import (
@@ -28,6 +33,7 @@ from openviking_cli.exceptions import (
     DeadlineExceededError,
     InvalidArgumentError,
     NotInitializedError,
+    NotFoundError,
 )
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.uri import VikingURI
@@ -55,6 +61,8 @@ class ResourceService:
         self._resource_processor = resource_processor
         self._skill_processor = skill_processor
         self._watch_scheduler = watch_scheduler
+        self._document_registry: Optional[KnowledgeDocumentRegistry] = None
+        self._document_lock = asyncio.Lock()
 
     def set_dependencies(
         self,
@@ -63,6 +71,7 @@ class ResourceService:
         resource_processor: ResourceProcessor,
         skill_processor: SkillProcessor,
         watch_scheduler: Optional["WatchScheduler"] = None,
+        workspace_path: Optional[str] = None,
     ) -> None:
         """Set dependencies (for deferred initialization)."""
         self._vikingdb = vikingdb
@@ -70,6 +79,8 @@ class ResourceService:
         self._resource_processor = resource_processor
         self._skill_processor = skill_processor
         self._watch_scheduler = watch_scheduler
+        if workspace_path:
+            self._document_registry = KnowledgeDocumentRegistry(workspace_path)
 
     def _get_watch_manager(self) -> Optional["WatchManager"]:
         if not self._watch_scheduler:
@@ -95,12 +106,54 @@ class ResourceService:
         if not self._viking_fs:
             raise NotInitializedError("VikingFS")
 
+    def _derive_default_resource_uri(
+        self,
+        *,
+        path: str,
+        source_ref: Optional[str],
+        folder_path: str,
+    ) -> str:
+        """Derive a stable resource URI from virtual folders and the source name."""
+        segments: List[str] = []
+        for part in str(folder_path or "").replace("\\", "/").split("/"):
+            segment = part.strip()
+            if not segment or segment == ".":
+                continue
+            if segment == "..":
+                raise InvalidArgumentError("folder_path cannot contain '..'.")
+            segments.append(VikingURI.sanitize_segment(segment))
+
+        reference = source_ref or path
+        repo_slug = parse_code_hosting_url(reference) or parse_code_hosting_url(path)
+        if repo_slug:
+            segments.extend(
+                VikingURI.sanitize_segment(part)
+                for part in repo_slug.split("/")
+                if part
+            )
+            return VikingURI.build("resources", *segments)
+
+        parsed = urlparse(reference)
+        if reference.startswith("git@"):
+            name = Path(reference.split(":", 1)[-1]).name
+        elif parsed.scheme:
+            name = Path(parsed.path or "").name or parsed.netloc or reference
+        else:
+            name = Path(reference).name or reference
+
+        source_path = Path(path)
+        is_dir = source_path.exists() and source_path.is_dir()
+        leaf_name = name if is_dir else (Path(name).stem or name)
+        segments.append(VikingURI.sanitize_segment(leaf_name))
+        return VikingURI.build("resources", *segments)
+
     async def add_resource(
         self,
         path: str,
         ctx: RequestContext,
         to: Optional[str] = None,
         parent: Optional[str] = None,
+        folder_path: Optional[str] = None,
         reason: str = "",
         instruction: str = "",
         wait: bool = False,
@@ -110,6 +163,8 @@ class ResourceService:
         watch_interval: float = 0,
         skip_watch_management: bool = False,
         allow_local_path_resolution: bool = True,
+        register_document: bool = True,
+        source_ref: Optional[str] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """Add resource to OpenViking (only supports resources scope).
@@ -151,8 +206,15 @@ class ResourceService:
         telemetry = get_current_telemetry()
         telemetry_id = register_wait_telemetry(wait)
         watch_manager = self._get_watch_manager()
+        effective_to = to
+        if effective_to is None and parent is None and folder_path is not None:
+            effective_to = self._derive_default_resource_uri(
+                path=path,
+                source_ref=source_ref,
+                folder_path=folder_path,
+            )
         watch_enabled = bool(
-            watch_manager and to and not skip_watch_management and watch_interval > 0
+            watch_manager and effective_to and not skip_watch_management and watch_interval > 0
         )
 
         telemetry.set("resource.flags.wait", wait)
@@ -162,8 +224,8 @@ class ResourceService:
 
         try:
             # add_resource only supports resources scope
-            if to and to.startswith("viking://"):
-                parsed = VikingURI(to)
+            if effective_to and effective_to.startswith("viking://"):
+                parsed = VikingURI(effective_to)
                 if parsed.scope != "resources":
                     raise InvalidArgumentError(
                         f"add_resource only supports resources scope, use dedicated interface to add {parsed.scope} content"
@@ -174,7 +236,7 @@ class ResourceService:
                     raise InvalidArgumentError(
                         f"add_resource only supports resources scope, use dedicated interface to add {parsed.scope} content"
                     )
-            if watch_manager and not skip_watch_management and watch_interval > 0 and not to:
+            if watch_manager and not skip_watch_management and watch_interval > 0 and not effective_to:
                 raise InvalidArgumentError(
                     "watch_interval > 0 requires 'to' to be specified (target URI to watch)"
                 )
@@ -185,13 +247,27 @@ class ResourceService:
                 reason=reason,
                 instruction=instruction,
                 scope="resources",
-                to=to,
+                to=effective_to,
                 parent=parent,
                 build_index=build_index,
                 summarize=summarize,
                 allow_local_path_resolution=allow_local_path_resolution,
                 **kwargs,
             )
+
+            if register_document and result.get("status") == "success" and result.get("root_uri"):
+                document = await self._register_knowledge_document(
+                    ctx=ctx,
+                    path=path,
+                    source_ref=source_ref,
+                    folder_path=folder_path,
+                    result=result,
+                    reason=reason,
+                    instruction=instruction,
+                )
+                if document:
+                    result["document_id"] = document["document_id"]
+                    result["knowledge_document"] = document
 
             if wait:
                 qm = get_queue_manager()
@@ -214,14 +290,14 @@ class ResourceService:
                     root_uri=result.get("root_uri"),
                 )
                 telemetry.set("queue.wait.duration_ms", queue_wait_duration_ms)
-            if watch_manager and to and not skip_watch_management:
+            if watch_manager and effective_to and not skip_watch_management:
                 with telemetry.measure("resource.watch"):
                     if watch_interval > 0:
                         try:
                             processor_kwargs = self._sanitize_watch_processor_kwargs(kwargs)
                             await self._handle_watch_task_creation(
                                 path=path,
-                                to_uri=to,
+                                to_uri=effective_to,
                                 parent_uri=parent,
                                 reason=reason,
                                 instruction=instruction,
@@ -235,14 +311,17 @@ class ResourceService:
                             raise
                         except Exception as e:
                             logger.warning(
-                                f"[ResourceService] Failed to create watch task for {to}: {e}"
+                                f"[ResourceService] Failed to create watch task for {effective_to}: {e}"
                             )
                     else:
                         try:
-                            await self._handle_watch_task_cancellation(to_uri=to, ctx=ctx)
+                            await self._handle_watch_task_cancellation(
+                                to_uri=effective_to,
+                                ctx=ctx,
+                            )
                         except Exception as e:
                             logger.warning(
-                                f"[ResourceService] Failed to cancel watch task for {to}: {e}"
+                                f"[ResourceService] Failed to cancel watch task for {effective_to}: {e}"
                             )
             return result
         except Exception as exc:
@@ -258,6 +337,143 @@ class ResourceService:
                 round((time.perf_counter() - request_start) * 1000, 3),
             )
             unregister_wait_telemetry(telemetry_id)
+
+    async def list_documents(self, ctx: RequestContext) -> List[Dict[str, Any]]:
+        """List user-managed knowledge documents for the current account."""
+        self._ensure_initialized()
+        if not self._document_registry:
+            return []
+
+        async with self._document_lock:
+            records = await asyncio.to_thread(
+                self._document_registry.list_documents,
+                ctx.account_id,
+            )
+        return [record.to_public_dict() for record in records]
+
+    async def list_folders(self, ctx: RequestContext) -> List[Dict[str, Any]]:
+        """List user-managed virtual folders for the current account."""
+        self._ensure_initialized()
+        if not self._document_registry:
+            return []
+
+        async with self._document_lock:
+            records = await asyncio.to_thread(
+                self._document_registry.list_folders,
+                ctx.account_id,
+            )
+        return [record.to_public_dict() for record in records]
+
+    async def create_folder(
+        self,
+        *,
+        name: str,
+        parent_path: str,
+        ctx: RequestContext,
+    ) -> Dict[str, Any]:
+        """Create a virtual folder for organizing knowledge documents."""
+        self._ensure_initialized()
+        if not self._document_registry:
+            raise NotFoundError(ctx.account_id, "knowledge document registry")
+
+        async with self._document_lock:
+            record = await asyncio.to_thread(
+                lambda: self._document_registry.create_folder(
+                    account_id=ctx.account_id,
+                    name=name,
+                    parent_path=parent_path,
+                )
+            )
+        return record.to_public_dict()
+
+    async def delete_document(self, document_id: str, ctx: RequestContext) -> Dict[str, Any]:
+        """Delete a knowledge document and its synchronized resource tree."""
+        self._ensure_initialized()
+        if not self._document_registry:
+            raise NotFoundError(document_id, "knowledge document")
+
+        async with self._document_lock:
+            record = await asyncio.to_thread(
+                self._document_registry.get_document,
+                ctx.account_id,
+                document_id,
+            )
+        if not record:
+            raise NotFoundError(document_id, "knowledge document")
+
+        if record.resource_root_uri and self._viking_fs:
+            await self._viking_fs.rm(record.resource_root_uri, recursive=True, ctx=ctx)
+
+        async with self._document_lock:
+            await asyncio.to_thread(
+                self._document_registry.delete_document,
+                ctx.account_id,
+                document_id,
+            )
+
+        return {
+            "document_id": document_id,
+            "display_name": record.display_name,
+            "resource_root_uri": record.resource_root_uri,
+        }
+
+    async def delete_folder(self, folder_id: str, ctx: RequestContext) -> Dict[str, Any]:
+        """Delete an empty virtual folder."""
+        self._ensure_initialized()
+        if not self._document_registry:
+            raise NotFoundError(folder_id, "knowledge folder")
+
+        async with self._document_lock:
+            record = await asyncio.to_thread(
+                self._document_registry.get_folder,
+                ctx.account_id,
+                folder_id,
+            )
+        if not record:
+            raise NotFoundError(folder_id, "knowledge folder")
+
+        async with self._document_lock:
+            await asyncio.to_thread(
+                self._document_registry.delete_folder,
+                ctx.account_id,
+                folder_id,
+            )
+
+        return {
+            "folder_id": folder_id,
+            "name": record.name,
+            "path": record.path,
+        }
+
+    async def _register_knowledge_document(
+        self,
+        *,
+        ctx: RequestContext,
+        path: str,
+        source_ref: Optional[str],
+        folder_path: Optional[str],
+        result: Dict[str, Any],
+        reason: str,
+        instruction: str,
+    ) -> Dict[str, Any]:
+        if not self._document_registry:
+            return {}
+
+        async with self._document_lock:
+            record = await asyncio.to_thread(
+                lambda: self._document_registry.upsert_document(
+                    account_id=ctx.account_id,
+                    source_path=path,
+                    source_ref=source_ref,
+                    resource_root_uri=str(result["root_uri"]),
+                    folder_path=folder_path,
+                    source_format=result.get("source_format"),
+                    reason=reason,
+                    instruction=instruction,
+                    meta=result.get("meta") or {},
+                )
+            )
+        return record.to_public_dict()
 
     async def _handle_watch_task_creation(
         self,

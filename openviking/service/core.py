@@ -332,6 +332,7 @@ class OpenVikingService:
             resource_processor=self._resource_processor,
             skill_processor=self._skill_processor,
             watch_scheduler=self._watch_scheduler,
+            workspace_path=self._config.storage.workspace,
         )
         self._session_service.set_dependencies(
             vikingdb=self._vikingdb_manager,

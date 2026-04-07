@@ -207,6 +207,25 @@ async def test_add_resource_with_to(
     assert "custom" in body["result"]["root_uri"]
 
 
+async def test_add_resource_uses_virtual_folder_path_for_resource_uri(
+    client: httpx.AsyncClient,
+    sample_markdown_file,
+    upload_temp_dir,
+):
+    resp = await client.post(
+        "/api/v1/resources",
+        json={
+            "temp_file_id": sample_markdown_file.name,
+            "folder_path": "a/b/c",
+            "reason": "test resource",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["result"]["root_uri"] == "viking://resources/a/b/c/sample"
+
+
 async def test_wait_processed_empty_queue(client: httpx.AsyncClient):
     resp = await client.post(
         "/api/v1/system/wait",

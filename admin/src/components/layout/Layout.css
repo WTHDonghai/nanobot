@@ -76,3 +76,8 @@
   padding: 28px;
   position: relative;
 }
+
+.content-container--flush {
+  padding: 0;
+  overflow: hidden;
+}

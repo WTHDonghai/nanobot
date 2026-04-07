@@ -256,6 +256,7 @@ class WatchScheduler:
                     summarize=getattr(task, "summarize", False),
                     watch_interval=task.watch_interval,
                     skip_watch_management=True,
+                    register_document=False,
                     **processor_kwargs,
                 )
 

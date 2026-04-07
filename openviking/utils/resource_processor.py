@@ -140,6 +140,7 @@ class ResourceProcessor:
                         **kwargs,
                     )
                 result["source_path"] = parse_result.source_path or path
+                result["source_format"] = parse_result.source_format
                 result["meta"] = parse_result.meta
 
                 # Only abort when no temp content was produced at all.
