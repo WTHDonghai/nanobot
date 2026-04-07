@@ -55,7 +55,7 @@ interface UploadItem {
 }
 
 type KnowledgeEntry = KnowledgeFolder | KnowledgeDocument;
-type DrawerMode = 'upload' | 'url' | 'new-folder' | null;
+type DrawerMode = 'upload' | 'url' | 'new-folder' | 'rename-folder' | 'move-document' | null;
 type ViewMode = 'icon' | 'list';
 
 const ROOT_LABEL = '资源库';
@@ -394,6 +394,176 @@ const NewFolderDrawer = ({
   );
 };
 
+const RenameFolderDrawer = ({
+  open,
+  folder,
+  onClose,
+  onSubmitted,
+}: {
+  open: boolean;
+  folder: KnowledgeFolder | null;
+  onClose: () => void;
+  onSubmitted: (name: string) => Promise<void>;
+}) => {
+  const [name, setName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!open || !folder) return;
+    setName(folder.name);
+    setError('');
+  }, [folder, open]);
+
+  if (!open || !folder) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setLoading(true);
+    setError('');
+    try {
+      await onSubmitted(name.trim());
+      onClose();
+    } catch (err: any) {
+      setError(err?.message || '重命名目录失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="fm-drawer open">
+        <div className="fm-drawer-header">
+          <div className="fm-drawer-title"><FolderOpen size={18} /> 重命名目录</div>
+          <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+        <div className="fm-drawer-body">
+          <p className="fm-drawer-desc">
+            当前目录是 <strong>{formatPath(folder.path)}</strong>。重命名后，目录下文档对应的 resource URI 和向量数据会同步迁移。
+          </p>
+          <form id="fm-rename-folder-form" onSubmit={handleSubmit}>
+            <div className="form-group">
+              <label>新目录名称</label>
+              <input
+                type="text"
+                className="input"
+                placeholder="输入新的目录名称"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+                required
+              />
+            </div>
+            {error && <div className="fm-inline-error">{error}</div>}
+          </form>
+        </div>
+        <div className="fm-drawer-footer">
+          <button className="btn btn-ghost" onClick={onClose}>取消</button>
+          <button type="submit" form="fm-rename-folder-form" className="btn btn-primary" disabled={loading || !name.trim()}>
+            {loading ? '保存中...' : '保存名称'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const MoveDocumentDrawer = ({
+  open,
+  document,
+  folders,
+  onClose,
+  onSubmitted,
+}: {
+  open: boolean;
+  document: KnowledgeDocument | null;
+  folders: KnowledgeFolder[];
+  onClose: () => void;
+  onSubmitted: (folderPath: string) => Promise<void>;
+}) => {
+  const [targetPath, setTargetPath] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!open || !document) return;
+    setTargetPath(document.folder_path || '');
+    setError('');
+  }, [document, open]);
+
+  if (!open || !document) return null;
+
+  const sortedFolders = folders
+    .slice()
+    .sort((a, b) => a.path.localeCompare(b.path, 'zh-CN'));
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      await onSubmitted(targetPath);
+      onClose();
+    } catch (err: any) {
+      setError(err?.message || '移动文档失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="fm-drawer open">
+        <div className="fm-drawer-header">
+          <div className="fm-drawer-title"><FileText size={18} /> 移动文档</div>
+          <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+        <div className="fm-drawer-body">
+          <p className="fm-drawer-desc">
+            <strong>{document.display_name}</strong> 当前位于 <strong>{formatPath(document.folder_path || '')}</strong>。
+            选择目标目录后，系统会同步迁移对应的 resource URI 和向量数据。
+          </p>
+          <form id="fm-move-document-form" onSubmit={handleSubmit}>
+            <div className="form-group">
+              <label>目标目录</label>
+              <select
+                className="input"
+                value={targetPath}
+                onChange={(e) => setTargetPath(e.target.value)}
+              >
+                <option value="">/</option>
+                {sortedFolders.map((folder) => (
+                  <option key={folder.folder_id} value={folder.path}>
+                    {formatPath(folder.path)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {error && <div className="fm-inline-error">{error}</div>}
+          </form>
+        </div>
+        <div className="fm-drawer-footer">
+          <button className="btn btn-ghost" onClick={onClose}>取消</button>
+          <button
+            type="submit"
+            form="fm-move-document-form"
+            className="btn btn-primary"
+            disabled={loading || targetPath === (document.folder_path || '')}
+          >
+            {loading ? '移动中...' : '移动文档'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const UploadDrawer = ({
   open,
   onClose,
@@ -616,6 +786,12 @@ const Resources = () => {
     setSelectedKey(null);
   }, []);
 
+  const remapPathAfterFolderRename = useCallback((path: string, oldPath: string, newPath: string) => {
+    if (path === oldPath) return newPath;
+    if (path.startsWith(`${oldPath}/`)) return `${newPath}${path.slice(oldPath.length)}`;
+    return path;
+  }, []);
+
   const breadcrumbSegments = useMemo(() => {
     const parts = currentPath ? currentPath.split('/') : [];
     return [
@@ -732,6 +908,45 @@ const Resources = () => {
     throw new Error(firstError || '部分文件上传失败');
   };
 
+  const handleRenameFolder = async (name: string) => {
+    if (!isFolderEntry(selectedEntry)) return;
+    const originalPath = selectedEntry.path;
+    const data = await fetchApi<{ result: KnowledgeFolder }>(
+      serverUrl,
+      apiKey,
+      `/api/v1/knowledge-folders/${selectedEntry.folder_id}/rename`,
+      {
+        method: 'POST',
+        account: accountId || undefined,
+        user: userId || undefined,
+        body: JSON.stringify({ name }),
+      },
+    );
+    const renamedFolder = data.result;
+    setCurrentPath((prev) => remapPathAfterFolderRename(prev, originalPath, renamedFolder.path));
+    setSelectedKey(`folder:${selectedEntry.folder_id}`);
+    await loadLibrary();
+    showToast(`目录已重命名为：${renamedFolder.name}`);
+  };
+
+  const handleMoveDocument = async (folderPath: string) => {
+    if (!isDocumentEntry(selectedEntry)) return;
+    const data = await fetchApi<{ result: KnowledgeDocument }>(
+      serverUrl,
+      apiKey,
+      `/api/v1/knowledge-documents/${selectedEntry.document_id}/move`,
+      {
+        method: 'POST',
+        account: accountId || undefined,
+        user: userId || undefined,
+        body: JSON.stringify({ folder_path: folderPath }),
+      },
+    );
+    await loadLibrary();
+    setSelectedKey(`document:${selectedEntry.document_id}`);
+    showToast(`文档已移动到 ${formatPath(data.result.folder_path || '')}`);
+  };
+
   const doDelete = async () => {
     if (!confirmDelete) return;
     const key = entryKey(confirmDelete);
@@ -799,6 +1014,16 @@ const Resources = () => {
         </div>
 
         <div className="fm-toolbar-right">
+          {isFolderEntry(selectedEntry) && (
+            <button className="btn btn-ghost" onClick={() => setDrawer('rename-folder')}>
+              <FolderOpen size={15} /> 重命名目录
+            </button>
+          )}
+          {isDocumentEntry(selectedEntry) && (
+            <button className="btn btn-ghost" onClick={() => setDrawer('move-document')}>
+              <FileText size={15} /> 移动文档
+            </button>
+          )}
           <button className="fm-nav-btn" onClick={loadLibrary} disabled={loading} title="刷新">
             <RefreshCw size={15} className={loading ? 'fm-spin' : ''} />
           </button>
@@ -978,6 +1203,9 @@ const Resources = () => {
                   <button className="btn btn-ghost btn-sm" onClick={() => openPath(selectedEntry.path)}>
                     <FolderOpen size={14} /> 打开
                   </button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setDrawer('rename-folder')}>
+                    <FolderOpen size={14} /> 重命名
+                  </button>
                   <button className="btn btn-ghost btn-sm" onClick={() => {
                     openPath(selectedEntry.path);
                     setDrawer('new-folder');
@@ -1029,6 +1257,9 @@ const Resources = () => {
                 <div className="fm-inspector-actions">
                   <button className="btn btn-ghost btn-sm" onClick={() => setPreviewDoc(selectedEntry)}>
                     <Eye size={14} /> 预览
+                  </button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setDrawer('move-document')}>
+                    <FileText size={14} /> 移动
                   </button>
                   <button
                     className="btn btn-ghost btn-sm"
@@ -1133,6 +1364,21 @@ const Resources = () => {
         onClose={() => setDrawer(null)}
         currentPath={currentPath}
         onSubmitted={handleCreateFolder}
+      />
+
+      <RenameFolderDrawer
+        open={drawer === 'rename-folder'}
+        folder={isFolderEntry(selectedEntry) ? selectedEntry : null}
+        onClose={() => setDrawer(null)}
+        onSubmitted={handleRenameFolder}
+      />
+
+      <MoveDocumentDrawer
+        open={drawer === 'move-document'}
+        document={isDocumentEntry(selectedEntry) ? selectedEntry : null}
+        folders={folders}
+        onClose={() => setDrawer(null)}
+        onSubmitted={handleMoveDocument}
       />
 
       {previewDoc && (

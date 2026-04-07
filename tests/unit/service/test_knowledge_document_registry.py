@@ -71,3 +71,77 @@ def test_registry_persists_source_copy_and_deletes_it(tmp_path: Path):
     assert registry.list_documents("acct") == []
     assert registry.list_folders("acct") == []
     assert not copied_path.exists()
+
+
+def test_registry_moves_document_and_preserves_relative_resource_suffix(tmp_path: Path):
+    registry = KnowledgeDocumentRegistry(str(tmp_path / "workspace"))
+    archive_folder = registry.create_folder(account_id="acct", name="归档")
+
+    source = tmp_path / "repo.txt"
+    source.write_text("repo", encoding="utf-8")
+    record = registry.upsert_document(
+        account_id="acct",
+        source_path=str(source),
+        source_ref="git@github.com:openviking/support-bot.git",
+        resource_root_uri="viking://resources/openviking/support-bot",
+    )
+
+    plan = registry.plan_move_document(
+        account_id="acct",
+        document_id=record.document_id,
+        target_folder_path=archive_folder.path,
+    )
+    moved = registry.apply_document_move(plan=plan)
+
+    assert moved.folder_path == "归档"
+    assert moved.resource_root_uri == "viking://resources/归档/openviking/support-bot"
+
+    persisted = registry.get_document("acct", record.document_id)
+    assert persisted is not None
+    assert persisted.folder_path == "归档"
+    assert persisted.resource_root_uri == "viking://resources/归档/openviking/support-bot"
+
+
+def test_registry_renames_folder_and_updates_descendants(tmp_path: Path):
+    registry = KnowledgeDocumentRegistry(str(tmp_path / "workspace"))
+    source = tmp_path / "guide.md"
+    source.write_text("# guide\n", encoding="utf-8")
+
+    top_folder = registry.create_folder(account_id="acct", name="产品资料")
+    child_folder = registry.create_folder(
+        account_id="acct",
+        name="接口文档",
+        parent_path=top_folder.path,
+    )
+
+    doc_a = registry.upsert_document(
+        account_id="acct",
+        source_path=str(source),
+        resource_root_uri="viking://resources/产品资料/总览",
+        folder_path=top_folder.path,
+    )
+    doc_b = registry.upsert_document(
+        account_id="acct",
+        source_path=str(source),
+        resource_root_uri="viking://resources/产品资料/接口文档/openviking/support-bot",
+        folder_path=child_folder.path,
+    )
+
+    plan = registry.plan_rename_folder(
+        account_id="acct",
+        folder_id=top_folder.folder_id,
+        new_name="平台资料",
+    )
+    renamed = registry.apply_folder_rename(plan=plan)
+
+    assert renamed.path == "平台资料"
+    assert [folder.path for folder in registry.list_folders("acct")] == ["平台资料", "平台资料/接口文档"]
+
+    updated_a = registry.get_document("acct", doc_a.document_id)
+    updated_b = registry.get_document("acct", doc_b.document_id)
+    assert updated_a is not None
+    assert updated_b is not None
+    assert updated_a.folder_path == "平台资料"
+    assert updated_a.resource_root_uri == "viking://resources/平台资料/总览"
+    assert updated_b.folder_path == "平台资料/接口文档"
+    assert updated_b.resource_root_uri == "viking://resources/平台资料/接口文档/openviking/support-bot"

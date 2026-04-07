@@ -212,6 +212,13 @@ async def test_add_resource_uses_virtual_folder_path_for_resource_uri(
     sample_markdown_file,
     upload_temp_dir,
 ):
+    for name, parent_path in [("a", ""), ("b", "a"), ("c", "a/b")]:
+        create_resp = await client.post(
+            "/api/v1/knowledge-folders",
+            json={"name": name, "parent_path": parent_path},
+        )
+        assert create_resp.status_code == 200
+
     resp = await client.post(
         "/api/v1/resources",
         json={
@@ -224,6 +231,103 @@ async def test_add_resource_uses_virtual_folder_path_for_resource_uri(
     body = resp.json()
     assert body["status"] == "ok"
     assert body["result"]["root_uri"] == "viking://resources/a/b/c/sample"
+
+
+async def test_cleanup_knowledge_document_vectors_endpoint(
+    client: httpx.AsyncClient,
+    service,
+    monkeypatch,
+):
+    async def fake_cleanup_orphan_resource_vectors(**kwargs):
+        assert kwargs["dry_run"] is False
+        assert kwargs["batch_size"] == 25
+        assert kwargs["preview_limit"] == 2
+        return {
+            "dry_run": False,
+            "checked_vector_record_count": 4,
+            "checked_resource_uri_count": 3,
+            "orphan_uri_count": 1,
+            "orphan_vector_record_count": 2,
+            "deleted_uri_count": 1,
+            "deleted_vector_record_count": 2,
+            "orphan_uris": ["viking://resources/legacy"],
+            "orphan_uris_truncated": False,
+        }
+
+    monkeypatch.setattr(
+        service.resources,
+        "cleanup_orphan_resource_vectors",
+        fake_cleanup_orphan_resource_vectors,
+    )
+
+    resp = await client.post(
+        "/api/v1/knowledge-documents/vector-cleanup",
+        json={
+            "dry_run": False,
+            "batch_size": 25,
+            "preview_limit": 2,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["result"]["deleted_uri_count"] == 1
+    assert body["result"]["orphan_uris"] == ["viking://resources/legacy"]
+
+
+async def test_move_knowledge_document_endpoint(
+    client: httpx.AsyncClient,
+    service,
+    monkeypatch,
+):
+    async def fake_move_document(**kwargs):
+        assert kwargs["document_id"] == "doc-1"
+        assert kwargs["target_folder_path"] == "平台资料"
+        return {
+            "document_id": "doc-1",
+            "folder_path": "平台资料",
+            "resource_root_uri": "viking://resources/平台资料/guide",
+        }
+
+    monkeypatch.setattr(service.resources, "move_document", fake_move_document)
+
+    resp = await client.post(
+        "/api/v1/knowledge-documents/doc-1/move",
+        json={"folder_path": "平台资料"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["result"]["folder_path"] == "平台资料"
+
+
+async def test_rename_knowledge_folder_endpoint(
+    client: httpx.AsyncClient,
+    service,
+    monkeypatch,
+):
+    async def fake_rename_folder(**kwargs):
+        assert kwargs["folder_id"] == "folder-1"
+        assert kwargs["new_name"] == "平台资料"
+        return {
+            "folder_id": "folder-1",
+            "name": "平台资料",
+            "path": "平台资料",
+        }
+
+    monkeypatch.setattr(service.resources, "rename_folder", fake_rename_folder)
+
+    resp = await client.post(
+        "/api/v1/knowledge-folders/folder-1/rename",
+        json={"name": "平台资料"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["result"]["path"] == "平台资料"
 
 
 async def test_wait_processed_empty_queue(client: httpx.AsyncClient):

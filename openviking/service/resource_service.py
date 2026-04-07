@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from openviking.server.identity import RequestContext
-from openviking.service.knowledge_document_registry import KnowledgeDocumentRegistry
+from openviking.service.knowledge_document_registry import (
+    DocumentMovePlan,
+    FolderRenamePlan,
+    KnowledgeDocumentRegistry,
+)
+from openviking.storage.expr import PathScope
 from openviking.storage import VikingDBManager
 from openviking.storage.queuefs import get_queue_manager
 from openviking.storage.viking_fs import VikingFS
@@ -444,6 +449,221 @@ class ResourceService:
             "name": record.name,
             "path": record.path,
         }
+
+    async def move_document(
+        self,
+        *,
+        document_id: str,
+        target_folder_path: str,
+        ctx: RequestContext,
+    ) -> Dict[str, Any]:
+        """Move a knowledge document to another virtual folder."""
+        self._ensure_initialized()
+        if not self._document_registry:
+            raise NotFoundError(document_id, "knowledge document")
+
+        async with self._document_lock:
+            plan = await asyncio.to_thread(
+                self._document_registry.plan_move_document,
+                account_id=ctx.account_id,
+                document_id=document_id,
+                target_folder_path=target_folder_path,
+            )
+            moved_resource = await self._move_resource_if_needed(
+                old_uri=plan.source_document.resource_root_uri,
+                new_uri=plan.updated_document.resource_root_uri,
+                ctx=ctx,
+            )
+            try:
+                updated_record = await asyncio.to_thread(
+                    self._document_registry.apply_document_move,
+                    plan=plan,
+                )
+            except Exception:
+                await self._rollback_resource_move(
+                    moved_resource=moved_resource,
+                    old_uri=plan.source_document.resource_root_uri,
+                    new_uri=plan.updated_document.resource_root_uri,
+                    ctx=ctx,
+                )
+                raise
+
+        return {
+            **updated_record.to_public_dict(),
+            "previous_folder_path": plan.source_document.folder_path,
+            "previous_resource_root_uri": plan.source_document.resource_root_uri,
+        }
+
+    async def rename_folder(
+        self,
+        *,
+        folder_id: str,
+        new_name: str,
+        ctx: RequestContext,
+    ) -> Dict[str, Any]:
+        """Rename a virtual folder and synchronize descendant resource URIs."""
+        self._ensure_initialized()
+        if not self._document_registry:
+            raise NotFoundError(folder_id, "knowledge folder")
+
+        async with self._document_lock:
+            plan = await asyncio.to_thread(
+                self._document_registry.plan_rename_folder,
+                account_id=ctx.account_id,
+                folder_id=folder_id,
+                new_name=new_name,
+            )
+            moved_resource = await self._move_resource_if_needed(
+                old_uri=plan.old_resource_prefix,
+                new_uri=plan.new_resource_prefix,
+                ctx=ctx,
+            )
+            try:
+                renamed_folder = await asyncio.to_thread(
+                    self._document_registry.apply_folder_rename,
+                    plan=plan,
+                )
+            except Exception:
+                await self._rollback_resource_move(
+                    moved_resource=moved_resource,
+                    old_uri=plan.old_resource_prefix,
+                    new_uri=plan.new_resource_prefix,
+                    ctx=ctx,
+                )
+                raise
+
+        return {
+            **renamed_folder.to_public_dict(),
+            "previous_path": plan.source_folder.path,
+            "moved_document_count": len(plan.updated_documents),
+            "moved_folder_count": max(len(plan.updated_folders) - 1, 0),
+        }
+
+    async def cleanup_orphan_resource_vectors(
+        self,
+        *,
+        ctx: RequestContext,
+        dry_run: bool = True,
+        batch_size: int = 200,
+        preview_limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Scan resource vectors and optionally delete URIs whose files no longer exist."""
+        self._ensure_initialized()
+        if batch_size <= 0:
+            raise InvalidArgumentError("batch_size must be greater than 0.")
+        if preview_limit < 0:
+            raise InvalidArgumentError("preview_limit cannot be negative.")
+        if not self._viking_fs:
+            raise NotInitializedError("VikingFS")
+
+        vector_store = self._viking_fs._get_vector_store()
+        if not vector_store:
+            return {
+                "dry_run": dry_run,
+                "checked_vector_record_count": 0,
+                "checked_resource_uri_count": 0,
+                "orphan_uri_count": 0,
+                "orphan_vector_record_count": 0,
+                "deleted_uri_count": 0,
+                "deleted_vector_record_count": 0,
+                "orphan_uris": [],
+                "orphan_uris_truncated": False,
+            }
+
+        cursor: Optional[str] = None
+        checked_vector_record_count = 0
+        resource_uri_counts: Dict[str, int] = {}
+
+        while True:
+            records, cursor = await vector_store.scroll(
+                filter=PathScope("uri", "viking://resources", depth=-1),
+                limit=batch_size,
+                cursor=cursor,
+                output_fields=["uri"],
+                ctx=ctx,
+            )
+            checked_vector_record_count += len(records)
+            for record in records:
+                uri = str(record.get("uri") or "")
+                if not uri:
+                    continue
+                if uri != "viking://resources" and not uri.startswith("viking://resources/"):
+                    continue
+                resource_uri_counts[uri] = resource_uri_counts.get(uri, 0) + 1
+
+            if not cursor:
+                break
+
+        orphan_uris: List[str] = []
+        orphan_vector_record_count = 0
+        for uri in sorted(resource_uri_counts):
+            if await self._viking_fs.exists(uri, ctx=ctx):
+                continue
+            orphan_uris.append(uri)
+            orphan_vector_record_count += resource_uri_counts[uri]
+
+        deleted_uri_count = 0
+        deleted_vector_record_count = 0
+        if orphan_uris and not dry_run:
+            await vector_store.delete_uris(ctx, orphan_uris)
+            deleted_uri_count = len(orphan_uris)
+            deleted_vector_record_count = orphan_vector_record_count
+
+        preview = orphan_uris[:preview_limit] if preview_limit else []
+        return {
+            "dry_run": dry_run,
+            "checked_vector_record_count": checked_vector_record_count,
+            "checked_resource_uri_count": len(resource_uri_counts),
+            "orphan_uri_count": len(orphan_uris),
+            "orphan_vector_record_count": orphan_vector_record_count,
+            "deleted_uri_count": deleted_uri_count,
+            "deleted_vector_record_count": deleted_vector_record_count,
+            "orphan_uris": preview,
+            "orphan_uris_truncated": len(orphan_uris) > len(preview),
+        }
+
+    async def _move_resource_if_needed(
+        self,
+        *,
+        old_uri: str,
+        new_uri: str,
+        ctx: RequestContext,
+    ) -> bool:
+        if not self._viking_fs or old_uri == new_uri:
+            return False
+
+        old_exists = await self._viking_fs.exists(old_uri, ctx=ctx)
+        if not old_exists:
+            return False
+
+        if await self._viking_fs.exists(new_uri, ctx=ctx):
+            raise ConflictError(
+                "Target resource URI already exists.",
+                resource=new_uri,
+            )
+
+        await self._viking_fs.mv(old_uri, new_uri, ctx=ctx)
+        return True
+
+    async def _rollback_resource_move(
+        self,
+        *,
+        moved_resource: bool,
+        old_uri: str,
+        new_uri: str,
+        ctx: RequestContext,
+    ) -> None:
+        if not moved_resource or not self._viking_fs:
+            return
+        try:
+            await self._viking_fs.mv(new_uri, old_uri, ctx=ctx)
+        except Exception as rollback_exc:
+            logger.error(
+                "[ResourceService] Failed to rollback resource move %s -> %s: %s",
+                new_uri,
+                old_uri,
+                rollback_exc,
+            )
 
     async def _register_knowledge_document(
         self,

@@ -6,13 +6,14 @@ import json
 import shutil
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from openviking_cli.exceptions import ConflictError, InvalidArgumentError, NotFoundError
+from openviking_cli.utils.uri import VikingURI
 
 
 def _utc_now_iso() -> str:
@@ -87,6 +88,37 @@ def _join_folder_path(parent_path: str, name: str) -> str:
     parent = _normalize_folder_path(parent_path)
     child = _normalize_folder_name(name)
     return f"{parent}/{child}" if parent else child
+
+
+def _resource_prefix_for_folder_path(folder_path: str) -> str:
+    segments = [
+        VikingURI.sanitize_segment(part)
+        for part in _normalize_folder_path(folder_path).split("/")
+        if part
+    ]
+    return VikingURI.build("resources", *segments)
+
+
+def _replace_resource_folder_prefix(
+    resource_root_uri: str,
+    old_folder_path: str,
+    new_folder_path: str,
+) -> str:
+    normalized_uri = VikingURI.normalize(resource_root_uri)
+    old_prefix = _resource_prefix_for_folder_path(old_folder_path).rstrip("/")
+    new_prefix = _resource_prefix_for_folder_path(new_folder_path).rstrip("/")
+
+    if normalized_uri == old_prefix:
+        return new_prefix
+
+    old_prefix_with_sep = f"{old_prefix}/"
+    if not normalized_uri.startswith(old_prefix_with_sep):
+        raise InvalidArgumentError(
+            f"Resource URI '{resource_root_uri}' does not match folder path '{old_folder_path}'."
+        )
+
+    suffix = normalized_uri[len(old_prefix) :]
+    return f"{new_prefix}{suffix}"
 
 
 @dataclass
@@ -192,6 +224,29 @@ class KnowledgeDocumentRecord:
             "instruction": self.instruction,
             "has_local_copy": bool(self.original_storage_path),
         }
+
+
+@dataclass
+class DocumentMovePlan:
+    """Planned knowledge document move within virtual folders."""
+
+    source_document: KnowledgeDocumentRecord
+    target_folder_path: str
+    updated_document: KnowledgeDocumentRecord
+
+
+@dataclass
+class FolderRenamePlan:
+    """Planned virtual folder rename with descendant updates."""
+
+    source_folder: KnowledgeFolderRecord
+    renamed_folder: KnowledgeFolderRecord
+    original_folders: List[KnowledgeFolderRecord]
+    updated_folders: List[KnowledgeFolderRecord]
+    original_documents: List[KnowledgeDocumentRecord]
+    updated_documents: List[KnowledgeDocumentRecord]
+    old_resource_prefix: str
+    new_resource_prefix: str
 
 
 class KnowledgeDocumentRegistry:
@@ -336,6 +391,169 @@ class KnowledgeDocumentRegistry:
             raise ConflictError("Folder is not empty.", resource=record.path)
 
         self._folder_record_path(account_id, folder_id).unlink(missing_ok=True)
+
+    def plan_move_document(
+        self,
+        *,
+        account_id: str,
+        document_id: str,
+        target_folder_path: str = "",
+    ) -> DocumentMovePlan:
+        record = self.get_document(account_id, document_id)
+        if not record:
+            raise NotFoundError(document_id, "knowledge document")
+
+        normalized_target_folder = _normalize_folder_path(target_folder_path)
+        if normalized_target_folder and not self.get_folder_by_path(account_id, normalized_target_folder):
+            raise NotFoundError(normalized_target_folder, "knowledge folder")
+
+        next_resource_root_uri = _replace_resource_folder_prefix(
+            record.resource_root_uri,
+            record.folder_path,
+            normalized_target_folder,
+        )
+        conflict = self.find_by_resource_root_uri(account_id, next_resource_root_uri)
+        if conflict and conflict.document_id != document_id:
+            raise ConflictError(
+                "A document already exists at the target location.",
+                resource=next_resource_root_uri,
+            )
+
+        updated_record = replace(
+            record,
+            folder_path=normalized_target_folder,
+            resource_root_uri=next_resource_root_uri,
+            updated_at=_utc_now_iso(),
+        )
+        return DocumentMovePlan(
+            source_document=record,
+            target_folder_path=normalized_target_folder,
+            updated_document=updated_record,
+        )
+
+    def apply_document_move(
+        self,
+        *,
+        plan: DocumentMovePlan,
+    ) -> KnowledgeDocumentRecord:
+        self._write_document_record(plan.updated_document)
+        return plan.updated_document
+
+    def plan_rename_folder(
+        self,
+        *,
+        account_id: str,
+        folder_id: str,
+        new_name: str,
+    ) -> FolderRenamePlan:
+        source_folder = self.get_folder(account_id, folder_id)
+        if not source_folder:
+            raise NotFoundError(folder_id, "knowledge folder")
+
+        normalized_new_name = _normalize_folder_name(new_name)
+        target_path = _join_folder_path(source_folder.parent_path, normalized_new_name)
+        if target_path != source_folder.path:
+            existing = self.get_folder_by_path(account_id, target_path)
+            if existing and existing.folder_id != folder_id:
+                raise ConflictError("Folder already exists.", resource=target_path)
+
+        prefix = f"{source_folder.path}/"
+        now = _utc_now_iso()
+
+        original_folders = [
+            folder
+            for folder in self.list_folders(account_id)
+            if folder.path == source_folder.path or folder.path.startswith(prefix)
+        ]
+        original_documents = [
+            document
+            for document in self.list_documents(account_id)
+            if document.folder_path == source_folder.path or document.folder_path.startswith(prefix)
+        ]
+
+        updated_folders: List[KnowledgeFolderRecord] = []
+        for folder in original_folders:
+            suffix = folder.path[len(source_folder.path) :].lstrip("/")
+            next_path = target_path if not suffix else f"{target_path}/{suffix}"
+            next_parent_path = next_path.rsplit("/", 1)[0] if "/" in next_path else ""
+            next_name = normalized_new_name if folder.folder_id == folder_id else next_path.rsplit("/", 1)[-1]
+            updated_folders.append(
+                replace(
+                    folder,
+                    name=next_name,
+                    path=next_path,
+                    parent_path=next_parent_path,
+                    updated_at=now,
+                )
+            )
+
+        updated_documents: List[KnowledgeDocumentRecord] = []
+        seen_resource_uris: Dict[str, str] = {}
+        unaffected_documents = {
+            document.document_id: document
+            for document in self.list_documents(account_id)
+            if document.document_id not in {record.document_id for record in original_documents}
+        }
+
+        for document in original_documents:
+            suffix = document.folder_path[len(source_folder.path) :].lstrip("/")
+            next_folder_path = target_path if not suffix else f"{target_path}/{suffix}"
+            next_resource_root_uri = _replace_resource_folder_prefix(
+                document.resource_root_uri,
+                document.folder_path,
+                next_folder_path,
+            )
+            if next_resource_root_uri in seen_resource_uris:
+                raise ConflictError(
+                    "Two documents would resolve to the same target resource URI.",
+                    resource=next_resource_root_uri,
+                )
+            conflict = self.find_by_resource_root_uri(account_id, next_resource_root_uri)
+            if conflict and conflict.document_id not in unaffected_documents:
+                conflict = None
+            if conflict:
+                raise ConflictError(
+                    "A document already exists at the target location.",
+                    resource=next_resource_root_uri,
+                )
+
+            seen_resource_uris[next_resource_root_uri] = document.document_id
+            updated_documents.append(
+                replace(
+                    document,
+                    folder_path=next_folder_path,
+                    resource_root_uri=next_resource_root_uri,
+                    updated_at=now,
+                )
+            )
+
+        renamed_folder = next(
+            folder for folder in updated_folders if folder.folder_id == source_folder.folder_id
+        )
+        return FolderRenamePlan(
+            source_folder=source_folder,
+            renamed_folder=renamed_folder,
+            original_folders=original_folders,
+            updated_folders=updated_folders,
+            original_documents=original_documents,
+            updated_documents=updated_documents,
+            old_resource_prefix=_resource_prefix_for_folder_path(source_folder.path),
+            new_resource_prefix=_resource_prefix_for_folder_path(target_path),
+        )
+
+    def apply_folder_rename(self, *, plan: FolderRenamePlan) -> KnowledgeFolderRecord:
+        try:
+            for folder in plan.updated_folders:
+                self._write_folder_record(folder)
+            for document in plan.updated_documents:
+                self._write_document_record(document)
+        except Exception:
+            for folder in plan.original_folders:
+                self._write_folder_record(folder)
+            for document in plan.original_documents:
+                self._write_document_record(document)
+            raise
+        return plan.renamed_folder
 
     def upsert_document(
         self,

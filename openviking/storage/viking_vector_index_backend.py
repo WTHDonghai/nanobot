@@ -61,6 +61,7 @@ FETCH_BY_URI_OUTPUT_FIELDS = [
 ]
 
 URI_REWRITE_OUTPUT_FIELDS = [
+    "id",
     "uri",
     "type",
     "context_type",
@@ -921,15 +922,13 @@ class VikingVectorIndexBackend:
             backend = self._get_backend_for_context(ctx)
             await backend.delete_by_filter(And(conds))
 
-    async def update_uri_mapping(
+    def _build_uri_rewrite_filter(
         self,
+        *,
         ctx: RequestContext,
         uri: str,
-        new_uri: str,
         levels: Optional[List[int]] = None,
-    ) -> bool:
-        import hashlib
-
+    ) -> And:
         conds: List[FilterExpr] = [Eq("uri", uri), Eq("account_id", ctx.account_id)]
         if levels:
             conds.append(In("level", levels))
@@ -940,53 +939,133 @@ class VikingVectorIndexBackend:
                 else ctx.user.agent_space_name()
             )
             conds.append(Eq("owner_space", owner_space))
+        return And(conds)
 
-        records = await self.filter(
-            filter=And(conds),
-            limit=100,
-            output_fields=URI_REWRITE_OUTPUT_FIELDS,
-            ctx=ctx,
-        )
-        if not records:
-            return False
+    @staticmethod
+    def _seed_uri_for_id(uri: str, level: int) -> str:
+        if level == 0:
+            return uri if uri.endswith("/.abstract.md") else f"{uri}/.abstract.md"
+        if level == 1:
+            return uri if uri.endswith("/.overview.md") else f"{uri}/.overview.md"
+        return uri
 
-        def _seed_uri_for_id(uri: str, level: int) -> str:
-            if level == 0:
-                return uri if uri.endswith("/.abstract.md") else f"{uri}/.abstract.md"
-            if level == 1:
-                return uri if uri.endswith("/.overview.md") else f"{uri}/.overview.md"
-            return uri
+    async def rewrite_uri_mappings(
+        self,
+        ctx: RequestContext,
+        mappings: List[tuple[str, str]],
+        levels: Optional[List[int]] = None,
+    ) -> int:
+        import hashlib
 
-        success = False
-        ids_to_delete: List[str] = []
-        for record in records:
-            if "id" not in record:
+        if not mappings:
+            return 0
+
+        prepared_updates: List[Dict[str, Any]] = []
+        old_uris_with_records: List[str] = []
+
+        for uri, new_uri in mappings:
+            if uri == new_uri:
                 continue
-            raw_level = record.get("level", 2)
-            try:
-                level = int(raw_level)
-            except (TypeError, ValueError):
-                level = 2
+            records = await self.filter(
+                filter=self._build_uri_rewrite_filter(ctx=ctx, uri=uri, levels=levels),
+                limit=100,
+                output_fields=URI_REWRITE_OUTPUT_FIELDS,
+                ctx=ctx,
+            )
+            if not records:
+                continue
 
-            seed_uri = _seed_uri_for_id(new_uri, level)
-            id_seed = f"{ctx.account_id}:{seed_uri}"
-            new_id = hashlib.md5(id_seed.encode("utf-8")).hexdigest()
-
-            updated = {
-                **record,
-                "id": new_id,
-                "uri": new_uri,
-            }
-            if await self.upsert(updated, ctx=ctx):
-                success = True
+            old_uris_with_records.append(uri)
+            for record in records:
                 old_id = record.get("id")
-                if old_id and old_id != new_id:
-                    ids_to_delete.append(old_id)
+                if not old_id:
+                    raise RuntimeError(f"Vector record missing id during URI rewrite: {uri}")
 
-        if ids_to_delete:
-            await self.delete(list(set(ids_to_delete)), ctx=ctx)
+                raw_level = record.get("level", 2)
+                try:
+                    level = int(raw_level)
+                except (TypeError, ValueError):
+                    level = 2
 
-        return success
+                seed_uri = self._seed_uri_for_id(new_uri, level)
+                id_seed = f"{ctx.account_id}:{seed_uri}"
+                new_id = hashlib.md5(id_seed.encode("utf-8")).hexdigest()
+
+                prepared_updates.append(
+                    {
+                        **record,
+                        "id": new_id,
+                        "uri": new_uri,
+                    }
+                )
+
+        if not prepared_updates:
+            return 0
+
+        inserted_new_ids: List[str] = []
+        try:
+            for payload in prepared_updates:
+                upserted_id = await self.upsert(payload, ctx=ctx)
+                if not upserted_id:
+                    raise RuntimeError(
+                        f"Failed to upsert rewritten vector record for URI {payload.get('uri')}"
+                    )
+                inserted_new_ids.append(str(payload["id"]))
+        except Exception:
+            if inserted_new_ids:
+                try:
+                    await self.delete(list(set(inserted_new_ids)), ctx=ctx)
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to rollback rewritten vector records after URI rewrite failure: %s",
+                        cleanup_exc,
+                    )
+            raise
+
+        remaining_old_uris = sorted(set(old_uris_with_records))
+        last_delete_error: Optional[Exception] = None
+        for _attempt in range(3):
+            try:
+                await self.delete_uris(ctx, remaining_old_uris)
+                last_delete_error = None
+            except Exception as exc:
+                last_delete_error = exc
+
+            unresolved: List[str] = []
+            for uri in remaining_old_uris:
+                leftovers = await self.filter(
+                    filter=self._build_uri_rewrite_filter(ctx=ctx, uri=uri, levels=levels),
+                    limit=1,
+                    output_fields=["id"],
+                    ctx=ctx,
+                )
+                if leftovers:
+                    unresolved.append(uri)
+
+            if not unresolved:
+                return len(prepared_updates)
+            remaining_old_uris = unresolved
+
+        sample = ", ".join(remaining_old_uris[:3])
+        if last_delete_error:
+            raise RuntimeError(
+                f"Failed to clean up old vector URIs after rewrite: {sample}"
+            ) from last_delete_error
+        raise RuntimeError(f"Old vector URIs still remain after rewrite: {sample}")
+
+    async def update_uri_mapping(
+        self,
+        ctx: RequestContext,
+        uri: str,
+        new_uri: str,
+        levels: Optional[List[int]] = None,
+    ) -> bool:
+        updated = await self.rewrite_uri_mappings(
+            ctx=ctx,
+            mappings=[(uri, new_uri)],
+            levels=levels,
+        )
+        return updated > 0
 
     async def increment_active_count(self, ctx: RequestContext, uris: List[str]) -> int:
         updated = 0

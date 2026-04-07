@@ -128,6 +128,32 @@ class CreateKnowledgeFolderRequest(BaseModel):
     parent_path: str = ""
 
 
+class RenameKnowledgeFolderRequest(BaseModel):
+    """Request model for renaming a virtual knowledge folder."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class MoveKnowledgeDocumentRequest(BaseModel):
+    """Request model for moving a knowledge document to a folder."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    folder_path: str = ""
+
+
+class CleanupKnowledgeVectorsRequest(BaseModel):
+    """Request model for auditing or deleting orphaned resource vectors."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run: bool = True
+    batch_size: int = 200
+    preview_limit: int = 50
+
+
 def _cleanup_temp_files(temp_dir: Path, max_age_hours: int = 1):
     """Clean up temporary files older than max_age_hours."""
     if not temp_dir.exists():
@@ -238,6 +264,22 @@ async def delete_knowledge_document(
     return Response(status="ok", result=result).model_dump(exclude_none=True)
 
 
+@router.post("/knowledge-documents/{document_id}/move")
+async def move_knowledge_document(
+    document_id: str,
+    request: MoveKnowledgeDocumentRequest,
+    _ctx: RequestContext = Depends(get_request_context),
+):
+    """Move a knowledge document to another virtual folder."""
+    service = get_service()
+    result = await service.resources.move_document(
+        document_id=document_id,
+        target_folder_path=request.folder_path,
+        ctx=_ctx,
+    )
+    return Response(status="ok", result=result).model_dump(exclude_none=True)
+
+
 @router.delete("/knowledge-folders/{folder_id}")
 async def delete_knowledge_folder(
     folder_id: str,
@@ -246,6 +288,38 @@ async def delete_knowledge_folder(
     """Delete an empty virtual folder."""
     service = get_service()
     result = await service.resources.delete_folder(folder_id, _ctx)
+    return Response(status="ok", result=result).model_dump(exclude_none=True)
+
+
+@router.post("/knowledge-folders/{folder_id}/rename")
+async def rename_knowledge_folder(
+    folder_id: str,
+    request: RenameKnowledgeFolderRequest,
+    _ctx: RequestContext = Depends(get_request_context),
+):
+    """Rename a virtual folder."""
+    service = get_service()
+    result = await service.resources.rename_folder(
+        folder_id=folder_id,
+        new_name=request.name,
+        ctx=_ctx,
+    )
+    return Response(status="ok", result=result).model_dump(exclude_none=True)
+
+
+@router.post("/knowledge-documents/vector-cleanup")
+async def cleanup_knowledge_document_vectors(
+    request: CleanupKnowledgeVectorsRequest,
+    _ctx: RequestContext = Depends(get_request_context),
+):
+    """Audit or delete orphaned resource vectors."""
+    service = get_service()
+    result = await service.resources.cleanup_orphan_resource_vectors(
+        ctx=_ctx,
+        dry_run=request.dry_run,
+        batch_size=request.batch_size,
+        preview_limit=request.preview_limit,
+    )
     return Response(status="ok", result=result).model_dump(exclude_none=True)
 
 

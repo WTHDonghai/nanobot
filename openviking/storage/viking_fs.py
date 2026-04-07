@@ -1401,10 +1401,11 @@ class VikingFS:
 
         try:
             await vector_store.delete_uris(real_ctx, uris)
-            for uri in uris:
-                logger.debug(f"[VikingFS] Deleted from vector store: {uri}")
         except Exception as e:
-            logger.warning(f"[VikingFS] Failed to delete from vector store: {e}")
+            raise RuntimeError(f"Failed to delete vector records for URIs: {uris[:3]}") from e
+
+        for uri in uris:
+            logger.debug(f"[VikingFS] Deleted from vector store: {uri}")
 
     async def _update_vector_store_uris(
         self,
@@ -1424,20 +1425,22 @@ class VikingFS:
 
         old_base_uri = self._path_to_uri(old_base, ctx=ctx)
         new_base_uri = self._path_to_uri(new_base, ctx=ctx)
+        mappings = [
+            (uri, uri.replace(old_base_uri, new_base_uri, 1))
+            for uri in uris
+            if uri.replace(old_base_uri, new_base_uri, 1) != uri
+        ]
+        if not mappings:
+            return
 
-        for uri in uris:
-            try:
-                new_uri = uri.replace(old_base_uri, new_base_uri, 1)
+        await vector_store.rewrite_uri_mappings(
+            ctx=self._ctx_or_default(ctx),
+            mappings=mappings,
+            levels=levels,
+        )
 
-                await vector_store.update_uri_mapping(
-                    ctx=self._ctx_or_default(ctx),
-                    uri=uri,
-                    new_uri=new_uri,
-                    levels=levels,
-                )
-                logger.debug(f"[VikingFS] Updated URI: {uri} -> {new_uri}")
-            except Exception as e:
-                logger.warning(f"[VikingFS] Failed to update {uri} in vector store: {e}")
+        for uri, new_uri in mappings:
+            logger.debug(f"[VikingFS] Updated URI: {uri} -> {new_uri}")
 
     async def _mv_vector_store_l0_l1(
         self,
