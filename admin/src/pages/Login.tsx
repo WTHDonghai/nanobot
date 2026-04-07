@@ -53,7 +53,7 @@ const Login: React.FC = () => {
               <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
             </svg>
           </div>
-          <h1>OpenViking<br/><span className="login-subtitle-text">Admin Panel</span></h1>
+          <h1>support-kb<br/><span className="login-subtitle-text">Admin</span></h1>
         </div>
         <p className="login-desc">使用 Root API Key 或租户管理员 Key 登录</p>
 

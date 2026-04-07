@@ -52,8 +52,8 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
               </svg>
             </div>
             <div>
-              <div className="brand-title">OpenViking</div>
-              <div className="brand-sub">Admin Panel</div>
+              <div className="brand-title">Support</div>
+              <div className="brand-sub">Admin</div>
             </div>
           </div>
         </div>

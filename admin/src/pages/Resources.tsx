@@ -291,9 +291,6 @@ const UrlDrawer = ({
           </button>
         </div>
         <div className="fm-drawer-body">
-          <p className="fm-drawer-desc">
-            文档会被导入到当前目录 <strong>{formatPath(currentPath)}</strong>，用户管理的是原始文档，内部 resource 和向量索引由系统自动同步。
-          </p>
           <form id="fm-url-form" onSubmit={handleSubmit}>
             <div className="form-group">
               <label>远程地址</label>
@@ -364,9 +361,6 @@ const NewFolderDrawer = ({
           </button>
         </div>
         <div className="fm-drawer-body">
-          <p className="fm-drawer-desc">
-            会在当前目录 <strong>{formatPath(currentPath)}</strong> 下创建一个虚拟文件夹，用来整理知识库原始文档。
-          </p>
           <form id="fm-folder-form" onSubmit={handleSubmit}>
             <div className="form-group">
               <label>目录名称</label>
@@ -442,9 +436,6 @@ const RenameFolderDrawer = ({
           </button>
         </div>
         <div className="fm-drawer-body">
-          <p className="fm-drawer-desc">
-            当前目录是 <strong>{formatPath(folder.path)}</strong>。重命名后，目录下文档对应的 resource URI 和向量数据会同步迁移。
-          </p>
           <form id="fm-rename-folder-form" onSubmit={handleSubmit}>
             <div className="form-group">
               <label>新目录名称</label>
@@ -525,10 +516,6 @@ const MoveDocumentDrawer = ({
           </button>
         </div>
         <div className="fm-drawer-body">
-          <p className="fm-drawer-desc">
-            <strong>{document.display_name}</strong> 当前位于 <strong>{formatPath(document.folder_path || '')}</strong>。
-            选择目标目录后，系统会同步迁移对应的 resource URI 和向量数据。
-          </p>
           <form id="fm-move-document-form" onSubmit={handleSubmit}>
             <div className="form-group">
               <label>目标目录</label>
@@ -627,9 +614,6 @@ const UploadDrawer = ({
           </button>
         </div>
         <div className="fm-drawer-body">
-          <p className="fm-drawer-desc">
-            文档会导入到当前目录 <strong>{formatPath(currentPath)}</strong>。交互像桌面里的“拖入文件”，内部拆分与向量化仍由系统自动完成。
-          </p>
           <div
             className={`fm-dropzone ${dragOver ? 'drag-over' : ''}`}
             onDrop={(e) => {
@@ -646,7 +630,6 @@ const UploadDrawer = ({
           >
             <Upload size={28} />
             <div>点击选择文件，或把文档拖到这里</div>
-            <span>支持多选，导入后会自动归档到当前目录</span>
           </div>
           <input
             ref={fileInputRef}
@@ -1085,12 +1068,6 @@ const Resources = () => {
                 <span className="fm-side-label">{folder.name}</span>
               </button>
             ))}
-          </div>
-
-          <div className="fm-sidebar-note">
-            目录是给用户管理文档用的虚拟文件夹。
-            <br />
-            内部 `resource` 树和向量索引仍由系统自动同步。
           </div>
         </aside>
 
