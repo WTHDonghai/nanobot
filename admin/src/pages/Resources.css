@@ -1336,10 +1336,12 @@
     align-items: flex-start;
     gap: 6px;
   }
+
   .fm-prop-value {
     width: 100%;
     justify-content: space-between; /* put text on left, copy button on right */
   }
+
   .fm-prop-value > span {
     text-align: left;
   }

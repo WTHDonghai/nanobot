@@ -2,7 +2,7 @@ import React from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
-import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database, Sun, Moon, PanelLeftClose, PanelLeft } from 'lucide-react';
+import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database, Sun, Moon, PanelLeftClose, PanelLeft, Search } from 'lucide-react';
 import './Layout.css';
 
 const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -28,12 +28,14 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     { path: '/dashboard', label: '工作区概览', icon: <LayoutGrid size={18} /> },
     { path: '/accounts', label: '账号组成员', icon: <Users size={18} /> },
     { path: '/resources', label: '资源库管理', icon: <Database size={18} /> },
+    { path: '/recall-test', label: '检索召回测试', icon: <Search size={18} /> },
     { path: '/sessions', label: '工作区会话', icon: <MessagesSquare size={18} /> },
     { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
   ];
 
   const userItems = [
     { path: '/resources', label: '资源库管理', icon: <Database size={18} /> },
+    { path: '/recall-test', label: '检索召回测试', icon: <Search size={18} /> },
     { path: '/bot', label: 'Bot 测试', icon: <Bot size={18} /> },
   ];
 

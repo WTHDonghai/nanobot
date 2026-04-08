@@ -9,6 +9,7 @@ import Sessions from './pages/Sessions';
 import BotChat from './pages/BotChat';
 import SystemInfo from './pages/SystemInfo';
 import Resources from './pages/Resources';
+import RecallTest from './pages/RecallTest';
 import TestBot from './pages/TestBot';
 
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
@@ -41,6 +42,7 @@ const AppRoutes = () => {
                 {role !== 'root' && <Route path="/bot" element={<BotChat />} />}
                 <Route path="/system" element={<SystemInfo />} />
                 <Route path="/resources" element={<Resources />} />
+                {role !== 'root' && <Route path="/recall-test" element={<RecallTest />} />}
                 <Route path="*" element={<Navigate to={defaultPage} replace />} />
               </Routes>
             </Layout>
