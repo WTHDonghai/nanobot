@@ -15,6 +15,9 @@ from urllib.parse import urlparse
 
 from openviking.server.identity import RequestContext
 from openviking.service.knowledge_document_registry import (
+    DOCUMENT_PROCESSING_STATUS_FAILED,
+    DOCUMENT_PROCESSING_STATUS_PROCESSING,
+    DOCUMENT_PROCESSING_STATUS_READY,
     DocumentMovePlan,
     FolderRenamePlan,
     KnowledgeDocumentRegistry,
@@ -228,6 +231,30 @@ class ResourceService:
         telemetry.set("resource.flags.watch_enabled", watch_enabled)
 
         try:
+            registered_document: Dict[str, Any] = {}
+
+            async def _register_document_after_finalize(finalize_result: Dict[str, Any]) -> Dict[str, Any]:
+                nonlocal registered_document
+                if not register_document or finalize_result.get("status") != "success":
+                    return {}
+                processing_requested = bool(finalize_result.get("processing_requested"))
+                processing_status = (
+                    DOCUMENT_PROCESSING_STATUS_PROCESSING
+                    if processing_requested
+                    else DOCUMENT_PROCESSING_STATUS_READY
+                )
+                registered_document = await self._register_knowledge_document(
+                    ctx=ctx,
+                    path=path,
+                    source_ref=source_ref,
+                    folder_path=folder_path,
+                    result=finalize_result,
+                    reason=reason,
+                    instruction=instruction,
+                    processing_status=processing_status,
+                )
+                return registered_document
+
             # add_resource only supports resources scope
             if effective_to and effective_to.startswith("viking://"):
                 parsed = VikingURI(effective_to)
@@ -257,22 +284,28 @@ class ResourceService:
                 build_index=build_index,
                 summarize=summarize,
                 allow_local_path_resolution=allow_local_path_resolution,
+                post_finalize_hook=_register_document_after_finalize,
                 **kwargs,
             )
 
-            if register_document and result.get("status") == "success" and result.get("root_uri"):
-                document = await self._register_knowledge_document(
-                    ctx=ctx,
-                    path=path,
-                    source_ref=source_ref,
-                    folder_path=folder_path,
-                    result=result,
-                    reason=reason,
-                    instruction=instruction,
-                )
-                if document:
-                    result["document_id"] = document["document_id"]
-                    result["knowledge_document"] = document
+            if registered_document:
+                result["document_id"] = registered_document["document_id"]
+                result["knowledge_document"] = registered_document
+
+            if result.get("document_id"):
+                if result.get("processing_requested") and not result.get("processing_enqueued"):
+                    await self._update_document_processing_status(
+                        ctx=ctx,
+                        document_id=result["document_id"],
+                        processing_status=DOCUMENT_PROCESSING_STATUS_FAILED,
+                        processing_error=result.get("processing_error") or "文档处理任务提交失败",
+                    )
+                elif not result.get("processing_requested"):
+                    await self._update_document_processing_status(
+                        ctx=ctx,
+                        document_id=result["document_id"],
+                        processing_status=DOCUMENT_PROCESSING_STATUS_READY,
+                    )
 
             if wait:
                 qm = get_queue_manager()
@@ -295,6 +328,17 @@ class ResourceService:
                     root_uri=result.get("root_uri"),
                 )
                 telemetry.set("queue.wait.duration_ms", queue_wait_duration_ms)
+                if result.get("document_id") and result.get("processing_requested"):
+                    current_document = await self._get_document_record(
+                        ctx=ctx,
+                        document_id=result["document_id"],
+                    )
+                    if current_document and current_document.processing_status != DOCUMENT_PROCESSING_STATUS_FAILED:
+                        await self._update_document_processing_status(
+                            ctx=ctx,
+                            document_id=result["document_id"],
+                            processing_status=DOCUMENT_PROCESSING_STATUS_READY,
+                        )
             if watch_manager and effective_to and not skip_watch_management:
                 with telemetry.measure("resource.watch"):
                     if watch_interval > 0:
@@ -675,6 +719,7 @@ class ResourceService:
         result: Dict[str, Any],
         reason: str,
         instruction: str,
+        processing_status: str,
     ) -> Dict[str, Any]:
         if not self._document_registry:
             return {}
@@ -690,10 +735,48 @@ class ResourceService:
                     source_format=result.get("source_format"),
                     reason=reason,
                     instruction=instruction,
+                    processing_status=processing_status,
                     meta=result.get("meta") or {},
                 )
             )
         return record.to_public_dict()
+
+    async def _update_document_processing_status(
+        self,
+        *,
+        ctx: RequestContext,
+        document_id: str,
+        processing_status: str,
+        processing_error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self._document_registry:
+            return {}
+
+        async with self._document_lock:
+            record = await asyncio.to_thread(
+                self._document_registry.update_document_processing_status,
+                ctx.account_id,
+                document_id,
+                processing_status=processing_status,
+                processing_error=processing_error,
+            )
+        return record.to_public_dict() if record else {}
+
+    async def _get_document_record(
+        self,
+        *,
+        ctx: RequestContext,
+        document_id: str,
+    ):
+        if not self._document_registry:
+            return None
+
+        async with self._document_lock:
+            return await asyncio.to_thread(
+                self._document_registry.get_document,
+                ctx.account_id,
+                document_id,
+            )
 
     async def _handle_watch_task_creation(
         self,

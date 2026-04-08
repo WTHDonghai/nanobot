@@ -44,6 +44,7 @@ class SemanticMsg:
     changes: Optional[Dict[str, List[str]]] = (
         None  # {"added": [...], "modified": [...], "deleted": [...]}
     )
+    document_id: str = ""
 
     def __init__(
         self,
@@ -60,6 +61,7 @@ class SemanticMsg:
         lifecycle_lock_handle_id: str = "",
         is_code_repo: bool = False,
         changes: Optional[Dict[str, List[str]]] = None,
+        document_id: str = "",
     ):
         self.id = str(uuid4())
         self.uri = uri
@@ -75,6 +77,7 @@ class SemanticMsg:
         self.lifecycle_lock_handle_id = lifecycle_lock_handle_id
         self.is_code_repo = is_code_repo
         self.changes = changes
+        self.document_id = document_id
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert object to dictionary."""
@@ -115,6 +118,7 @@ class SemanticMsg:
             lifecycle_lock_handle_id=data.get("lifecycle_lock_handle_id", ""),
             is_code_repo=data.get("is_code_repo", False),
             changes=data.get("changes"),
+            document_id=data.get("document_id", ""),
         )
         if "id" in data and data["id"]:
             obj.id = data["id"]

@@ -30,6 +30,12 @@ async def test_add_resource_success(
     assert "root_uri" in body["result"]
     assert body["result"]["root_uri"].startswith("viking://")
 
+    documents_resp = await client.get("/api/v1/knowledge-documents")
+    assert documents_resp.status_code == 200
+    documents = documents_resp.json()["result"]
+    assert len(documents) >= 1
+    assert any(doc["processing_status"] in {"processing", "ready", "failed"} for doc in documents)
+
 
 async def test_add_resource_with_wait(
     client: httpx.AsyncClient,
@@ -48,6 +54,12 @@ async def test_add_resource_with_wait(
     body = resp.json()
     assert body["status"] == "ok"
     assert "root_uri" in body["result"]
+
+    documents_resp = await client.get("/api/v1/knowledge-documents")
+    assert documents_resp.status_code == 200
+    documents = documents_resp.json()["result"]
+    assert len(documents) >= 1
+    assert any(doc["processing_status"] in {"ready", "failed"} for doc in documents)
 
 
 async def test_add_resource_with_telemetry_wait(

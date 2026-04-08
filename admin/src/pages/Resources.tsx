@@ -47,6 +47,10 @@ interface KnowledgeDocument {
   updated_at: string;
   reason?: string;
   instruction?: string;
+  processing_status?: 'processing' | 'ready' | 'failed';
+  processing_error?: string;
+  processing_started_at?: string | null;
+  processing_completed_at?: string | null;
   has_local_copy: boolean;
 }
 
@@ -113,6 +117,24 @@ const formatSourceType = (sourceType: string) => {
 };
 
 const formatPath = (path: string) => (path ? `/${path}` : '/');
+
+const normalizeDocumentProcessingStatus = (
+  status?: KnowledgeDocument['processing_status'] | string | null,
+): 'processing' | 'ready' | 'failed' => {
+  if (status === 'processing' || status === 'failed') return status;
+  return 'ready';
+};
+
+const formatDocumentProcessingStatus = (status?: KnowledgeDocument['processing_status'] | string | null) => {
+  switch (normalizeDocumentProcessingStatus(status)) {
+    case 'processing':
+      return '处理中';
+    case 'failed':
+      return '处理失败';
+    default:
+      return '已完成';
+  }
+};
 
 const entryKey = (entry: KnowledgeEntry) => (
   entry.entry_type === 'folder' ? `folder:${entry.folder_id}` : `document:${entry.document_id}`
@@ -1057,9 +1079,25 @@ const Resources = () => {
   const selectedDocumentAbstractLoading = isDocumentEntry(selectedEntry)
     ? loadingDocumentAbstractId === selectedEntry.document_id
     : false;
+  const selectedDocumentProcessingStatus = isDocumentEntry(selectedEntry)
+    ? normalizeDocumentProcessingStatus(selectedEntry.processing_status)
+    : 'ready';
+
+  const hasProcessingDocuments = useMemo(() => (
+    documents.some((document) => normalizeDocumentProcessingStatus(document.processing_status) === 'processing')
+  ), [documents]);
+
+  useEffect(() => {
+    if (!hasProcessingDocuments) return undefined;
+    const timer = window.setInterval(() => {
+      void loadLibrary();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [hasProcessingDocuments, loadLibrary]);
 
   useEffect(() => {
     if (!isDocumentEntry(selectedEntry)) return;
+    if (selectedDocumentProcessingStatus !== 'ready') return;
 
     const documentId = selectedEntry.document_id;
     if (documentAbstracts[documentId] || documentAbstractErrors[documentId]) return;
@@ -1112,6 +1150,7 @@ const Resources = () => {
     apiKey,
     documentAbstractErrors,
     documentAbstracts,
+    selectedDocumentProcessingStatus,
     selectedEntry,
     serverUrl,
     userId,
@@ -1741,7 +1780,9 @@ const Resources = () => {
         <section className="fm-content" onContextMenu={(e) => openWorkspaceContextMenu(e)}>
           <div className="fm-content-guide">
             <span className="fm-content-guide-title">资源管理器</span>
-            <span className="fm-content-guide-text">双击打开项目，右键查看更多操作，操作默认落在当前目录。</span>
+            <span className="fm-content-guide-text">
+              双击打开项目，右键查看更多操作，操作默认落在当前目录。文档处理中时页面会自动刷新状态。
+            </span>
           </div>
           {loading ? (
             <div className="fm-state">
@@ -1761,6 +1802,9 @@ const Resources = () => {
               {visibleEntries.map((entry) => {
                 const selected = selectedKey === entryKey(entry);
                 const folder = isFolderEntry(entry);
+                const documentStatus = !folder
+                  ? normalizeDocumentProcessingStatus(entry.processing_status)
+                  : 'ready';
                 return (
                   <div
                     key={entryKey(entry)}
@@ -1782,6 +1826,11 @@ const Resources = () => {
                       {folder ? <FolderOpen size={44} className="fm-folder-icon" /> : <FileText size={40} className="fm-file-icon" />}
                     </div>
                     <span className="fm-icon-name">{folder ? entry.name : entry.display_name}</span>
+                    {!folder && (
+                      <span className={`fm-doc-status ${documentStatus}`}>
+                        {formatDocumentProcessingStatus(entry.processing_status)}
+                      </span>
+                    )}
                     {/*<div className="fm-icon-meta">
                       <span className="fm-badge">
                         {folder ? '目录' : formatSourceType(entry.source_type)}
@@ -1798,6 +1847,7 @@ const Resources = () => {
                   <th>名称</th>
                   {/*<th>类型</th>*/}
                   <th>格式</th>
+                  <th>状态</th>
                   <th>更新时间</th>
                 </tr>
               </thead>
@@ -1805,6 +1855,9 @@ const Resources = () => {
                 {visibleEntries.map((entry) => {
                   const selected = selectedKey === entryKey(entry);
                   const folder = isFolderEntry(entry);
+                  const documentStatus = !folder
+                    ? normalizeDocumentProcessingStatus(entry.processing_status)
+                    : 'ready';
                   return (
                     <tr
                       key={entryKey(entry)}
@@ -1830,6 +1883,13 @@ const Resources = () => {
                       </td>
                       {/*<td>{folder ? '目录' : formatSourceType(entry.source_type)}</td>*/}
                       <td>{folder ? '--' : entry.source_format || '待识别'}</td>
+                      <td>
+                        {folder ? '--' : (
+                          <span className={`fm-doc-status ${documentStatus}`}>
+                            {formatDocumentProcessingStatus(entry.processing_status)}
+                          </span>
+                        )}
+                      </td>
                       <td>{formatTime(entry.updated_at)}</td>
                     </tr>
                   );
@@ -1973,6 +2033,15 @@ const Resources = () => {
                     <span className="fm-prop-label">格式</span>
                     <span className="fm-prop-value">{selectedEntry.source_format || '待识别'}</span>
                   </div>
+
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">处理状态</span>
+                    <span className="fm-prop-value">
+                      <span className={`fm-doc-status ${selectedDocumentProcessingStatus}`}>
+                        {formatDocumentProcessingStatus(selectedEntry.processing_status)}
+                      </span>
+                    </span>
+                  </div>
                   
                   {/*<div className="fm-prop-item">
                     <span className="fm-prop-label">保存原件</span>
@@ -1989,6 +2058,13 @@ const Resources = () => {
                     <span className="fm-prop-value">{formatTime(selectedEntry.updated_at)}</span>
                   </div>
 
+                  {selectedEntry.processing_completed_at && selectedDocumentProcessingStatus === 'ready' && (
+                    <div className="fm-prop-item">
+                      <span className="fm-prop-label">完成时间</span>
+                      <span className="fm-prop-value">{formatTime(selectedEntry.processing_completed_at)}</span>
+                    </div>
+                  )}
+
                   {(selectedEntry.reason || selectedEntry.instruction) && (
                     <div className="fm-prop-item vertical">
                       <span className="fm-prop-label">备注信息</span>
@@ -2001,7 +2077,13 @@ const Resources = () => {
                   <div className="fm-prop-item vertical fm-prop-item-grow">
                     <span className="fm-prop-label">Abstract 摘要</span>
                     <div className="fm-prop-value">
-                      {selectedDocumentAbstractLoading ? (
+                      {selectedDocumentProcessingStatus === 'processing' ? (
+                        <span className="fm-prop-note">文档正在后台解析、摘要和索引处理中，完成后会显示摘要。</span>
+                      ) : selectedDocumentProcessingStatus === 'failed' ? (
+                        <span className="fm-prop-note fm-prop-note-error">
+                          {selectedEntry.processing_error || '文档处理失败，暂时无法生成摘要。'}
+                        </span>
+                      ) : selectedDocumentAbstractLoading ? (
                         <span className="fm-prop-note">正在加载摘要...</span>
                       ) : selectedDocumentAbstractError ? (
                         <span className="fm-prop-note fm-prop-note-error">{selectedDocumentAbstractError}</span>
@@ -2036,7 +2118,7 @@ const Resources = () => {
         <span className="fm-statusbar-sep" />
         <span className="fm-status-selected">当前位置: {formatPath(currentPath)}</span>
         <span className="fm-statusbar-sep" />
-        <span>双击打开 · 右键操作</span>
+        <span>{hasProcessingDocuments ? '检测到处理中任务 · 页面自动刷新' : '双击打开 · 右键操作'}</span>
         {selectedEntry && (
           <>
             <span className="fm-statusbar-sep" />

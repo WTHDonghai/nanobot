@@ -417,7 +417,11 @@ class TextEmbeddingHandler(DequeueHandlerBase):
 
                 tracker = EmbeddingTaskTracker.get_instance()
                 try:
-                    await tracker.decrement(embedding_msg.semantic_msg_id)
+                    await tracker.decrement(
+                        embedding_msg.semantic_msg_id,
+                        failed=report_error_args is not None,
+                        error=report_error_args[0] if report_error_args is not None else "",
+                    )
                 except Exception as tracker_err:
                     logger.warning(f"Failed to decrement embedding tracker: {tracker_err}")
             if report_error_args is not None:

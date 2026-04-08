@@ -9,7 +9,7 @@ as described in the OpenViking design document.
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from openviking.parse.tree_builder import TreeBuilder
 from openviking.server.identity import RequestContext
@@ -106,6 +106,7 @@ class ResourceProcessor:
         to: Optional[str] = None,
         parent: Optional[str] = None,
         summarize: bool = False,
+        post_finalize_hook: Optional[Callable[[Dict[str, Any]], Awaitable[Optional[Dict[str, Any]]]]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -267,6 +268,15 @@ class ResourceProcessor:
             build_index = kwargs.get("build_index", True)
             temp_uri_for_summarize = result.get("temp_uri") or parse_result.temp_dir_path
             should_summarize = summarize or build_index
+            result["processing_requested"] = should_summarize
+            result["processing_enqueued"] = False
+
+            if post_finalize_hook:
+                document = await post_finalize_hook(result)
+                if document:
+                    result["knowledge_document"] = document
+                    result["document_id"] = document.get("document_id")
+
             if should_summarize:
                 skip_vec = not build_index
                 is_code_repo = parse_result.source_format == "repository"
@@ -279,11 +289,20 @@ class ResourceProcessor:
                             lifecycle_lock_handle_id=lifecycle_lock_handle_id,
                             temp_uris=[temp_uri_for_summarize],
                             is_code_repo=is_code_repo,
+                            document_id=result.get("document_id"),
                             **kwargs,
                         )
+                    result["processing_enqueued"] = True
                 except Exception as e:
                     logger.error(f"Summarization failed: {e}")
+                    result["processing_error"] = str(e)
                     result["warnings"] = result.get("warnings", []) + [f"Summarization failed: {e}"]
+                    if lifecycle_lock_handle_id:
+                        from openviking.storage.transaction import get_lock_manager
+
+                        handle = get_lock_manager().get_handle(lifecycle_lock_handle_id)
+                        if handle:
+                            await get_lock_manager().release(handle)
             elif lifecycle_lock_handle_id:
                 # 无下游处理接管锁，主动释放
                 from openviking.storage.transaction import get_lock_manager

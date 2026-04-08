@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict, List, Optional
 
 from openviking.server.identity import RequestContext
+from openviking.service.knowledge_document_registry import (
+    DOCUMENT_PROCESSING_STATUS_FAILED,
+    DOCUMENT_PROCESSING_STATUS_READY,
+    update_default_document_processing_status,
+)
 from openviking.storage.viking_fs import get_viking_fs
 from openviking_cli.utils import VikingURI
 from openviking_cli.utils.logger import get_logger
@@ -75,6 +80,7 @@ class SemanticDagExecutor:
         incremental_update: bool = False,
         target_uri: Optional[str] = None,
         semantic_msg_id: Optional[str] = None,
+        document_id: str = "",
         recursive: bool = True,
         lifecycle_lock_handle_id: str = "",
         is_code_repo: bool = False,
@@ -86,6 +92,7 @@ class SemanticDagExecutor:
         self._incremental_update = incremental_update
         self._target_uri = target_uri
         self._semantic_msg_id = semantic_msg_id
+        self._document_id = document_id
         self._recursive = recursive
         self._lifecycle_lock_handle_id = lifecycle_lock_handle_id
         self._is_code_repo = is_code_repo
@@ -162,12 +169,34 @@ class SemanticDagExecutor:
             raise
 
         original_on_complete = self._create_on_complete_callback()
+        completion_metadata = {
+            "resource_root_uri": self._target_uri or root_uri,
+            "failed_count": 0,
+            "errors": [],
+        }
 
         # Wrap on_complete to release lifecycle lock after all processing
         async def wrapped_on_complete() -> None:
             try:
                 if original_on_complete:
                     await original_on_complete()
+                if self._document_id:
+                    if completion_metadata["failed_count"] > 0:
+                        error_message = "\n".join(
+                            str(message) for message in completion_metadata["errors"][:3]
+                        ) or "Embedding 处理失败"
+                        update_default_document_processing_status(
+                            account_id=self._ctx.account_id,
+                            document_id=self._document_id,
+                            processing_status=DOCUMENT_PROCESSING_STATUS_FAILED,
+                            processing_error=error_message,
+                        )
+                    else:
+                        update_default_document_processing_status(
+                            account_id=self._ctx.account_id,
+                            document_id=self._document_id,
+                            processing_status=DOCUMENT_PROCESSING_STATUS_READY,
+                        )
             finally:
                 await self._release_lifecycle_lock()
 
@@ -183,7 +212,7 @@ class SemanticDagExecutor:
                 semantic_msg_id=self._semantic_msg_id,
                 total_count=task_count,
                 on_complete=wrapped_on_complete,
-                metadata={"uri": root_uri},
+                metadata=completion_metadata,
             )
 
             for task in tasks:

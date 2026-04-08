@@ -43,6 +43,7 @@ class Summarizer:
         semantic_queue = queue_manager.get_queue(queue_manager.SEMANTIC, allow_create=True)
 
         temp_uris = kwargs.get("temp_uris", [])
+        document_id = str(kwargs.get("document_id") or "")
         if not temp_uris:
             temp_uris = resource_uris
         if len(temp_uris) != len(resource_uris):
@@ -72,6 +73,7 @@ class Summarizer:
                 target_uri=uri if uri != temp_uri else None,
                 lifecycle_lock_handle_id=lifecycle_lock_handle_id,
                 is_code_repo=kwargs.get("is_code_repo", False),
+                document_id=document_id,
             )
             await semantic_queue.enqueue(msg)
             enqueued_count += 1

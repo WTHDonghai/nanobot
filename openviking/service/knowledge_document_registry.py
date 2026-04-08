@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -121,6 +122,22 @@ def _replace_resource_folder_prefix(
     return f"{new_prefix}{suffix}"
 
 
+DOCUMENT_PROCESSING_STATUS_PROCESSING = "processing"
+DOCUMENT_PROCESSING_STATUS_READY = "ready"
+DOCUMENT_PROCESSING_STATUS_FAILED = "failed"
+
+
+def _normalize_processing_status(value: Optional[str]) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in {
+        DOCUMENT_PROCESSING_STATUS_PROCESSING,
+        DOCUMENT_PROCESSING_STATUS_READY,
+        DOCUMENT_PROCESSING_STATUS_FAILED,
+    }:
+        return candidate
+    return DOCUMENT_PROCESSING_STATUS_READY
+
+
 @dataclass
 class KnowledgeFolderRecord:
     """Persistent metadata for a user-managed virtual folder."""
@@ -181,11 +198,22 @@ class KnowledgeDocumentRecord:
     source_format: Optional[str] = None
     reason: str = ""
     instruction: str = ""
+    processing_status: str = DOCUMENT_PROCESSING_STATUS_READY
+    processing_error: str = ""
+    processing_started_at: Optional[str] = None
+    processing_completed_at: Optional[str] = None
     original_storage_path: Optional[str] = None
     meta: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "KnowledgeDocumentRecord":
+        created_at = str(data.get("created_at") or _utc_now_iso())
+        updated_at = str(data.get("updated_at") or _utc_now_iso())
+        processing_status = _normalize_processing_status(data.get("processing_status"))
+        processing_started_at = data.get("processing_started_at") or created_at
+        processing_completed_at = data.get("processing_completed_at")
+        if processing_status == DOCUMENT_PROCESSING_STATUS_READY and not processing_completed_at:
+            processing_completed_at = updated_at
         return cls(
             document_id=str(data["document_id"]),
             account_id=str(data["account_id"]),
@@ -193,12 +221,16 @@ class KnowledgeDocumentRecord:
             source_type=str(data.get("source_type") or "unknown"),
             source_ref=str(data.get("source_ref") or ""),
             resource_root_uri=str(data.get("resource_root_uri") or ""),
-            created_at=str(data.get("created_at") or _utc_now_iso()),
-            updated_at=str(data.get("updated_at") or _utc_now_iso()),
+            created_at=created_at,
+            updated_at=updated_at,
             folder_path=_normalize_folder_path(data.get("folder_path")),
             source_format=data.get("source_format"),
             reason=str(data.get("reason") or ""),
             instruction=str(data.get("instruction") or ""),
+            processing_status=processing_status,
+            processing_error=str(data.get("processing_error") or ""),
+            processing_started_at=processing_started_at,
+            processing_completed_at=processing_completed_at,
             original_storage_path=data.get("original_storage_path"),
             meta=_json_safe(data.get("meta") or {}),
         )
@@ -222,6 +254,10 @@ class KnowledgeDocumentRecord:
             "updated_at": self.updated_at,
             "reason": self.reason,
             "instruction": self.instruction,
+            "processing_status": self.processing_status,
+            "processing_error": self.processing_error,
+            "processing_started_at": self.processing_started_at,
+            "processing_completed_at": self.processing_completed_at,
             "has_local_copy": bool(self.original_storage_path),
         }
 
@@ -566,6 +602,10 @@ class KnowledgeDocumentRegistry:
         source_format: Optional[str] = None,
         reason: str = "",
         instruction: str = "",
+        processing_status: Optional[str] = None,
+        processing_error: Optional[str] = None,
+        processing_started_at: Optional[str] = None,
+        processing_completed_at: Optional[str] = None,
         meta: Optional[Dict[str, Any]] = None,
     ) -> KnowledgeDocumentRecord:
         existing = self.find_by_resource_root_uri(account_id, resource_root_uri)
@@ -585,6 +625,33 @@ class KnowledgeDocumentRegistry:
             original_storage_path = copied_source
 
         visible_source_ref = source_ref or source_path
+        resolved_processing_status = _normalize_processing_status(
+            processing_status if processing_status is not None else (
+                existing.processing_status if existing else DOCUMENT_PROCESSING_STATUS_READY
+            )
+        )
+        resolved_processing_error = (
+            str(processing_error)
+            if processing_error is not None
+            else (existing.processing_error if existing else "")
+        )
+        resolved_processing_started_at = (
+            processing_started_at
+            if processing_started_at is not None
+            else (
+                existing.processing_started_at
+                if existing and existing.processing_started_at
+                else now
+            )
+        )
+        if processing_completed_at is not None:
+            resolved_processing_completed_at = processing_completed_at
+        elif existing and processing_status is None:
+            resolved_processing_completed_at = existing.processing_completed_at
+        elif resolved_processing_status == DOCUMENT_PROCESSING_STATUS_READY:
+            resolved_processing_completed_at = now
+        else:
+            resolved_processing_completed_at = None
 
         record = KnowledgeDocumentRecord(
             document_id=document_id,
@@ -599,11 +666,63 @@ class KnowledgeDocumentRegistry:
             source_format=source_format,
             reason=reason,
             instruction=instruction,
+            processing_status=resolved_processing_status,
+            processing_error=resolved_processing_error,
+            processing_started_at=resolved_processing_started_at,
+            processing_completed_at=resolved_processing_completed_at,
             original_storage_path=original_storage_path,
             meta=_json_safe(meta or {}),
         )
         self._write_document_record(record)
         return record
+
+    def update_document_processing_status(
+        self,
+        account_id: str,
+        document_id: str,
+        *,
+        processing_status: str,
+        processing_error: Optional[str] = None,
+        processing_started_at: Optional[str] = None,
+        processing_completed_at: Optional[str] = None,
+    ) -> Optional[KnowledgeDocumentRecord]:
+        record = self.get_document(account_id, document_id)
+        if not record:
+            return None
+
+        normalized_status = _normalize_processing_status(processing_status)
+        now = _utc_now_iso()
+        updated_record = replace(
+            record,
+            processing_status=normalized_status,
+            processing_error=(
+                str(processing_error)
+                if processing_error is not None
+                else (
+                    record.processing_error
+                    if normalized_status == DOCUMENT_PROCESSING_STATUS_FAILED
+                    else ""
+                )
+            ),
+            processing_started_at=(
+                processing_started_at
+                if processing_started_at is not None
+                else (
+                    record.processing_started_at
+                    or now
+                )
+            ),
+            processing_completed_at=(
+                processing_completed_at
+                if processing_completed_at is not None
+                else (
+                    now if normalized_status == DOCUMENT_PROCESSING_STATUS_READY else None
+                )
+            ),
+            updated_at=now,
+        )
+        self._write_document_record(updated_record)
+        return updated_record
 
     def delete_document(self, account_id: str, document_id: str) -> None:
         record = self.get_document(account_id, document_id)
@@ -665,3 +784,35 @@ class KnowledgeDocumentRegistry:
 
         shutil.copy2(path, target)
         return str(target)
+
+
+@lru_cache(maxsize=4)
+def _cached_registry(workspace_path: str) -> KnowledgeDocumentRegistry:
+    return KnowledgeDocumentRegistry(workspace_path)
+
+
+def get_default_knowledge_document_registry() -> KnowledgeDocumentRegistry:
+    from openviking_cli.utils.config.open_viking_config import get_openviking_config
+
+    workspace_path = str(get_openviking_config().storage.workspace)
+    return _cached_registry(workspace_path)
+
+
+def update_default_document_processing_status(
+    *,
+    account_id: str,
+    document_id: str,
+    processing_status: str,
+    processing_error: Optional[str] = None,
+    processing_started_at: Optional[str] = None,
+    processing_completed_at: Optional[str] = None,
+) -> Optional[KnowledgeDocumentRecord]:
+    registry = get_default_knowledge_document_registry()
+    return registry.update_document_processing_status(
+        account_id,
+        document_id,
+        processing_status=processing_status,
+        processing_error=processing_error,
+        processing_started_at=processing_started_at,
+        processing_completed_at=processing_completed_at,
+    )

@@ -168,7 +168,13 @@ class EmbeddingTaskTracker:
         if record_to_finalize is not None:
             await self._run_on_complete(semantic_msg_id, record_to_finalize)
 
-    async def decrement(self, semantic_msg_id: str) -> Optional[int]:
+    async def decrement(
+        self,
+        semantic_msg_id: str,
+        *,
+        failed: bool = False,
+        error: str = "",
+    ) -> Optional[int]:
         """Decrement the remaining task count for a SemanticMsg.
 
         This method should be called when an embedding task is completed.
@@ -187,6 +193,12 @@ class EmbeddingTaskTracker:
             record = self._tasks.get(semantic_msg_id)
             if record is None:
                 return None
+
+            if failed:
+                record.metadata["failed_count"] = int(record.metadata.get("failed_count", 0)) + 1
+                errors = record.metadata.setdefault("errors", [])
+                if error:
+                    errors.append(str(error))
 
             record.remaining -= 1
             remaining = record.remaining

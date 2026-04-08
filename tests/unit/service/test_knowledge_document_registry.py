@@ -34,6 +34,8 @@ def test_registry_persists_source_copy_and_deletes_it(tmp_path: Path):
     assert record.document_id
     assert record.folder_path == "产品资料/发版说明"
     assert record.original_storage_path is not None
+    assert record.processing_status == "ready"
+    assert record.processing_completed_at is not None
 
     copied_path = Path(record.original_storage_path)
     assert copied_path.exists()
@@ -145,3 +147,39 @@ def test_registry_renames_folder_and_updates_descendants(tmp_path: Path):
     assert updated_a.resource_root_uri == "viking://resources/平台资料/总览"
     assert updated_b.folder_path == "平台资料/接口文档"
     assert updated_b.resource_root_uri == "viking://resources/平台资料/接口文档/openviking/support-bot"
+
+
+def test_registry_updates_document_processing_status(tmp_path: Path):
+    registry = KnowledgeDocumentRegistry(str(tmp_path / "workspace"))
+    source = tmp_path / "guide.md"
+    source.write_text("# guide\n", encoding="utf-8")
+
+    record = registry.upsert_document(
+        account_id="acct",
+        source_path=str(source),
+        resource_root_uri="viking://resources/guide",
+        processing_status="processing",
+    )
+
+    assert record.processing_status == "processing"
+    assert record.processing_completed_at is None
+
+    failed = registry.update_document_processing_status(
+        "acct",
+        record.document_id,
+        processing_status="failed",
+        processing_error="embedding failed",
+    )
+    assert failed is not None
+    assert failed.processing_status == "failed"
+    assert failed.processing_error == "embedding failed"
+
+    ready = registry.update_document_processing_status(
+        "acct",
+        record.document_id,
+        processing_status="ready",
+    )
+    assert ready is not None
+    assert ready.processing_status == "ready"
+    assert ready.processing_error == ""
+    assert ready.processing_completed_at is not None

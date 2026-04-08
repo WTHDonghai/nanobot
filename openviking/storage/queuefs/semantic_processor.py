@@ -23,6 +23,10 @@ from openviking.parse.parsers.media.utils import (
 )
 from openviking.prompts import render_prompt
 from openviking.server.identity import RequestContext, Role
+from openviking.service.knowledge_document_registry import (
+    DOCUMENT_PROCESSING_STATUS_FAILED,
+    update_default_document_processing_status,
+)
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.semantic_dag import DagStats, SemanticDagExecutor
 from openviking.storage.queuefs.semantic_msg import SemanticMsg
@@ -302,6 +306,7 @@ class SemanticProcessor(DequeueHandlerBase):
                         incremental_update=is_incremental,
                         target_uri=msg.target_uri,
                         semantic_msg_id=msg.id,
+                        document_id=msg.document_id,
                         recursive=msg.recursive,
                         lifecycle_lock_handle_id=msg.lifecycle_lock_handle_id,
                         is_code_repo=msg.is_code_repo,
@@ -332,6 +337,13 @@ class SemanticProcessor(DequeueHandlerBase):
                 self._circuit_breaker.record_failure(e)
                 if msg is not None:
                     self._merge_request_stats(msg.telemetry_id, error_count=1)
+                    if msg.document_id:
+                        update_default_document_processing_status(
+                            account_id=msg.account_id,
+                            document_id=msg.document_id,
+                            processing_status=DOCUMENT_PROCESSING_STATUS_FAILED,
+                            processing_error=str(e),
+                        )
                 self.report_error(str(e), data)
             else:
                 # Transient or unknown — re-enqueue for retry
@@ -346,6 +358,13 @@ class SemanticProcessor(DequeueHandlerBase):
                     except Exception as requeue_err:
                         logger.error(f"Failed to re-enqueue semantic message: {requeue_err}")
                         self._merge_request_stats(msg.telemetry_id, error_count=1)
+                        if msg.document_id:
+                            update_default_document_processing_status(
+                                account_id=msg.account_id,
+                                document_id=msg.document_id,
+                                processing_status=DOCUMENT_PROCESSING_STATUS_FAILED,
+                                processing_error=str(e),
+                            )
                         self.report_error(str(e), data)
                         return None
                     self.report_success()
