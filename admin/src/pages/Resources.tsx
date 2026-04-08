@@ -57,8 +57,33 @@ interface UploadItem {
 type KnowledgeEntry = KnowledgeFolder | KnowledgeDocument;
 type DrawerMode = 'upload' | 'url' | 'new-folder' | 'rename-folder' | 'move-document' | null;
 type ViewMode = 'icon' | 'list';
+type ContextMenuMode = 'workspace' | 'folder' | 'document';
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  mode: ContextMenuMode;
+  targetPath: string;
+  entry: KnowledgeEntry | null;
+}
+
+type ContextMenuAction =
+  | {
+      kind: 'action';
+      key: string;
+      label: string;
+      icon: React.ReactNode;
+      onSelect: () => void;
+      danger?: boolean;
+    }
+  | {
+      kind: 'separator';
+      key: string;
+    };
 
 const ROOT_LABEL = '资源库';
+const CONTEXT_MENU_WIDTH = 228;
+const CONTEXT_MENU_GUTTER = 12;
 
 const formatTime = (value: string) => {
   const date = new Date(value);
@@ -160,7 +185,7 @@ const ConfirmModal = ({
   onCancel: () => void;
 }) => (
   <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
-    <div className="modal">
+    <div className="modal" onClick={(e) => e.stopPropagation()}>
       <div className="modal-title fm-danger-title">
         <AlertTriangle size={18} /> 操作确认
       </div>
@@ -225,7 +250,7 @@ const PreviewModal = ({
 
   return (
     <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal" style={{ maxWidth: 840, width: '90%' }}>
+      <div className="modal" style={{ maxWidth: 840, width: '90%' }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <Eye size={18} /> 预览: {document.display_name}
         </div>
@@ -283,7 +308,7 @@ const UrlDrawer = ({
 
   return (
     <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="fm-drawer open">
+      <div className="fm-drawer open" onClick={(e) => e.stopPropagation()}>
         <div className="fm-drawer-header">
           <div className="fm-drawer-title"><LinkIcon size={18} /> 添加远程文档</div>
           <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
@@ -291,6 +316,9 @@ const UrlDrawer = ({
           </button>
         </div>
         <div className="fm-drawer-body">
+          <div className="fm-drawer-desc">
+            文档会被导入到 <strong>{formatPath(currentPath)}</strong>。
+          </div>
           <form id="fm-url-form" onSubmit={handleSubmit}>
             <div className="form-group">
               <label>远程地址</label>
@@ -353,7 +381,7 @@ const NewFolderDrawer = ({
 
   return (
     <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="fm-drawer open">
+      <div className="fm-drawer open" onClick={(e) => e.stopPropagation()}>
         <div className="fm-drawer-header">
           <div className="fm-drawer-title"><FolderPlus size={18} /> 新建目录</div>
           <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
@@ -361,6 +389,9 @@ const NewFolderDrawer = ({
           </button>
         </div>
         <div className="fm-drawer-body">
+          <div className="fm-drawer-desc">
+            新目录将创建在 <strong>{formatPath(currentPath)}</strong> 下。
+          </div>
           <form id="fm-folder-form" onSubmit={handleSubmit}>
             <div className="form-group">
               <label>目录名称</label>
@@ -428,7 +459,7 @@ const RenameFolderDrawer = ({
 
   return (
     <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="fm-drawer open">
+      <div className="fm-drawer open" onClick={(e) => e.stopPropagation()}>
         <div className="fm-drawer-header">
           <div className="fm-drawer-title"><FolderOpen size={18} /> 重命名目录</div>
           <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
@@ -508,7 +539,7 @@ const MoveDocumentDrawer = ({
 
   return (
     <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="fm-drawer open">
+      <div className="fm-drawer open" onClick={(e) => e.stopPropagation()}>
         <div className="fm-drawer-header">
           <div className="fm-drawer-title"><FileText size={18} /> 移动文档</div>
           <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
@@ -606,7 +637,7 @@ const UploadDrawer = ({
 
   return (
     <div className="fm-drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="fm-drawer open">
+      <div className="fm-drawer open" onClick={(e) => e.stopPropagation()}>
         <div className="fm-drawer-header">
           <div className="fm-drawer-title"><Upload size={18} /> 上传原始文档</div>
           <button className="btn btn-ghost btn-sm" style={{ padding: '4px' }} onClick={onClose}>
@@ -614,6 +645,9 @@ const UploadDrawer = ({
           </button>
         </div>
         <div className="fm-drawer-body">
+          <div className="fm-drawer-desc">
+            选中的文件会上传到 <strong>{formatPath(currentPath)}</strong>。
+          </div>
           <div
             className={`fm-dropzone ${dragOver ? 'drag-over' : ''}`}
             onDrop={(e) => {
@@ -693,6 +727,34 @@ const Resources = () => {
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('icon');
   const [currentPath, setCurrentPath] = useState('');
+  const [drawerPath, setDrawerPath] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [inspectorWidth, setInspectorWidth] = useState(320);
+  const isResizingInspector = useRef(false);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizingInspector.current) return;
+      e.preventDefault();
+      const newWidth = document.body.clientWidth - e.clientX;
+      if (newWidth > 200 && newWidth < 800) {
+        setInspectorWidth(newWidth);
+      }
+    };
+    const handleMouseUp = () => {
+      if (isResizingInspector.current) {
+        isResizingInspector.current = false;
+        document.body.style.cursor = '';
+      }
+    };
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
 
   const showToast = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ msg, type });
@@ -751,6 +813,45 @@ const Resources = () => {
     loadLibrary();
   }, [loadLibrary]);
 
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const closeMenu = () => {
+      setContextMenu(null);
+    };
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (event && contextMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      closeMenu();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeMenu();
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', closeMenu);
+    window.addEventListener('scroll', closeMenu, true);
+
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', closeMenu);
+      window.removeEventListener('scroll', closeMenu, true);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    if (drawer || previewDoc || confirmDelete) {
+      setContextMenu(null);
+    }
+  }, [confirmDelete, drawer, previewDoc]);
+
   const folderMap = useMemo(() => (
     new Map(folders.map((folder) => [entryKey(folder), folder]))
   ), [folders]);
@@ -764,9 +865,29 @@ const Resources = () => {
     return folderMap.get(selectedKey) || documentMap.get(selectedKey) || null;
   }, [documentMap, folderMap, selectedKey]);
 
+  const activeDrawerPath = drawerPath ?? currentPath;
+
   const openPath = useCallback((path: string) => {
     setCurrentPath(path);
     setSelectedKey(null);
+    setContextMenu(null);
+  }, []);
+
+  const closeDrawer = useCallback(() => {
+    setDrawer(null);
+    setDrawerPath(null);
+  }, []);
+
+  const openPathDrawer = useCallback((nextDrawer: 'upload' | 'url' | 'new-folder', path: string) => {
+    setDrawerPath(path);
+    setDrawer(nextDrawer);
+    setContextMenu(null);
+  }, []);
+
+  const revealDocument = useCallback((document: KnowledgeDocument) => {
+    setCurrentPath(document.folder_path || '');
+    setSelectedKey(entryKey(document));
+    setContextMenu(null);
   }, []);
 
   const remapPathAfterFolderRename = useCallback((path: string, oldPath: string, newPath: string) => {
@@ -814,12 +935,43 @@ const Resources = () => {
     [...visibleFolders, ...visibleDocuments]
   ), [visibleDocuments, visibleFolders]);
 
+  const folderStatsByPath = useMemo(() => {
+    const stats = new Map<string, { childFolderCount: number; childDocumentCount: number }>();
+
+    for (const folder of folders) {
+      stats.set(folder.path, { childFolderCount: 0, childDocumentCount: 0 });
+    }
+
+    for (const folder of folders) {
+      const parentStats = stats.get(folder.parent_path);
+      if (parentStats) {
+        parentStats.childFolderCount += 1;
+      }
+    }
+
+    for (const document of documents) {
+      const parentStats = stats.get(document.folder_path || '');
+      if (parentStats) {
+        parentStats.childDocumentCount += 1;
+      }
+    }
+
+    return stats;
+  }, [documents, folders]);
+
   const currentFolderStats = useMemo(() => {
     if (!isFolderEntry(selectedEntry)) return null;
-    const childFolderCount = folders.filter((folder) => folder.parent_path === selectedEntry.path).length;
-    const childDocumentCount = documents.filter((document) => document.folder_path === selectedEntry.path).length;
-    return { childFolderCount, childDocumentCount };
-  }, [documents, folders, selectedEntry]);
+    return folderStatsByPath.get(selectedEntry.path) || { childFolderCount: 0, childDocumentCount: 0 };
+  }, [folderStatsByPath, selectedEntry]);
+
+  const isFolderEmpty = useCallback((folder: KnowledgeFolder) => {
+    const stats = folderStatsByPath.get(folder.path);
+    return !stats || (stats.childFolderCount === 0 && stats.childDocumentCount === 0);
+  }, [folderStatsByPath]);
+
+  const canDeleteSelectedFolder = useMemo(() => (
+    isFolderEntry(selectedEntry) ? isFolderEmpty(selectedEntry) : false
+  ), [isFolderEmpty, selectedEntry]);
 
   const handleCopy = async (value: string, successMsg: string) => {
     try {
@@ -830,7 +982,7 @@ const Resources = () => {
     }
   };
 
-  const handleCreateFolder = async (name: string) => {
+  const handleCreateFolder = async (name: string, targetPath = currentPath) => {
     const data = await fetchApi<{ result: KnowledgeFolder }>(
       serverUrl,
       apiKey,
@@ -839,7 +991,7 @@ const Resources = () => {
         method: 'POST',
         account: accountId || undefined,
         user: userId || undefined,
-        body: JSON.stringify({ name, parent_path: currentPath }),
+        body: JSON.stringify({ name, parent_path: targetPath }),
       },
     );
     const folder = data.result;
@@ -849,18 +1001,18 @@ const Resources = () => {
     showToast(`已创建目录：${folder.name}`);
   };
 
-  const handleAddUrl = async (url: string) => {
+  const handleAddUrl = async (url: string, targetPath = currentPath) => {
     await fetchApi(serverUrl, apiKey, '/api/v1/resources', {
       method: 'POST',
       account: accountId || undefined,
       user: userId || undefined,
-      body: JSON.stringify({ path: url, wait: false, folder_path: currentPath }),
+      body: JSON.stringify({ path: url, wait: false, folder_path: targetPath }),
     });
     await loadLibrary();
-    showToast(`文档已导入到 ${formatPath(currentPath)}`);
+    showToast(`文档已导入到 ${formatPath(targetPath)}`);
   };
 
-  const handleUploadFiles = async (files: File[]) => {
+  const handleUploadFiles = async (files: File[], targetPath = currentPath) => {
     let done = 0;
     let failures = 0;
     let firstError = '';
@@ -872,7 +1024,7 @@ const Resources = () => {
           method: 'POST',
           account: accountId || undefined,
           user: userId || undefined,
-          body: JSON.stringify({ temp_file_id: tempId, wait: false, folder_path: currentPath }),
+          body: JSON.stringify({ temp_file_id: tempId, wait: false, folder_path: targetPath }),
         });
         done += 1;
       } catch (err: any) {
@@ -883,7 +1035,7 @@ const Resources = () => {
 
     await loadLibrary();
     if (failures === 0) {
-      showToast(`已导入 ${done} 个文档到 ${formatPath(currentPath)}`);
+      showToast(`已导入 ${done} 个文档到 ${formatPath(targetPath)}`);
       return;
     }
 
@@ -932,6 +1084,11 @@ const Resources = () => {
 
   const doDelete = async () => {
     if (!confirmDelete) return;
+    if (isFolderEntry(confirmDelete) && !isFolderEmpty(confirmDelete)) {
+      showToast('仅空目录允许删除，请先清空子目录和文档', 'error');
+      setConfirmDelete(null);
+      return;
+    }
     const key = entryKey(confirmDelete);
     setDeletingKey(key);
     try {
@@ -963,15 +1120,270 @@ const Resources = () => {
     }
   };
 
+  const requestDeleteEntry = useCallback((entry: KnowledgeEntry) => {
+    if (isFolderEntry(entry) && !isFolderEmpty(entry)) {
+      showToast('仅空目录允许删除，请先清空子目录和文档', 'error');
+      return;
+    }
+    setConfirmDelete(entry);
+  }, [isFolderEmpty, showToast]);
+
+  const openWorkspaceContextMenu = useCallback((event: React.MouseEvent<HTMLElement>, targetPath = currentPath) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('[data-entry-key]')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedKey(null);
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      mode: 'workspace',
+      targetPath,
+      entry: null,
+    });
+  }, [currentPath]);
+
+  const openEntryContextMenu = useCallback((event: React.MouseEvent<HTMLElement>, entry: KnowledgeEntry) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedKey(entryKey(entry));
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      mode: isFolderEntry(entry) ? 'folder' : 'document',
+      targetPath: isFolderEntry(entry) ? entry.path : entry.folder_path || '',
+      entry,
+    });
+  }, []);
+
+  const contextMenuItems = useMemo<ContextMenuAction[]>(() => {
+    if (!contextMenu) return [];
+
+    if (contextMenu.mode === 'workspace') {
+      return [
+        {
+          kind: 'action',
+          key: 'new-folder',
+          label: '新建目录',
+          icon: <FolderPlus size={15} />,
+          onSelect: () => openPathDrawer('new-folder', contextMenu.targetPath),
+        },
+        {
+          kind: 'action',
+          key: 'upload',
+          label: '上传文档',
+          icon: <Upload size={15} />,
+          onSelect: () => openPathDrawer('upload', contextMenu.targetPath),
+        },
+        {
+          kind: 'action',
+          key: 'url',
+          label: '添加远程文档',
+          icon: <LinkIcon size={15} />,
+          onSelect: () => openPathDrawer('url', contextMenu.targetPath),
+        },
+        { kind: 'separator', key: 'workspace-separator' },
+        {
+          kind: 'action',
+          key: 'refresh',
+          label: '刷新资源库',
+          icon: <RefreshCw size={15} />,
+          onSelect: () => {
+            setContextMenu(null);
+            void loadLibrary();
+          },
+        },
+      ];
+    }
+
+    if (contextMenu.mode === 'folder' && isFolderEntry(contextMenu.entry)) {
+      const folder = contextMenu.entry;
+      const canDeleteFolder = isFolderEmpty(folder);
+      return [
+        {
+          kind: 'action',
+          key: 'open-folder',
+          label: '打开目录',
+          icon: <FolderOpen size={15} />,
+          onSelect: () => openPath(folder.path),
+        },
+        {
+          kind: 'action',
+          key: 'new-child-folder',
+          label: '新建子目录',
+          icon: <FolderPlus size={15} />,
+          onSelect: () => {
+            setCurrentPath(folder.path);
+            openPathDrawer('new-folder', folder.path);
+          },
+        },
+        {
+          kind: 'action',
+          key: 'upload-to-folder',
+          label: '上传到此处',
+          icon: <Upload size={15} />,
+          onSelect: () => {
+            setCurrentPath(folder.path);
+            openPathDrawer('upload', folder.path);
+          },
+        },
+        {
+          kind: 'action',
+          key: 'add-remote-to-folder',
+          label: '导入远程文档',
+          icon: <LinkIcon size={15} />,
+          onSelect: () => {
+            setCurrentPath(folder.path);
+            openPathDrawer('url', folder.path);
+          },
+        },
+        { kind: 'separator', key: 'folder-separator' },
+        {
+          kind: 'action',
+          key: 'copy-folder-path',
+          label: '复制目录路径',
+          icon: <Copy size={15} />,
+          onSelect: () => {
+            setContextMenu(null);
+            void handleCopy(formatPath(folder.path), '目录路径已复制');
+          },
+        },
+        {
+          kind: 'action',
+          key: 'rename-folder',
+          label: '重命名目录',
+          icon: <FolderOpen size={15} />,
+          onSelect: () => {
+            setContextMenu(null);
+            setDrawer('rename-folder');
+          },
+        },
+        ...(canDeleteFolder ? [{
+          kind: 'action' as const,
+          key: 'delete-folder',
+          label: '删除目录',
+          icon: <Trash2 size={15} />,
+          danger: true,
+          onSelect: () => {
+            setContextMenu(null);
+            requestDeleteEntry(folder);
+          },
+        }] : []),
+      ];
+    }
+
+    if (contextMenu.mode === 'document' && isDocumentEntry(contextMenu.entry)) {
+      const document = contextMenu.entry;
+      return [
+        {
+          kind: 'action',
+          key: 'preview-document',
+          label: '预览文档',
+          icon: <Eye size={15} />,
+          onSelect: () => {
+            setContextMenu(null);
+            setPreviewDoc(document);
+          },
+        },
+        {
+          kind: 'action',
+          key: 'open-document-folder',
+          label: '打开所在目录',
+          icon: <FolderOpen size={15} />,
+          onSelect: () => revealDocument(document),
+        },
+        {
+          kind: 'action',
+          key: 'move-document',
+          label: '移动文档',
+          icon: <FileText size={15} />,
+          onSelect: () => {
+            setContextMenu(null);
+            setDrawer('move-document');
+          },
+        },
+        { kind: 'separator', key: 'document-separator' },
+        {
+          kind: 'action',
+          key: 'copy-document-source',
+          label: '复制来源地址',
+          icon: <Copy size={15} />,
+          onSelect: () => {
+            setContextMenu(null);
+            void handleCopy(document.source_ref, '来源已复制');
+          },
+        },
+        {
+          kind: 'action',
+          key: 'delete-document',
+          label: '删除文档',
+          icon: <Trash2 size={15} />,
+          danger: true,
+          onSelect: () => {
+            setContextMenu(null);
+            requestDeleteEntry(document);
+          },
+        },
+      ];
+    }
+
+    return [];
+  }, [contextMenu, handleCopy, isFolderEmpty, loadLibrary, openPath, openPathDrawer, requestDeleteEntry, revealDocument]);
+
+  const contextMenuTitle = useMemo(() => {
+    if (!contextMenu) return '';
+    if (contextMenu.mode === 'workspace') {
+      return `当前位置 ${formatPath(contextMenu.targetPath)}`;
+    }
+    if (contextMenu.mode === 'folder' && isFolderEntry(contextMenu.entry)) {
+      return contextMenu.entry.name;
+    }
+    if (contextMenu.mode === 'document' && isDocumentEntry(contextMenu.entry)) {
+      return contextMenu.entry.display_name;
+    }
+    return '';
+  }, [contextMenu]);
+
+  const contextMenuSubtitle = useMemo(() => {
+    if (!contextMenu) return '';
+    if (contextMenu.mode === 'workspace') {
+      return '空白区域操作';
+    }
+    if (contextMenu.mode === 'folder') {
+      return formatPath(contextMenu.targetPath);
+    }
+    if (contextMenu.mode === 'document' && isDocumentEntry(contextMenu.entry)) {
+      return formatPath(contextMenu.entry.folder_path || '');
+    }
+    return '';
+  }, [contextMenu]);
+
+  const contextMenuPosition = useMemo(() => {
+    if (!contextMenu || typeof window === 'undefined') return null;
+    const actionCount = contextMenuItems.filter((item) => item.kind === 'action').length;
+    const estimatedHeight = Math.max(156, actionCount * 42 + 78);
+    return {
+      left: Math.max(
+        CONTEXT_MENU_GUTTER,
+        Math.min(contextMenu.x, window.innerWidth - CONTEXT_MENU_WIDTH - CONTEXT_MENU_GUTTER),
+      ),
+      top: Math.max(
+        CONTEXT_MENU_GUTTER,
+        Math.min(contextMenu.y, window.innerHeight - estimatedHeight - CONTEXT_MENU_GUTTER),
+      ),
+    };
+  }, [contextMenu, contextMenuItems]);
+
   const emptyState = (
     <div className="fm-state">
       <FolderOpen size={34} style={{ opacity: 0.35 }} />
       <span>{currentPath ? '这个目录下还没有内容' : '资源库还是空的'}</span>
+      <span className="fm-state-tip">双击目录可以进入，右键空白处可以新建目录、上传文档或导入远程内容。</span>
       <div className="fm-empty-actions">
-        <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); setDrawer('new-folder'); }}>
+        <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); openPathDrawer('new-folder', currentPath); }}>
           <FolderPlus size={14} /> 新建目录
         </button>
-        <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); setDrawer('upload'); }}>
+        <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); openPathDrawer('upload', currentPath); }}>
           <Upload size={14} /> 上传文档
         </button>
       </div>
@@ -979,7 +1391,7 @@ const Resources = () => {
   );
 
   return (
-    <div className="fm-root" onClick={() => setSelectedKey(null)}>
+    <div className="fm-root" onClick={() => { setSelectedKey(null); setContextMenu(null); }}>
       <div className="fm-toolbar" onClick={(e) => e.stopPropagation()}>
         <div className="fm-breadcrumb">
           {breadcrumbSegments.map((segment, index) => (
@@ -1002,11 +1414,11 @@ const Resources = () => {
               <FolderOpen size={15} /> 重命名目录
             </button>
           )}
-          {isDocumentEntry(selectedEntry) && (
+          {/*isDocumentEntry(selectedEntry) && (
             <button className="btn btn-ghost" onClick={() => setDrawer('move-document')}>
               <FileText size={15} /> 移动文档
             </button>
-          )}
+          )*/}
           <button className="fm-nav-btn" onClick={loadLibrary} disabled={loading} title="刷新">
             <RefreshCw size={15} className={loading ? 'fm-spin' : ''} />
           </button>
@@ -1026,31 +1438,32 @@ const Resources = () => {
               <List size={15} />
             </button>
           </div>
-          <button className="btn btn-ghost" onClick={() => setDrawer('new-folder')}>
+          <button className="btn btn-ghost" onClick={() => openPathDrawer('new-folder', currentPath)}>
             <FolderPlus size={15} /> 新建目录
           </button>
-          <button className="btn btn-ghost" onClick={() => setDrawer('url')}>
+          <button className="btn btn-ghost" onClick={() => openPathDrawer('url', currentPath)}>
             <LinkIcon size={15} /> 添加远程文档
           </button>
-          <button className="btn btn-primary" onClick={() => setDrawer('upload')}>
+          <button className="btn btn-primary" onClick={() => openPathDrawer('upload', currentPath)}>
             <Upload size={15} /> 上传文档
           </button>
         </div>
       </div>
 
-      <div className="fm-body">
+      <div className="fm-body" style={{ gridTemplateColumns: `232px minmax(0, 1fr) auto ${inspectorWidth}px` }}>
         <aside className="fm-sidebar" onClick={(e) => e.stopPropagation()}>
           <div className="fm-sidebar-title">目录树</div>
           <div className="fm-sidebar-actions">
-            <button className="btn btn-ghost btn-sm" onClick={() => setDrawer('new-folder')}>
+            <button className="btn btn-ghost btn-sm" onClick={() => openPathDrawer('new-folder', currentPath)}>
               <FolderPlus size={14} /> 新建目录
             </button>
           </div>
 
-          <div className="fm-location-list">
+          <div className="fm-location-list" onContextMenu={(e) => openWorkspaceContextMenu(e)}>
             <button
               className={`fm-side-item ${currentPath === '' ? 'active' : ''}`}
               onClick={() => openPath('')}
+              onContextMenu={(e) => openWorkspaceContextMenu(e, '')}
             >
               <span className="fm-side-icon"><Home size={16} /></span>
               <span className="fm-side-label">{ROOT_LABEL}</span>
@@ -1059,9 +1472,11 @@ const Resources = () => {
             {folderTree.map((folder) => (
               <button
                 key={folder.folder_id}
+                data-entry-key={entryKey(folder)}
                 className={`fm-side-item fm-side-folder-tree ${currentPath === folder.path ? 'active' : ''}`}
                 style={{ paddingLeft: `${12 + folder.depth * 16}px` }}
                 onClick={() => openPath(folder.path)}
+                onContextMenu={(e) => openEntryContextMenu(e, folder)}
                 title={folder.path}
               >
                 <span className="fm-side-icon"><FolderOpen size={16} /></span>
@@ -1071,7 +1486,11 @@ const Resources = () => {
           </div>
         </aside>
 
-        <section className="fm-content">
+        <section className="fm-content" onContextMenu={(e) => openWorkspaceContextMenu(e)}>
+          <div className="fm-content-guide">
+            <span className="fm-content-guide-title">资源管理器</span>
+            <span className="fm-content-guide-text">双击打开项目，右键查看更多操作，操作默认落在当前目录。</span>
+          </div>
           {loading ? (
             <div className="fm-state">
               <div className="loader" />
@@ -1093,6 +1512,7 @@ const Resources = () => {
                 return (
                   <div
                     key={entryKey(entry)}
+                    data-entry-key={entryKey(entry)}
                     className={`fm-icon-item ${selected ? 'selected' : ''}`}
                     onClick={(e) => { e.stopPropagation(); setSelectedKey(entryKey(entry)); }}
                     onDoubleClick={(e) => {
@@ -1103,17 +1523,18 @@ const Resources = () => {
                         setPreviewDoc(entry);
                       }
                     }}
+                    onContextMenu={(e) => openEntryContextMenu(e, entry)}
                     title={folder ? entry.path : entry.display_name}
                   >
                     <div className="fm-icon-img">
                       {folder ? <FolderOpen size={44} className="fm-folder-icon" /> : <FileText size={40} className="fm-file-icon" />}
                     </div>
                     <span className="fm-icon-name">{folder ? entry.name : entry.display_name}</span>
-                    <div className="fm-icon-meta">
+                    {/*<div className="fm-icon-meta">
                       <span className="fm-badge">
                         {folder ? '目录' : formatSourceType(entry.source_type)}
                       </span>
-                    </div>
+                    </div>*/}
                   </div>
                 );
               })}
@@ -1123,7 +1544,7 @@ const Resources = () => {
               <thead>
                 <tr>
                   <th>名称</th>
-                  <th>类型</th>
+                  {/*<th>类型</th>*/}
                   <th>格式</th>
                   <th>更新时间</th>
                 </tr>
@@ -1135,6 +1556,7 @@ const Resources = () => {
                   return (
                     <tr
                       key={entryKey(entry)}
+                      data-entry-key={entryKey(entry)}
                       className={`fm-list-row ${selected ? 'selected' : ''}`}
                       onClick={(e) => { e.stopPropagation(); setSelectedKey(entryKey(entry)); }}
                       onDoubleClick={(e) => {
@@ -1145,6 +1567,7 @@ const Resources = () => {
                           setPreviewDoc(entry);
                         }
                       }}
+                      onContextMenu={(e) => openEntryContextMenu(e, entry)}
                       title={folder ? entry.path : entry.display_name}
                     >
                       <td>
@@ -1153,7 +1576,7 @@ const Resources = () => {
                           <span>{folder ? entry.name : entry.display_name}</span>
                         </div>
                       </td>
-                      <td>{folder ? '目录' : formatSourceType(entry.source_type)}</td>
+                      {/*<td>{folder ? '目录' : formatSourceType(entry.source_type)}</td>*/}
                       <td>{folder ? '--' : entry.source_format || '待识别'}</td>
                       <td>{formatTime(entry.updated_at)}</td>
                     </tr>
@@ -1164,6 +1587,14 @@ const Resources = () => {
           )}
         </section>
 
+        <div 
+          className="fm-resizer" 
+          onMouseDown={() => {
+            isResizingInspector.current = true;
+            document.body.style.cursor = 'col-resize';
+          }}
+        />
+
         <aside className="fm-inspector" onClick={(e) => e.stopPropagation()}>
           {selectedEntry ? (
             isFolderEntry(selectedEntry) ? (
@@ -1173,7 +1604,7 @@ const Resources = () => {
                     <FolderOpen size={18} />
                     <span>{selectedEntry.name}</span>
                   </div>
-                  <span className="fm-badge">目录</span>
+                  {/*<span className="fm-badge">目录</span>*/}
                 </div>
 
                 <div className="fm-inspector-actions">
@@ -1185,40 +1616,51 @@ const Resources = () => {
                   </button>
                   <button className="btn btn-ghost btn-sm" onClick={() => {
                     openPath(selectedEntry.path);
-                    setDrawer('new-folder');
+                    openPathDrawer('new-folder', selectedEntry.path);
                   }}>
                     <FolderPlus size={14} /> 新建子目录
                   </button>
-                  <button className="btn btn-danger btn-sm" disabled={deletingKey === entryKey(selectedEntry)} onClick={() => setConfirmDelete(selectedEntry)}>
-                    <Trash2 size={14} /> 删除
-                  </button>
+                  {canDeleteSelectedFolder && (
+                    <button className="btn btn-danger btn-sm" disabled={deletingKey === entryKey(selectedEntry)} onClick={() => requestDeleteEntry(selectedEntry)}>
+                      <Trash2 size={14} /> 删除
+                    </button>
+                  )}
                 </div>
 
-                <div className="fm-detail-block">
-                  <div className="fm-detail-label">目录路径</div>
-                  <div className="fm-detail-value">{formatPath(selectedEntry.path)}</div>
-                  <button className="btn btn-ghost btn-sm" onClick={() => handleCopy(formatPath(selectedEntry.path), '目录路径已复制')}>
-                    <Copy size={13} /> 复制路径
-                  </button>
-                </div>
-
-                <div className="fm-detail-grid">
-                  <div>
-                    <div className="fm-detail-label">子目录</div>
-                    <div className="fm-detail-value">{currentFolderStats?.childFolderCount ?? 0}</div>
+                <div className="fm-prop-list">
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">目录路径</span>
+                    <div className="fm-prop-value">
+                      <span>{formatPath(selectedEntry.path)}</span>
+                      <button className="btn btn-ghost btn-sm" title="复制路径" onClick={() => handleCopy(formatPath(selectedEntry.path), '目录路径已复制')}>
+                        <Copy size={13} />
+                      </button>
+                    </div>
                   </div>
-                  <div>
-                    <div className="fm-detail-label">文档</div>
-                    <div className="fm-detail-value">{currentFolderStats?.childDocumentCount ?? 0}</div>
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">子目录</span>
+                    <span className="fm-prop-value">{currentFolderStats?.childFolderCount ?? 0}</span>
                   </div>
-                  <div>
-                    <div className="fm-detail-label">创建时间</div>
-                    <div className="fm-detail-value">{formatTime(selectedEntry.created_at)}</div>
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">文档</span>
+                    <span className="fm-prop-value">{currentFolderStats?.childDocumentCount ?? 0}</span>
                   </div>
-                  <div>
-                    <div className="fm-detail-label">更新时间</div>
-                    <div className="fm-detail-value">{formatTime(selectedEntry.updated_at)}</div>
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">创建时间</span>
+                    <span className="fm-prop-value">{formatTime(selectedEntry.created_at)}</span>
                   </div>
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">更新时间</span>
+                    <span className="fm-prop-value">{formatTime(selectedEntry.updated_at)}</span>
+                  </div>
+                  {!canDeleteSelectedFolder && (
+                    <div className="fm-prop-item vertical">
+                      <span className="fm-prop-label">删除限制</span>
+                      <div className="fm-prop-value">
+                        请先清空子目录和文档，再删除该目录。
+                      </div>
+                    </div>
+                  )}
                 </div>
               </>
             ) : (
@@ -1228,75 +1670,82 @@ const Resources = () => {
                     <FileText size={18} />
                     <span>{selectedEntry.display_name}</span>
                   </div>
-                  <span className="fm-badge">{formatSourceType(selectedEntry.source_type)}</span>
+                  {/*<span className="fm-badge">{formatSourceType(selectedEntry.source_type)}</span>*/}
                 </div>
 
                 <div className="fm-inspector-actions">
                   <button className="btn btn-ghost btn-sm" onClick={() => setPreviewDoc(selectedEntry)}>
                     <Eye size={14} /> 预览
                   </button>
-                  <button className="btn btn-ghost btn-sm" onClick={() => setDrawer('move-document')}>
+                  {/*<button className="btn btn-ghost btn-sm" onClick={() => setDrawer('move-document')}>
                     <FileText size={14} /> 移动
-                  </button>
-                  <button
+                  </button>*/}
+                  {/*<button
                     className="btn btn-ghost btn-sm"
                     onClick={() => openPath(selectedEntry.folder_path || '')}
                   >
                     <FolderOpen size={14} /> 打开所在目录
-                  </button>
-                  <button className="btn btn-danger btn-sm" disabled={deletingKey === entryKey(selectedEntry)} onClick={() => setConfirmDelete(selectedEntry)}>
+                  </button>*/}
+                  <button className="btn btn-danger btn-sm" disabled={deletingKey === entryKey(selectedEntry)} onClick={() => requestDeleteEntry(selectedEntry)}>
                     <Trash2 size={14} /> 删除
                   </button>
                 </div>
 
-                <div className="fm-detail-block">
-                  <div className="fm-detail-label">所在目录</div>
-                  <div className="fm-detail-value">{formatPath(selectedEntry.folder_path || '')}</div>
-                </div>
-
-                <div className="fm-detail-block">
-                  <div className="fm-detail-label">来源</div>
-                  <div className="fm-detail-value" title={selectedEntry.source_ref}>{selectedEntry.source_ref}</div>
-                  <button className="btn btn-ghost btn-sm" onClick={() => handleCopy(selectedEntry.source_ref, '来源已复制')}>
-                    <Copy size={13} /> 复制来源
-                  </button>
-                </div>
-
-                <div className="fm-detail-block">
-                  <div className="fm-detail-label">同步到 resource</div>
-                  <div className="fm-detail-value" title={selectedEntry.resource_root_uri}>{selectedEntry.resource_root_uri}</div>
-                  <button className="btn btn-ghost btn-sm" onClick={() => handleCopy(selectedEntry.resource_root_uri, 'resource URI 已复制')}>
-                    <Copy size={13} /> 复制 URI
-                  </button>
-                </div>
-
-                <div className="fm-detail-grid">
-                  <div>
-                    <div className="fm-detail-label">格式</div>
-                    <div className="fm-detail-value">{selectedEntry.source_format || '待识别'}</div>
+                <div className="fm-prop-list">
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">所在目录</span>
+                    <span className="fm-prop-value">{formatPath(selectedEntry.folder_path || '')}</span>
                   </div>
-                  <div>
-                    <div className="fm-detail-label">保存原件</div>
-                    <div className="fm-detail-value">{selectedEntry.has_local_copy ? '是' : '否'}</div>
-                  </div>
-                  <div>
-                    <div className="fm-detail-label">创建时间</div>
-                    <div className="fm-detail-value">{formatTime(selectedEntry.created_at)}</div>
-                  </div>
-                  <div>
-                    <div className="fm-detail-label">更新时间</div>
-                    <div className="fm-detail-value">{formatTime(selectedEntry.updated_at)}</div>
-                  </div>
-                </div>
 
-                {(selectedEntry.reason || selectedEntry.instruction) && (
-                  <div className="fm-detail-block">
-                    <div className="fm-detail-label">备注信息</div>
-                    <div className="fm-detail-value">
-                      {selectedEntry.reason || selectedEntry.instruction}
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">来源</span>
+                    <div className="fm-prop-value">
+                      <span title={selectedEntry.source_ref} className="fm-truncate-text">{selectedEntry.source_ref}</span>
+                      <button className="btn btn-ghost btn-sm" title="复制来源" onClick={() => handleCopy(selectedEntry.source_ref, '来源已复制')}>
+                        <Copy size={13} />
+                      </button>
                     </div>
                   </div>
-                )}
+
+                  {/*<div className="fm-prop-item">
+                    <span className="fm-prop-label">同步到 resource</span>
+                    <div className="fm-prop-value">
+                      <span title={selectedEntry.resource_root_uri} className="fm-truncate-text">{selectedEntry.resource_root_uri}</span>
+                      <button className="btn btn-ghost btn-sm" title="复制 URI" onClick={() => handleCopy(selectedEntry.resource_root_uri, 'resource URI 已复制')}>
+                        <Copy size={13} />
+                      </button>
+                    </div>
+                  </div>*/}
+
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">格式</span>
+                    <span className="fm-prop-value">{selectedEntry.source_format || '待识别'}</span>
+                  </div>
+                  
+                  {/*<div className="fm-prop-item">
+                    <span className="fm-prop-label">保存原件</span>
+                    <span className="fm-prop-value">{selectedEntry.has_local_copy ? '是' : '否'}</span>
+                  </div>*/}
+
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">创建时间</span>
+                    <span className="fm-prop-value">{formatTime(selectedEntry.created_at)}</span>
+                  </div>
+
+                  <div className="fm-prop-item">
+                    <span className="fm-prop-label">更新时间</span>
+                    <span className="fm-prop-value">{formatTime(selectedEntry.updated_at)}</span>
+                  </div>
+
+                  {(selectedEntry.reason || selectedEntry.instruction) && (
+                    <div className="fm-prop-item vertical">
+                      <span className="fm-prop-label">备注信息</span>
+                      <div className="fm-prop-value">
+                        {selectedEntry.reason || selectedEntry.instruction}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </>
             )
           ) : (
@@ -1312,6 +1761,8 @@ const Resources = () => {
         <span>{visibleEntries.length} 个项目</span>
         <span className="fm-statusbar-sep" />
         <span className="fm-status-selected">当前位置: {formatPath(currentPath)}</span>
+        <span className="fm-statusbar-sep" />
+        <span>双击打开 · 右键操作</span>
         {selectedEntry && (
           <>
             <span className="fm-statusbar-sep" />
@@ -1324,29 +1775,29 @@ const Resources = () => {
 
       <UploadDrawer
         open={drawer === 'upload'}
-        onClose={() => setDrawer(null)}
-        currentPath={currentPath}
-        onUploaded={handleUploadFiles}
+        onClose={closeDrawer}
+        currentPath={activeDrawerPath}
+        onUploaded={(files) => handleUploadFiles(files, activeDrawerPath)}
       />
 
       <UrlDrawer
         open={drawer === 'url'}
-        onClose={() => setDrawer(null)}
-        currentPath={currentPath}
-        onSubmitted={handleAddUrl}
+        onClose={closeDrawer}
+        currentPath={activeDrawerPath}
+        onSubmitted={(url) => handleAddUrl(url, activeDrawerPath)}
       />
 
       <NewFolderDrawer
         open={drawer === 'new-folder'}
-        onClose={() => setDrawer(null)}
-        currentPath={currentPath}
-        onSubmitted={handleCreateFolder}
+        onClose={closeDrawer}
+        currentPath={activeDrawerPath}
+        onSubmitted={(name) => handleCreateFolder(name, activeDrawerPath)}
       />
 
       <RenameFolderDrawer
         open={drawer === 'rename-folder'}
         folder={isFolderEntry(selectedEntry) ? selectedEntry : null}
-        onClose={() => setDrawer(null)}
+        onClose={closeDrawer}
         onSubmitted={handleRenameFolder}
       />
 
@@ -1354,9 +1805,41 @@ const Resources = () => {
         open={drawer === 'move-document'}
         document={isDocumentEntry(selectedEntry) ? selectedEntry : null}
         folders={folders}
-        onClose={() => setDrawer(null)}
+        onClose={closeDrawer}
         onSubmitted={handleMoveDocument}
       />
+
+      {contextMenu && contextMenuPosition && (
+        <div
+          ref={contextMenuRef}
+          className="fm-context-menu"
+          style={contextMenuPosition}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="fm-context-menu-header">
+            <div className="fm-context-menu-title">{contextMenuTitle}</div>
+            <div className="fm-context-menu-subtitle">{contextMenuSubtitle}</div>
+          </div>
+          <div className="fm-context-menu-list">
+            {contextMenuItems.map((item) => (
+              item.kind === 'separator' ? (
+                <div key={item.key} className="fm-context-menu-separator" />
+              ) : (
+                <button
+                  key={item.key}
+                  className={`fm-context-menu-item ${item.danger ? 'danger' : ''}`}
+                  onClick={item.onSelect}
+                >
+                  <span className="fm-context-menu-item-main">
+                    <span className="fm-context-menu-icon">{item.icon}</span>
+                    <span>{item.label}</span>
+                  </span>
+                </button>
+              )
+            ))}
+          </div>
+        </div>
+      )}
 
       {previewDoc && (
         <PreviewModal

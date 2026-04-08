@@ -12,6 +12,11 @@
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar.collapsed {
+  width: 72px;
 }
 
 .sidebar-header {
@@ -24,14 +29,17 @@
 .brand-title { font-weight: 700; font-size: 0.95rem; }
 .brand-sub { font-size: 0.7rem; color: var(--muted); display: block; }
 
-.sidebar-nav { padding: 12px 8px; flex: 1; overflow-y: auto; }
+.sidebar-nav { padding: 12px 8px; flex: 1; overflow-y: auto; overflow-x: hidden; }
 .nav-item {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
   color: var(--muted); font-size: 0.9rem; font-weight: 500; transition: all 0.15s; margin-bottom: 4px;
 }
 .nav-item:hover { background: var(--card); color: var(--text); }
 .nav-item.active { background: var(--primary-dim); color: var(--primary); }
-.nav-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; }
+.nav-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.nav-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 1; transition: opacity 0.2s; }
+.sidebar.collapsed .nav-item { padding: 10px; justify-content: center; }
+.sidebar.collapsed .nav-icon { margin: 0; }
 
 .sidebar-footer { padding: 16px; border-top: 1px solid var(--border); }
 .server-info { font-size: 0.75rem; color: var(--muted); word-break: break-all; }

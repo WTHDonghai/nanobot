@@ -2,7 +2,7 @@ import React from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
-import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database, Sun, Moon } from 'lucide-react';
+import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database, Sun, Moon, PanelLeftClose, PanelLeft } from 'lucide-react';
 import './Layout.css';
 
 const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -10,6 +10,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = React.useState(false);
 
   const handleLogout = () => {
     logout();
@@ -43,18 +44,20 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
   return (
     <div className="app-container">
-      <aside className="sidebar">
+      <aside className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <div className="brand">
+          <div className="brand" style={{ overflow: 'hidden' }}>
             <div className="brand-icon">
               <svg width="18" height="18" fill="none" stroke="#fff" strokeWidth="2.5" viewBox="0 0 24 24">
                 <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
               </svg>
             </div>
-            <div>
-              <div className="brand-title">Support</div>
-              <div className="brand-sub">Admin</div>
-            </div>
+            {!isSidebarCollapsed && (
+              <div>
+                <div className="brand-title">Support</div>
+                <div className="brand-sub">Admin</div>
+              </div>
+            )}
           </div>
         </div>
         
@@ -64,21 +67,31 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
               key={item.path}
               to={item.path}
               className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+              title={isSidebarCollapsed ? item.label : undefined}
             >
               <span className="nav-icon">{item.icon}</span>
-              {item.label}
+              {!isSidebarCollapsed && <span className="nav-label">{item.label}</span>}
             </NavLink>
           ))}
         </nav>
         
         <div className="sidebar-footer">
-          <div className="server-info">
-            <strong>{currentRoleLabel}</strong>
-            <span style={{ display: 'block', fontSize: '11px', opacity: 0.7, marginTop: 4, textOverflow: 'ellipsis', overflow: 'hidden' }}>{serverUrl}</span>
+          {!isSidebarCollapsed && (
+            <div className="server-info">
+              <strong>{currentRoleLabel}</strong>
+              <span style={{ display: 'block', fontSize: '11px', opacity: 0.7, marginTop: 4, textOverflow: 'ellipsis', overflow: 'hidden' }}>{serverUrl}</span>
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+            {!isSidebarCollapsed && (
+              <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={handleLogout}>
+                <LogOut size={14} /> 退出登录
+              </button>
+            )}
+            <button className="btn btn-ghost btn-sm" style={isSidebarCollapsed ? { width: '100%' } : { padding: '4px 8px' }} onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} title={isSidebarCollapsed ? '展开菜单' : '收起菜单'}>
+              {isSidebarCollapsed ? <PanelLeft size={16} /> : <PanelLeftClose size={16} />}
+            </button>
           </div>
-          <button className="btn btn-ghost btn-sm" style={{ width: '100%', marginTop: '12px' }} onClick={handleLogout}>
-            <LogOut size={14} /> 退出登录
-          </button>
         </div>
       </aside>
 
