@@ -522,6 +522,11 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
+.fm-prop-list-grow {
+  flex: 1;
+  min-height: 0;
+}
+
 :root[data-theme="light"] .fm-prop-list {
   background: rgba(255, 255, 255, 0.5);
   box-shadow: none;
@@ -586,6 +591,113 @@
 
 .fm-prop-item.vertical .fm-prop-value > span {
   text-align: left;
+}
+
+.fm-prop-item-grow {
+  flex: 1;
+  min-height: 0;
+}
+
+.fm-prop-item-grow .fm-prop-value {
+  flex: 1;
+  min-height: 0;
+}
+
+.fm-prop-rich-text {
+  display: block;
+  color: var(--light);
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fm-prop-markdown-scroll {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+:root[data-theme="light"] .fm-prop-markdown-scroll {
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.fm-prop-markdown {
+  color: var(--light);
+  font-size: 0.88rem;
+  line-height: 1.75;
+}
+
+.fm-prop-markdown > :first-child {
+  margin-top: 0;
+}
+
+.fm-prop-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.fm-prop-markdown p,
+.fm-prop-markdown ul,
+.fm-prop-markdown ol,
+.fm-prop-markdown blockquote,
+.fm-prop-markdown table {
+  margin: 0.65em 0;
+}
+
+.fm-prop-markdown ul,
+.fm-prop-markdown ol {
+  padding-left: 1.35em;
+}
+
+.fm-prop-markdown h1,
+.fm-prop-markdown h2,
+.fm-prop-markdown h3,
+.fm-prop-markdown h4,
+.fm-prop-markdown h5,
+.fm-prop-markdown h6 {
+  margin: 1em 0 0.5em;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.fm-prop-markdown blockquote {
+  padding-left: 10px;
+  border-left: 3px solid rgba(99, 102, 241, 0.28);
+  color: var(--muted);
+}
+
+.fm-prop-markdown code {
+  padding: 0.12em 0.34em;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 0.88em;
+}
+
+.fm-prop-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.fm-prop-markdown th,
+.fm-prop-markdown td {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.fm-prop-note {
+  display: block;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.fm-prop-note-error {
+  color: var(--danger);
 }
 
 .fm-prop-value .btn-ghost {
@@ -850,6 +962,13 @@
   background: rgba(255, 255, 255, 0.03);
 }
 
+.fm-preview-hint {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
 .fm-preview-box pre {
   margin: 0;
   white-space: pre-wrap;
@@ -857,6 +976,97 @@
   font-size: 0.86rem;
   line-height: 1.7;
   color: var(--light);
+}
+
+.fm-preview-markdown {
+  color: var(--text);
+  font-size: 0.92rem;
+  line-height: 1.8;
+}
+
+.fm-preview-markdown > :first-child {
+  margin-top: 0;
+}
+
+.fm-preview-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.fm-preview-markdown h1,
+.fm-preview-markdown h2,
+.fm-preview-markdown h3,
+.fm-preview-markdown h4,
+.fm-preview-markdown h5,
+.fm-preview-markdown h6 {
+  margin: 1.2em 0 0.6em;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.fm-preview-markdown p,
+.fm-preview-markdown ul,
+.fm-preview-markdown ol,
+.fm-preview-markdown blockquote,
+.fm-preview-markdown table {
+  margin: 0.75em 0;
+}
+
+.fm-preview-markdown ul,
+.fm-preview-markdown ol {
+  padding-left: 1.4em;
+}
+
+.fm-preview-markdown li + li {
+  margin-top: 0.25em;
+}
+
+.fm-preview-markdown blockquote {
+  padding-left: 12px;
+  border-left: 3px solid rgba(99, 102, 241, 0.32);
+  color: var(--light);
+}
+
+.fm-preview-markdown code {
+  padding: 0.14em 0.38em;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 0.88em;
+}
+
+.fm-preview-markdown pre code {
+  display: block;
+  padding: 12px 14px;
+  overflow: auto;
+}
+
+.fm-preview-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.fm-preview-markdown th,
+.fm-preview-markdown td {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.fm-preview-markdown th {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.fm-preview-image {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: 420px;
+  margin: 14px auto;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  object-fit: contain;
 }
 
 .fm-toast {

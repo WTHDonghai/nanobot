@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle,
   CheckCircle,
@@ -136,6 +138,93 @@ const buildTenantHeaders = (
   return headers;
 };
 
+const sortByNaturalPath = (a: string, b: string) => (
+  a.localeCompare(b, 'zh-CN', { numeric: true, sensitivity: 'base' })
+);
+
+const isDocxDocument = (document: KnowledgeDocument) => (
+  (document.source_format || '').toLowerCase().includes('docx')
+);
+
+const DOCX_ASSET_PLACEHOLDER_RE = /!\[([^\]]*)\]\(ov-asset:\/\/([^)]+)\)/g;
+const IMAGE_MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp',
+};
+
+const normalizeDocxMarkdown = (markdown: string) => (
+  markdown
+    .replace(/<ins>(.*?)<\/ins>/g, '$1')
+    .trim()
+);
+
+const inferImageMimeType = (filename: string) => {
+  const normalized = filename.toLowerCase();
+  const matchedEntry = Object.entries(IMAGE_MIME_TYPES).find(([extension]) => normalized.endsWith(extension));
+  return matchedEntry?.[1] || 'image/png';
+};
+
+const passthroughUrlTransform = (url: string) => url;
+
+async function materializeDocxMarkdownImages(
+  serverUrl: string,
+  apiKey: string,
+  accountId: string | null,
+  userId: string | null,
+  resourceRootUri: string,
+  markdown: string,
+): Promise<{ markdown: string; objectUrls: string[] }> {
+  const headers = buildTenantHeaders(apiKey, accountId, userId);
+  const assetMatches = Array.from(markdown.matchAll(DOCX_ASSET_PLACEHOLDER_RE));
+  const assetNames = Array.from(new Set(assetMatches.map((match) => match[2])));
+
+  if (assetNames.length === 0) {
+    return { markdown, objectUrls: [] };
+  }
+
+  const resolvedAssetUrls = new Map<string, string | null>();
+  const objectUrls: string[] = [];
+
+  await Promise.all(assetNames.map(async (assetName) => {
+    try {
+      const params = new URLSearchParams({ uri: `${resourceRootUri}/_images/${assetName}` });
+      const response = await fetch(`${serverUrl}/api/v1/content/download?${params}`, { headers });
+      if (!response.ok) {
+        resolvedAssetUrls.set(assetName, null);
+        return;
+      }
+
+      const rawBlob = await response.blob();
+      const blob = rawBlob.type.startsWith('image/')
+        ? rawBlob
+        : new Blob([await rawBlob.arrayBuffer()], { type: inferImageMimeType(assetName) });
+      const objectUrl = URL.createObjectURL(blob);
+      objectUrls.push(objectUrl);
+      resolvedAssetUrls.set(assetName, objectUrl);
+    } catch {
+      resolvedAssetUrls.set(assetName, null);
+    }
+  }));
+
+  const materializedMarkdown = markdown.replace(
+    DOCX_ASSET_PLACEHOLDER_RE,
+    (_match, altText: string, assetName: string) => {
+      const objectUrl = resolvedAssetUrls.get(assetName);
+      if (objectUrl) {
+        return `![${altText}](${objectUrl})`;
+      }
+      return altText?.trim() ? `\n\n> 图片：${altText.trim()}\n\n` : '\n\n> 图片\n\n';
+    },
+  );
+
+  return { markdown: materializedMarkdown, objectUrls };
+}
+
 async function uploadTempFile(
   serverUrl: string,
   apiKey: string,
@@ -216,18 +305,84 @@ const PreviewModal = ({
   onClose: () => void;
 }) => {
   const [content, setContent] = useState<string>('');
+  const [contentMode, setContentMode] = useState<'text' | 'markdown'>('text');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [hint, setHint] = useState('');
 
   useEffect(() => {
     let cancelled = false;
+    let previewObjectUrls: string[] = [];
     const run = async () => {
       setLoading(true);
       setError('');
+      setHint('');
       try {
+        const headers = buildTenantHeaders(apiKey, accountId, userId);
+
+        if (isDocxDocument(document)) {
+          const listParams = new URLSearchParams({
+            uri: document.resource_root_uri,
+            simple: 'true',
+            recursive: 'true',
+            output: 'original',
+            limit: '500',
+          });
+          const listRes = await fetch(`${serverUrl}/api/v1/fs/ls?${listParams}`, {
+            headers,
+          });
+          const listData = await listRes.json();
+          if (!listRes.ok) {
+            const detail = listData?.error?.message || listData?.detail;
+            throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || '预览失败');
+          }
+
+          const markdownUris = (Array.isArray(listData.result) ? (listData.result as unknown[]) : [])
+            .filter((item: unknown): item is string => typeof item === 'string')
+            .filter((uri: string) => uri.endsWith('.md'))
+            .filter((uri: string) => {
+              const filename = uri.split('/').pop() || '';
+              return !filename.startsWith('.');
+            })
+            .sort(sortByNaturalPath);
+
+          if (markdownUris.length > 0) {
+            const markdownChunks = await Promise.all(markdownUris.map(async (uri: string) => {
+              const readParams = new URLSearchParams({ uri });
+              const readRes = await fetch(`${serverUrl}/api/v1/content/read?${readParams}`, {
+                headers,
+              });
+              const readData = await readRes.json();
+              if (!readRes.ok) {
+                const detail = readData?.error?.message || readData?.detail;
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || '预览失败');
+              }
+              return typeof readData.result === 'string'
+                ? readData.result
+                : JSON.stringify(readData.result, null, 2);
+            }));
+
+            if (!cancelled) {
+              const materialized = await materializeDocxMarkdownImages(
+                serverUrl,
+                apiKey,
+                accountId,
+                userId,
+                document.resource_root_uri,
+                normalizeDocxMarkdown(markdownChunks.filter(Boolean).join('\n\n')),
+              );
+              previewObjectUrls = materialized.objectUrls;
+              setContentMode('markdown');
+              setContent(materialized.markdown);
+              setHint(`DOCX 正文预览，共加载 ${markdownUris.length} 个片段`);
+            }
+            return;
+          }
+        }
+
         const params = new URLSearchParams({ uri: document.resource_root_uri, limit: '500' });
         const res = await fetch(`${serverUrl}/api/v1/content/abstract?${params}`, {
-          headers: buildTenantHeaders(apiKey, accountId, userId),
+          headers,
         });
         const data = await res.json();
         if (!res.ok) {
@@ -236,7 +391,9 @@ const PreviewModal = ({
         }
         if (!cancelled) {
           const value = data.result;
+          setContentMode('text');
           setContent(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+          setHint(isDocxDocument(document) ? '未找到正文片段，已回退为摘要预览' : '摘要预览');
         }
       } catch (err: any) {
         if (!cancelled) setError(err?.message || '预览失败');
@@ -245,8 +402,11 @@ const PreviewModal = ({
       }
     };
     run();
-    return () => { cancelled = true; };
-  }, [accountId, apiKey, document.resource_root_uri, serverUrl, userId]);
+    return () => {
+      cancelled = true;
+      previewObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [accountId, apiKey, document, serverUrl, userId]);
 
   return (
     <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -255,11 +415,31 @@ const PreviewModal = ({
           <Eye size={18} /> 预览: {document.display_name}
         </div>
         <div className="modal-body">
+          {hint && <div className="fm-preview-hint">{hint}</div>}
           <div className="fm-preview-box">
             {loading ? (
               <div className="fm-state"><div className="loader" /></div>
             ) : error ? (
               <div className="fm-state fm-state-error">{error}</div>
+            ) : contentMode === 'markdown' ? (
+              <div className="fm-preview-markdown">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  urlTransform={passthroughUrlTransform}
+                  components={{
+                    img: ({ src, alt }) => (
+                      <img
+                        src={src}
+                        alt={alt || ''}
+                        className="fm-preview-image"
+                        loading="lazy"
+                      />
+                    ),
+                  }}
+                >
+                  {content || '(空)'}
+                </ReactMarkdown>
+              </div>
             ) : (
               <pre>{content || '(空)'}</pre>
             )}
@@ -725,6 +905,9 @@ const Resources = () => {
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [documentAbstracts, setDocumentAbstracts] = useState<Record<string, string>>({});
+  const [documentAbstractErrors, setDocumentAbstractErrors] = useState<Record<string, string>>({});
+  const [loadingDocumentAbstractId, setLoadingDocumentAbstractId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('icon');
   const [currentPath, setCurrentPath] = useState('');
   const [drawerPath, setDrawerPath] = useState<string | null>(null);
@@ -864,6 +1047,75 @@ const Resources = () => {
     if (!selectedKey) return null;
     return folderMap.get(selectedKey) || documentMap.get(selectedKey) || null;
   }, [documentMap, folderMap, selectedKey]);
+
+  const selectedDocumentAbstract = isDocumentEntry(selectedEntry)
+    ? documentAbstracts[selectedEntry.document_id] || ''
+    : '';
+  const selectedDocumentAbstractError = isDocumentEntry(selectedEntry)
+    ? documentAbstractErrors[selectedEntry.document_id] || ''
+    : '';
+  const selectedDocumentAbstractLoading = isDocumentEntry(selectedEntry)
+    ? loadingDocumentAbstractId === selectedEntry.document_id
+    : false;
+
+  useEffect(() => {
+    if (!isDocumentEntry(selectedEntry)) return;
+
+    const documentId = selectedEntry.document_id;
+    if (documentAbstracts[documentId] || documentAbstractErrors[documentId]) return;
+
+    let cancelled = false;
+
+    const loadDocumentAbstract = async () => {
+      setLoadingDocumentAbstractId(documentId);
+      try {
+        const params = new URLSearchParams({ uri: selectedEntry.resource_root_uri });
+        const response = await fetchApi<{ result: string }>(
+          serverUrl,
+          apiKey,
+          `/api/v1/content/abstract?${params.toString()}`,
+          {
+            method: 'GET',
+            account: accountId || undefined,
+            user: userId || undefined,
+          },
+        );
+        if (!cancelled) {
+          setDocumentAbstracts((prev) => ({
+            ...prev,
+            [documentId]: typeof response.result === 'string'
+              ? response.result
+              : JSON.stringify(response.result, null, 2),
+          }));
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setDocumentAbstractErrors((prev) => ({
+            ...prev,
+            [documentId]: err?.message || '摘要加载失败',
+          }));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingDocumentAbstractId((prev) => (prev === documentId ? null : prev));
+        }
+      }
+    };
+
+    void loadDocumentAbstract();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    accountId,
+    apiKey,
+    documentAbstractErrors,
+    documentAbstracts,
+    selectedEntry,
+    serverUrl,
+    userId,
+  ]);
 
   const activeDrawerPath = drawerPath ?? currentPath;
 
@@ -1691,7 +1943,7 @@ const Resources = () => {
                   </button>
                 </div>
 
-                <div className="fm-prop-list">
+                <div className="fm-prop-list fm-prop-list-grow">
                   <div className="fm-prop-item">
                     <span className="fm-prop-label">所在目录</span>
                     <span className="fm-prop-value">{formatPath(selectedEntry.folder_path || '')}</span>
@@ -1745,6 +1997,28 @@ const Resources = () => {
                       </div>
                     </div>
                   )}
+
+                  <div className="fm-prop-item vertical fm-prop-item-grow">
+                    <span className="fm-prop-label">Abstract 摘要</span>
+                    <div className="fm-prop-value">
+                      {selectedDocumentAbstractLoading ? (
+                        <span className="fm-prop-note">正在加载摘要...</span>
+                      ) : selectedDocumentAbstractError ? (
+                        <span className="fm-prop-note fm-prop-note-error">{selectedDocumentAbstractError}</span>
+                      ) : (
+                        <div className="fm-prop-markdown-scroll">
+                          <div className="fm-prop-markdown">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              urlTransform={passthroughUrlTransform}
+                            >
+                              {selectedDocumentAbstract || '暂无摘要'}
+                            </ReactMarkdown>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </>
             )
