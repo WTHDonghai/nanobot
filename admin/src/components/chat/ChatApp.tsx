@@ -1134,9 +1134,13 @@ const ChatApp: React.FC<ChatAppProps> = ({
         },
       });
 
-      setHandoffNotice(response.message || '已为您准备转人工服务入口。');
+      const entryUrl = response.entry_url?.trim();
+      if (!entryUrl) {
+        throw new Error('转人工入口链接缺失，请联系管理员检查配置。');
+      }
 
-      window.alert(`转人工接口调用成功！\n\n获取到的跳转链接：${response.entry_url || '无'}`);
+      setHandoffNotice(response.message || '已为您准备转人工服务入口。');
+      window.location.assign(entryUrl);
     } catch (err) {
       setSessionError(err instanceof Error ? err.message : '转人工失败，请稍后重试。');
     } finally {
