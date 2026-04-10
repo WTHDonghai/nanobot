@@ -2,7 +2,7 @@
 
 当前部署目录已经切换为双镜像模式：
 
-- `openviking-server` 镜像负责 HTTP API 和 `/admin`
+- `openviking-server` 镜像负责 HTTP API、`/admin` 和 `/guest`
 - `vikingbot` 镜像负责 bot gateway
 - 两个容器共享同一份 `ov.conf` 和 `/app/data`
 
@@ -208,6 +208,7 @@ OPENVIKING_VERSION=1.2.3 docker compose up -d
 - `openviking` 服务会监听宿主机 `1933`
 - `vikingbot` 只在 Docker network 内暴露 `18790`
 - 如果需要从宿主机直连 bot，可自行给 `vikingbot` 服务增加端口映射
+- 如果前面还有自定义 nginx / ingress 路由白名单，除了 `/admin/*` 之外，还需要放行 `/guest/*` 和 `/assets/*`
 
 检查状态：
 

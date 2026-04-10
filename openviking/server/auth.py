@@ -103,10 +103,7 @@ async def resolve_identity(
     if not api_key:
         public_bot_resolver = getattr(request.app.state, "public_bot_identity_resolver", None)
         if public_bot_resolver is not None:
-            public_identity = await public_bot_resolver.resolve(
-                request,
-                requested_agent_id=x_openviking_agent,
-            )
+            public_identity = await public_bot_resolver.resolve(request)
             if public_identity is not None:
                 return public_identity
 

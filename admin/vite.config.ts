@@ -6,5 +6,5 @@ export default defineConfig({
   build: {
     outDir: 'dist',
   },
-  base: '/admin/', // Serve from /admin base path
+  base: '/', // Emit shared assets under /assets for both /admin and /guest
 });

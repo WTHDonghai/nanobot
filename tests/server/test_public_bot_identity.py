@@ -35,6 +35,7 @@ async def public_bot_app(public_bot_service):
         public_bot=PublicBotConfig(
             enabled=True,
             account_id="default",
+            agent_id="guest-agent",
             secret="public-bot-cookie-secret",
         ),
     )
@@ -109,3 +110,15 @@ async def test_public_bot_sessions_are_isolated_per_browser(public_bot_app):
         assert list_resp.status_code == 200
         session_ids = {entry["session_id"] for entry in list_resp.json()["result"]}
         assert session_id not in session_ids
+
+
+async def test_public_bot_ignores_forged_agent_header(public_bot_client: httpx.AsyncClient):
+    resp = await public_bot_client.post(
+        "/api/v1/sessions",
+        headers={"X-OpenViking-Agent": "forged-agent"},
+        json={},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"]["user"]["agent_id"] == "guest-agent"

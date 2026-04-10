@@ -73,7 +73,6 @@ class PublicBotIdentityResolver:
     async def resolve(
         self,
         request: Request,
-        requested_agent_id: Optional[str] = None,
     ) -> Optional[ResolvedIdentity]:
         """Resolve an anonymous visitor into a stable tenant-scoped user."""
         path = request.url.path
@@ -86,7 +85,14 @@ class PublicBotIdentityResolver:
             request.state.public_bot_cookie_value = self._sign_visitor_id(visitor_id)
 
         account_id = self.config.account_id or "default"
-        agent_id = requested_agent_id or self.config.agent_id or "default"
+        agent_id = self.config.agent_id or "default"
+        requested_agent_id = request.headers.get("X-OpenViking-Agent")
+        if requested_agent_id and requested_agent_id != agent_id:
+            logger.warning(
+                "Ignoring anonymous public bot agent override '%s'; using configured agent '%s'",
+                requested_agent_id,
+                agent_id,
+            )
         user_id = self._derive_user_id(account_id, visitor_id)
         request.state.public_bot_user_id = user_id
 
@@ -180,4 +186,3 @@ class PublicBotIdentityResolver:
                 lock = asyncio.Lock()
                 self._locks[user_id] = lock
             return lock
-

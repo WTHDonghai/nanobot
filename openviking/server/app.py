@@ -256,7 +256,7 @@ def create_app(
     admin_dist = next((path for path in admin_dist_candidates if path.exists()), None)
 
     if admin_dist is not None:
-        app.mount("/admin/assets", StaticFiles(directory=str(admin_dist / "assets")), name="admin_assets")
+        app.mount("/assets", StaticFiles(directory=str(admin_dist / "assets")), name="frontend_assets")
         
         @app.get("/admin")
         @app.get("/admin/")
@@ -279,6 +279,7 @@ def create_app(
             
         logger.info("Admin Panel hosted at /admin/")
         logger.info("Guest Bot hosted at /guest/")
+        logger.info("Shared frontend assets hosted at /assets/")
     else:
         logger.info("Admin Panel static files not found, /admin/ endpoint not mounted.")
 
