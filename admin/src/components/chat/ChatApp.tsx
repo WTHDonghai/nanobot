@@ -12,6 +12,7 @@ import {
   User,
   Zap,
   Headphones,
+  Menu,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -209,6 +210,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const [activeActionMenu, setActiveActionMenu] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const actionMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -216,6 +218,28 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const sessionMessageCacheRef = useRef<Record<string, ChatMessage[]>>({});
   const sessionListRequestRef = useRef(0);
   const replayRequestRef = useRef(0);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const mediaQuery = window.matchMedia('(min-width: 1181px)');
+    const closeSidebarOnDesktop = (matches: boolean) => {
+      if (matches) {
+        setIsSidebarOpen(false);
+      }
+    };
+
+    closeSidebarOnDesktop(mediaQuery.matches);
+
+    const handleChange = (event: MediaQueryListEvent) => {
+      closeSidebarOnDesktop(event.matches);
+    };
+
+    mediaQuery.addEventListener('change', handleChange);
+    return () => {
+      mediaQuery.removeEventListener('change', handleChange);
+    };
+  }, []);
 
   function scrollToBottom() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1236,7 +1260,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
   };
 
   return (
-    <div className="chat-layout">
+    <div className={`chat-layout ${isSidebarOpen ? 'sidebar-open' : ''}`}>
+      <div className="mobile-overlay" onClick={() => setIsSidebarOpen(false)} />
       <SessionSidebar
         sessions={sessions}
         sessionId={sessionId}
@@ -1244,8 +1269,14 @@ const ChatApp: React.FC<ChatAppProps> = ({
         busy={busy}
         sessionListLoading={sessionListLoading}
         notReadyMessage={notReadyMessage}
-        onSelectSession={(id) => { void handleSelectSession(id); }}
-        onNewSession={handleNewSession}
+        onSelectSession={(id) => { 
+          setIsSidebarOpen(false);
+          void handleSelectSession(id); 
+        }}
+        onNewSession={() => {
+          setIsSidebarOpen(false);
+          handleNewSession();
+        }}
         onRenameSession={openRenameDialog}
         onDeleteSession={(session) => { setDeleteTarget(session); }}
         onBatchDelete={handleBatchDeleteSessions}
@@ -1255,6 +1286,13 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
       <div className="chat-main-panel">
         <div className="chat-config-bar">
+          <button 
+            className="chat-mobile-menu-btn" 
+            onClick={() => setIsSidebarOpen(true)}
+            aria-label="打开会话列表"
+          >
+            <Menu size={18} />
+          </button>
           <div className="chat-current-session">
             <span className="chat-current-label">{currentSessionLabel}</span>
             <span className="chat-current-title" title={activeSessionTitle}>{activeSessionTitle}</span>

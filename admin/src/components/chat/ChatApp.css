@@ -1147,23 +1147,112 @@
   }
 }
 
+/* --- Mobile Responsiveness Base Classes --- */
+.chat-mobile-menu-btn {
+  display: none;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.2s;
+}
+
+.chat-mobile-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+[data-theme="light"] .chat-mobile-menu-btn {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+[data-theme="light"] .chat-mobile-menu-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.mobile-overlay {
+  display: none;
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 40;
+}
+
 @media (max-width: 1180px) {
-  .chat-layout {
-    flex-direction: column;
+  .chat-layout.sidebar-open .mobile-overlay {
+    display: block;
   }
 
   .chat-session-panel {
-    width: 100%;
-    max-height: 280px;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 85vw;
+    max-width: 380px;
+    height: 100%;
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
     border-right: none;
-    border-bottom: 1px solid var(--border);
+    border-top-right-radius: 24px;
+    border-bottom-right-radius: 24px;
+    overflow: hidden;
+    background: #0b0f1a !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  [data-theme="light"] .chat-session-panel {
+    background: #ffffff !important;
+  }
+
+  .chat-layout.sidebar-open .chat-session-panel {
+    transform: translateX(0);
+  }
+
+  .chat-mobile-menu-btn {
+    display: flex;
+  }
+
+  .chat-main-panel {
+    width: 100%;
+  }
+
+  .chat-feed-container {
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 240px;
+  }
+
+  .chat-input-wrapper {
+    padding-bottom: env(safe-area-inset-bottom, 20px);
+  }
+
+  .chat-current-title {
+    max-width: calc(100vw - 160px);
+  }
+
+  .chat-config-bar {
+    padding: 10px 16px;
+    gap: 12px;
+  }
+
+  .chat-messages {
+    padding: 20px 16px 28px;
+  }
+
+  .chat-content-wrap {
+    max-width: 100%;
   }
 }
 
 @media (max-width: 720px) {
-  .chat-session-panel {
-    max-height: 260px;
-  }
 
   .chat-session-list {
     padding-left: 8px;
@@ -1537,3 +1626,6 @@
   background-color: rgba(15, 23, 42, 0.06);
   color: #1e293b;
 }
+
+
+

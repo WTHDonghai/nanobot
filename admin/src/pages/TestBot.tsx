@@ -6,9 +6,6 @@ import ChatApp from '../components/chat/ChatApp';
 import './TestBot.css';
 
 const PUBLIC_PAGE_TITLE = '西软客服助理';
-// const SERVICE_TOPICS = ['入住办理', '早餐时间', '发票开具', 'Wi-Fi 指引', '设施咨询', '联系人工'];
-
-// ─── Types ───────────────────────────────────────────────────────────────────
 
 type ApiEnvelope<T> = {
   status?: string;
@@ -31,8 +28,6 @@ const PageBrand = () => (
   </div>
 );
 
-// ─── Error Screen ────────────────────────────────────────────────────────────
-
 const ErrorScreen = ({ message }: { message: string }) => (
   <div className="testbot-error-screen">
     <div className="testbot-error-card">
@@ -40,17 +35,10 @@ const ErrorScreen = ({ message }: { message: string }) => (
       <div className="testbot-error-icon">
         <AlertCircle size={40} />
       </div>
-      {/* <h1 className="testbot-error-title">无法启动{PUBLIC_PAGE_TITLE}</h1> */}
       <p className="testbot-error-desc">{message}</p>
-      {/* <div className="testbot-error-hint"> */}
-      {/*   <p>这是公开访问页，不需要注册，也不需要附带用户 API Key。</p> */}
-      {/*   <code>/guest/</code> */}
-      {/* </div> */}
     </div>
   </div>
 );
-
-// ─── Loading Screen ──────────────────────────────────────────────────────────
 
 const LoadingScreen = () => (
   <div className="testbot-error-screen">
@@ -61,8 +49,6 @@ const LoadingScreen = () => (
     </div>
   </div>
 );
-
-// ─── Main Component ──────────────────────────────────────────────────────────
 
 const TestBot: React.FC = () => {
   const serverUrl = window.location.origin.replace(/\/$/, '');
@@ -113,11 +99,6 @@ const TestBot: React.FC = () => {
 
   return (
     <div className="testbot-root">
-      {/* <section className="testbot-hero"> */}
-      {/*   <div className="testbot-hero-copy"> */}
-      {/*     <span className="testbot-hero-badge">24 小时在线服务</span> */}
-      {/*   </div> */}
-      {/* </section> */}
       <ChatApp
         serverUrl={serverUrl}
         apiKey=""
