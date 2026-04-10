@@ -49,14 +49,23 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     <div className="app-container">
       <aside className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <div className="brand" style={{ overflow: 'hidden' }}>
-            <BrandMark size="md" className="sidebar-brand-mark" />
-            {!isSidebarCollapsed && (
-              <div>
-                <div className="brand-title">support-kb</div>
-                <div className="brand-sub">Admin</div>
-              </div>
-            )}
+          <div className="sidebar-header-row">
+            <div className="brand" style={{ overflow: 'hidden' }}>
+              <BrandMark size="md" className="sidebar-brand-mark" />
+              {!isSidebarCollapsed && (
+                <div>
+                  <div className="brand-title">support-kb</div>
+                  <div className="brand-sub">Admin</div>
+                </div>
+              )}
+            </div>
+            <button
+              className="btn btn-ghost btn-sm sidebar-toggle-btn"
+              onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+              title={isSidebarCollapsed ? '展开菜单' : '收起菜单'}
+            >
+              {isSidebarCollapsed ? <PanelLeft size={16} /> : <PanelLeftClose size={16} />}
+            </button>
           </div>
         </div>
         
@@ -87,9 +96,6 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
                 <LogOut size={14} /> 退出登录
               </button>
             )}
-            <button className="btn btn-ghost btn-sm" style={isSidebarCollapsed ? { width: '100%' } : { padding: '4px 8px' }} onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} title={isSidebarCollapsed ? '展开菜单' : '收起菜单'}>
-              {isSidebarCollapsed ? <PanelLeft size={16} /> : <PanelLeftClose size={16} />}
-            </button>
           </div>
         </div>
       </aside>

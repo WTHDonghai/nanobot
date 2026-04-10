@@ -24,10 +24,22 @@
   border-bottom: 1px solid var(--border);
 }
 
+.sidebar-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .brand { display: flex; align-items: center; gap: 10px; }
 .sidebar-brand-mark { flex-shrink: 0; }
 .brand-title { font-weight: 700; font-size: 0.95rem; }
 .brand-sub { font-size: 0.7rem; color: var(--muted); display: block; }
+.sidebar-toggle-btn { flex-shrink: 0; padding: 4px 8px; }
+
+.sidebar.collapsed .sidebar-header-row {
+  justify-content: center;
+}
 
 .sidebar-nav { padding: 12px 8px; flex: 1; overflow-y: auto; overflow-x: hidden; }
 .nav-item {
