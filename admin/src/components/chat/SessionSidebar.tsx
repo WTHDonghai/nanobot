@@ -125,10 +125,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
           <div className="chat-session-brand">
             <BrandMark size="sm" className="chat-session-brand-mark" />
             <div className="chat-session-brand-copy">
-              <div className="chat-session-brand-title">support-kb</div>
-              <div className="chat-session-panel-label">
-                <History size={16} /> Bot 会话
-              </div>
+              <div className="chat-session-brand-title">support-agent</div>
             </div>
           </div>
           <div className="chat-session-panel-subtitle">{currentIdentityLabel}</div>
