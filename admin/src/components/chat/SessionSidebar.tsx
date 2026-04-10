@@ -10,6 +10,7 @@ import {
   Square,
   Trash2,
 } from 'lucide-react';
+import BrandMark from '../branding/BrandMark';
 import { SessionSummary } from './types';
 import { formatDateTime, formatRelativeTime, getSessionGroupLabel } from './utils';
 
@@ -120,9 +121,15 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
   return (
     <aside className="chat-session-panel">
       <div className="chat-session-panel-header">
-        <div>
-          <div className="chat-session-panel-title">
-            <History size={16} /> 会话管理
+        <div className="chat-session-panel-heading">
+          <div className="chat-session-brand">
+            <BrandMark size="sm" className="chat-session-brand-mark" />
+            <div className="chat-session-brand-copy">
+              <div className="chat-session-brand-title">support-kb</div>
+              <div className="chat-session-panel-label">
+                <History size={16} /> Bot 会话
+              </div>
+            </div>
           </div>
           <div className="chat-session-panel-subtitle">{currentIdentityLabel}</div>
         </div>

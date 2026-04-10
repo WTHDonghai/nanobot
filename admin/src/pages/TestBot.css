@@ -19,6 +19,28 @@
   position: static !important;
 }
 
+.testbot-brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.testbot-brand-mark {
+  flex-shrink: 0;
+}
+
+.testbot-brand-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.testbot-brand-subtitle {
+  margin-top: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 /* ── Error screen ── */
 .testbot-error-screen {
   flex: 1;

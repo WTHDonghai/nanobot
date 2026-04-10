@@ -25,7 +25,7 @@
 }
 
 .brand { display: flex; align-items: center; gap: 10px; }
-.brand-icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.sidebar-brand-mark { flex-shrink: 0; }
 .brand-title { font-weight: 700; font-size: 0.95rem; }
 .brand-sub { font-size: 0.7rem; color: var(--muted); display: block; }
 

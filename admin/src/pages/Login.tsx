@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import BrandMark from '../components/branding/BrandMark';
 import { fetchApi } from '../services/api';
 import './Login.css';
 
@@ -48,11 +49,7 @@ const Login: React.FC = () => {
     <div className="login-screen">
       <div className="login-card">
         <div className="login-header">
-          <div className="login-logo-icon">
-            <svg width="22" height="22" fill="none" stroke="#fff" strokeWidth="2.5" viewBox="0 0 24 24">
-              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-            </svg>
-          </div>
+          <BrandMark size="lg" className="login-brand-mark" />
           <h1>support-kb<br/><span className="login-subtitle-text">Admin</span></h1>
         </div>
         <p className="login-desc">使用 Root API Key 或租户管理员 Key 登录</p>

@@ -26,18 +26,52 @@
   padding: 18px 18px 14px;
 }
 
-.chat-session-panel-title {
+.chat-session-panel-heading {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-session-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.chat-session-brand-mark {
+  flex-shrink: 0;
+}
+
+.chat-session-brand-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-session-brand-title {
+  font-size: 0.98rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.chat-session-panel-label {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.98rem;
-  font-weight: 700;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--light);
 }
 
 .chat-session-panel-subtitle {
-  margin-top: 6px;
+  margin-top: 0;
   font-size: 0.82rem;
   color: var(--light);
+  line-height: 1.5;
+  word-break: break-word;
 }
 
 .chat-session-toolbar {

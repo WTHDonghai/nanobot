@@ -3,6 +3,7 @@ import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database, Sun, Moon, PanelLeftClose, PanelLeft, Search } from 'lucide-react';
+import BrandMark from '../branding/BrandMark';
 import './Layout.css';
 
 const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -49,14 +50,10 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       <aside className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
           <div className="brand" style={{ overflow: 'hidden' }}>
-            <div className="brand-icon">
-              <svg width="18" height="18" fill="none" stroke="#fff" strokeWidth="2.5" viewBox="0 0 24 24">
-                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-              </svg>
-            </div>
+            <BrandMark size="md" className="sidebar-brand-mark" />
             {!isSidebarCollapsed && (
               <div>
-                <div className="brand-title">Support</div>
+                <div className="brand-title">support-kb</div>
                 <div className="brand-sub">Admin</div>
               </div>
             )}

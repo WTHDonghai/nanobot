@@ -1,0 +1,23 @@
+.brand-mark {
+  display: block;
+  width: auto;
+  object-fit: contain;
+  flex-shrink: 0;
+  user-select: none;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+}
+
+.brand-mark--sm {
+  height: 28px;
+  border-radius: 8px;
+}
+
+.brand-mark--md {
+  height: 34px;
+  border-radius: 10px;
+}
+
+.brand-mark--lg {
+  height: 52px;
+  border-radius: 14px;
+}

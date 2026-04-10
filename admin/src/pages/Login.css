@@ -23,17 +23,10 @@
   margin-bottom: 32px;
 }
 
-.login-logo-icon {
-  width: 44px;
-  height: 44px;
-  background: var(--primary);
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
+.login-brand-mark { flex-shrink: 0; }
 
 .login-header h1 {
+  margin: 0;
   font-size: 1.4rem;
   font-weight: 700;
   background: linear-gradient(135deg, #fff, #94a3b8);

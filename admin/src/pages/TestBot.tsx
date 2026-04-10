@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { AlertCircle } from 'lucide-react';
+import BrandMark from '../components/branding/BrandMark';
 import { fetchApi } from '../services/api';
 import ChatApp from '../components/chat/ChatApp';
 import './TestBot.css';
@@ -18,11 +19,22 @@ type WhoamiResult = {
   user_id: string;
 };
 
+const PageBrand = () => (
+  <div className="testbot-brand-lockup">
+    <BrandMark size="lg" className="testbot-brand-mark" />
+    <div>
+      <div className="testbot-brand-title">support-kb</div>
+      <div className="testbot-brand-subtitle">Bot</div>
+    </div>
+  </div>
+);
+
 // ─── Error Screen ────────────────────────────────────────────────────────────
 
 const ErrorScreen = ({ message }: { message: string }) => (
   <div className="testbot-error-screen">
     <div className="testbot-error-card">
+      <PageBrand />
       <div className="testbot-error-icon">
         <AlertCircle size={40} />
       </div>
@@ -41,6 +53,7 @@ const ErrorScreen = ({ message }: { message: string }) => (
 const LoadingScreen = () => (
   <div className="testbot-error-screen">
     <div className="testbot-loading-card">
+      <PageBrand />
       <div className="loader" style={{ width: 36, height: 36 }} />
       <p className="testbot-loading-text">正在验证 API Key…</p>
     </div>
