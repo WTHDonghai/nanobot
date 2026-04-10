@@ -113,17 +113,11 @@ const TestBot: React.FC = () => {
 
   return (
     <div className="testbot-root">
-      <section className="testbot-hero">
-        <div className="testbot-hero-copy">
-          <span className="testbot-hero-badge">24 小时在线服务</span>
-          {/* <h1>{PUBLIC_PAGE_TITLE}</h1> */}
-        </div>
-        {/* <div className="testbot-hero-topics" aria-label="可咨询事项"> */}
-        {/*   {SERVICE_TOPICS.map((topic) => ( */}
-        {/*     <span key={topic} className="testbot-topic-chip">{topic}</span> */}
-        {/*   ))} */}
-        {/* </div> */}
-      </section>
+      {/* <section className="testbot-hero"> */}
+      {/*   <div className="testbot-hero-copy"> */}
+      {/*     <span className="testbot-hero-badge">24 小时在线服务</span> */}
+      {/*   </div> */}
+      {/* </section> */}
       <ChatApp
         serverUrl={serverUrl}
         apiKey=""
