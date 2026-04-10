@@ -11,7 +11,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import BrandMark from '../branding/BrandMark';
-import { SessionSummary } from './types';
+import { ChatExperience, SessionSummary } from './types';
 import { formatDateTime, formatRelativeTime, getSessionGroupLabel } from './utils';
 
 export type SessionSidebarProps = {
@@ -20,6 +20,7 @@ export type SessionSidebarProps = {
   ready: boolean;
   busy: boolean;
   sessionListLoading: boolean;
+  experience?: ChatExperience;
   currentIdentityLabel: string;
   notReadyMessage: string;
   onSelectSession: (id: string) => void;
@@ -38,6 +39,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
   ready,
   busy,
   sessionListLoading,
+  experience = 'default',
   currentIdentityLabel,
   notReadyMessage,
   onSelectSession,
@@ -49,6 +51,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
   getSessionTitle,
   getSessionSubtitle,
 }) => {
+  const isGuestExperience = experience === 'guest';
   const [sessionQuery, setSessionQuery] = useState('');
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
@@ -118,16 +121,31 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
     setIsSelectMode(false);
   };
 
+  const panelTitle = isGuestExperience ? '对话记录' : '会话管理';
+  const refreshTitle = isGuestExperience ? '刷新对话记录' : '刷新会话历史';
+  const createLabel = isGuestExperience ? '开始新对话' : '新建会话';
+  const searchPlaceholder = isGuestExperience ? '搜索对话标题 / 时间' : '搜索 Session / 标题 / 时间';
+  const summaryLabel = normalizedQuery
+    ? `匹配 ${filteredSessions.length} / ${sessions.length} 条记录`
+    : `共 ${sessions.length} 条记录`;
+  const actionTitle = isGuestExperience ? '对话操作' : '会话操作';
+
   return (
     <aside className="chat-session-panel">
       <div className="chat-session-panel-header">
         <div className="chat-session-panel-heading">
-          <div className="chat-session-brand">
-            <BrandMark size="sm" className="chat-session-brand-mark" />
-            <div className="chat-session-brand-copy">
-              <div className="chat-session-brand-title">support-agent</div>
+          {isGuestExperience ? (
+            <div className="chat-session-panel-label">
+              <History size={16} /> {panelTitle}
             </div>
-          </div>
+          ) : (
+            <div className="chat-session-brand">
+              <BrandMark size="sm" className="chat-session-brand-mark" />
+              <div className="chat-session-brand-copy">
+                <div className="chat-session-brand-title">support-agent</div>
+              </div>
+            </div>
+          )}
           <div className="chat-session-panel-subtitle">{currentIdentityLabel}</div>
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
@@ -148,7 +166,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
             className="btn btn-ghost btn-sm"
             onClick={() => onRefreshSessions()}
             disabled={!ready || busy || isSelectMode || isBatchDeleting}
-            title="刷新会话历史"
+            title={refreshTitle}
           >
             <RefreshCw size={14} />
           </button>
@@ -157,7 +175,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
       <div className="chat-session-toolbar">
         <button className="btn btn-primary chat-session-create-btn" onClick={onNewSession} disabled={!ready || busy}>
-          <Plus size={16} /> 新建会话
+          <Plus size={16} /> {createLabel}
         </button>
       </div>
 
@@ -167,13 +185,13 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
           className="input"
           value={sessionQuery}
           onChange={(e) => setSessionQuery(e.target.value)}
-          placeholder="搜索 Session / 标题 / 时间"
+          placeholder={searchPlaceholder}
           disabled={!ready}
         />
       </div>
 
       <div className="chat-session-summary">
-        {normalizedQuery ? `匹配 ${filteredSessions.length} / ${sessions.length} 个会话` : `共 ${sessions.length} 个会话`}
+        {summaryLabel}
       </div>
 
       <div className="chat-session-list">
@@ -242,8 +260,8 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
                           className={`chat-session-icon-btn ${activeActionMenu === menuId ? 'active' : ''}`}
                           onClick={() => toggleActionMenu(menuId)}
                           disabled={busy}
-                          title="会话操作"
-                          aria-label="会话操作"
+                          title={actionTitle}
+                          aria-label={actionTitle}
                         >
                           <MoreHorizontal size={14} />
                         </button>

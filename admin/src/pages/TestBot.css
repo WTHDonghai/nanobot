@@ -7,8 +7,70 @@
   height: 100vh;
   overflow: hidden;
   background:
-    radial-gradient(circle at top left, rgba(99, 102, 241, 0.07), transparent 30%),
-    linear-gradient(180deg, rgba(241, 245, 249, 0.98), rgba(226, 232, 240, 1));
+    radial-gradient(circle at top left, rgba(15, 118, 110, 0.1), transparent 32%),
+    radial-gradient(circle at top right, rgba(217, 119, 6, 0.12), transparent 28%),
+    linear-gradient(180deg, #f8f5ef 0%, #f2ece1 100%);
+}
+
+.testbot-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 28px 12px;
+}
+
+.testbot-hero-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.testbot-hero-copy h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  line-height: 1.15;
+  color: #1f2937;
+}
+
+.testbot-hero-copy p {
+  margin: 0;
+  max-width: 720px;
+  color: #5b6472;
+  line-height: 1.6;
+}
+
+.testbot-hero-badge {
+  display: inline-flex;
+  width: fit-content;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.testbot-hero-topics {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  max-width: 420px;
+}
+
+.testbot-topic-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #334155;
+  font-size: 0.85rem;
+  box-shadow: 0 8px 24px rgba(148, 163, 184, 0.12);
 }
 
 /* ── Chat layout overrides for the testbot context ── */
@@ -54,7 +116,7 @@
   max-width: 560px;
   width: 100%;
   background: rgba(255, 255, 255, 0.88);
-  border: 1px solid rgba(220, 38, 38, 0.25);
+  border: 1px solid rgba(220, 38, 38, 0.2);
   border-radius: 20px;
   padding: 48px 40px;
   text-align: center;
@@ -131,6 +193,23 @@
 .testbot-loading-text {
   font-size: 0.95rem;
   color: var(--light);
+}
+
+@media (max-width: 900px) {
+  .testbot-hero {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 18px 20px 10px;
+  }
+
+  .testbot-hero-copy h1 {
+    font-size: 1.45rem;
+  }
+
+  .testbot-hero-topics {
+    justify-content: flex-start;
+    max-width: none;
+  }
 }
 
 /* ── Modal body (missing from BotChat.css / Pages.css) ── */

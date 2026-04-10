@@ -39,6 +39,20 @@ class TelemetryConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class PublicBotConfig(BaseModel):
+    """Anonymous visitor access for public bot pages."""
+
+    enabled: bool = False
+    account_id: str = "default"
+    agent_id: str = "default"
+    cookie_name: str = "ov_guest_id"
+    cookie_max_age_seconds: int = 60 * 60 * 24 * 180
+    secret: Optional[str] = None
+    user_id_prefix: str = "guest"
+
+    model_config = {"extra": "forbid"}
+
+
 class ServerConfig(BaseModel):
     """Server configuration (from the ``server`` section of ov.conf)."""
 
@@ -52,6 +66,7 @@ class ServerConfig(BaseModel):
     bot_api_url: str = "http://localhost:18790"  # Vikingbot OpenAPIChannel URL (default port)
     encryption_enabled: bool = False  # Whether API key hashing is enabled
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    public_bot: PublicBotConfig = Field(default_factory=PublicBotConfig)
 
     model_config = {"extra": "forbid"}
 
@@ -97,6 +112,21 @@ def load_server_config(config_path: Optional[str] = None) -> ServerConfig:
     # Get encryption enabled from config data directly (for test compatibility)
     encryption_enabled = data.get("encryption", {}).get("enabled", False)
 
+    bot_data = data.get("bot", {})
+    if not isinstance(bot_data, dict):
+        bot_data = {}
+    bot_ov_server = bot_data.get("ov_server", {})
+    if not isinstance(bot_ov_server, dict):
+        bot_ov_server = {}
+
+    public_bot_data = server_data.get("public_bot")
+    if isinstance(public_bot_data, dict):
+        public_bot_data = dict(public_bot_data)
+        public_bot_data.setdefault("account_id", bot_ov_server.get("account_id", "default"))
+        public_bot_data.setdefault("agent_id", bot_ov_server.get("agent_id", "default"))
+        server_data = dict(server_data)
+        server_data["public_bot"] = public_bot_data
+
     try:
         config = ServerConfig.model_validate(server_data)
     except ValidationError as e:
@@ -135,6 +165,12 @@ def validate_server_config(config: ServerConfig) -> None:
         sys.exit(1)
 
     if config.auth_mode == "trusted":
+        if config.public_bot.enabled:
+            logger.error(
+                "server.public_bot.enabled requires server.auth_mode='api_key'. "
+                "Trusted mode is intended for identity-injecting gateways."
+            )
+            sys.exit(1)
         if not _is_localhost(config.host):
             logger.warning(
                 "SECURITY: server.auth_mode='trusted' on non-localhost host '%s'. "
@@ -142,6 +178,13 @@ def validate_server_config(config: ServerConfig) -> None:
                 config.host,
             )
         return
+
+    if config.public_bot.enabled and not config.root_api_key:
+        logger.error(
+            "server.public_bot.enabled requires server.root_api_key so anonymous visitors can be "
+            "mapped into managed users safely."
+        )
+        sys.exit(1)
 
     if config.root_api_key:
         return

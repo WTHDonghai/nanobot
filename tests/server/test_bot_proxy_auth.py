@@ -8,6 +8,9 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 import openviking.server.routers.bot as bot_router_module
+from openviking.server.auth import get_request_context
+from openviking.server.identity import RequestContext, Role
+from openviking_cli.session.user_id import UserIdentifier
 
 
 def make_request(headers: dict[str, str]) -> Request:
@@ -86,9 +89,75 @@ def test_handoff_proxy_forwards_body_and_api_key(monkeypatch: pytest.MonkeyPatch
     assert response.status_code == 200
     assert response.json()["entry_url"] == "https://example.com/handoff"
     assert captured["url"] == "http://bot-service/bot/v1/handoff"
-    assert captured["json"] == {"session_id": "session-1", "reason": "need human"}
+    assert captured["json"] == {
+        "session_id": "session-1",
+        "reason": "need human",
+        "user_id": "default",
+    }
     assert captured["headers"] == {
         "Content-Type": "application/json",
         "X-API-Key": "test-key",
     }
     assert captured["timeout"] == 30.0
+
+
+def test_chat_stream_proxy_overrides_user_id_for_user_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class StubStreamResponse:
+        status_code = 200
+        text = ""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"event":"response","data":"ok"}'
+
+    class StubAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, json, headers, timeout):
+            captured["method"] = method
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            captured["timeout"] = timeout
+
+            class _ContextManager:
+                async def __aenter__(self_inner):
+                    return StubStreamResponse()
+
+                async def __aexit__(self_inner, exc_type, exc, tb):
+                    return False
+
+            return _ContextManager()
+
+    async def user_ctx() -> RequestContext:
+        return RequestContext(
+            user=UserIdentifier("acme", "guest_123", "default"),
+            role=Role.USER,
+        )
+
+    monkeypatch.setattr(bot_router_module.httpx, "AsyncClient", StubAsyncClient)
+    bot_router_module.set_bot_api_url("http://bot-service")
+
+    app = FastAPI()
+    app.dependency_overrides[get_request_context] = user_ctx
+    app.include_router(bot_router_module.router, prefix="/bot/v1")
+
+    client = TestClient(app)
+    response = client.post(
+        "/bot/v1/chat/stream",
+        json={"message": "hello", "user_id": "tampered-user"},
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert response.status_code == 200
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://bot-service/bot/v1/chat/stream"
+    assert captured["json"] == {"message": "hello", "user_id": "guest_123"}

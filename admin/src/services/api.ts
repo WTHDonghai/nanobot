@@ -52,6 +52,7 @@ export const fetchApi = async <T = any>(
 
   const response = await fetch(`${serverUrl}${path}`, {
     ...fetchConfig,
+    credentials: fetchConfig.credentials ?? 'same-origin',
     headers,
   });
 

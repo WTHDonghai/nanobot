@@ -5,6 +5,9 @@ import { fetchApi } from '../services/api';
 import ChatApp from '../components/chat/ChatApp';
 import './TestBot.css';
 
+const PUBLIC_PAGE_TITLE = '住客服务助手';
+const SERVICE_TOPICS = ['入住办理', '早餐时间', '发票开具', 'Wi-Fi 指引', '设施咨询', '联系人工'];
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type ApiEnvelope<T> = {
@@ -38,11 +41,11 @@ const ErrorScreen = ({ message }: { message: string }) => (
       <div className="testbot-error-icon">
         <AlertCircle size={40} />
       </div>
-      <h1 className="testbot-error-title">无法启动 Bot 测试页</h1>
+      <h1 className="testbot-error-title">无法启动{PUBLIC_PAGE_TITLE}</h1>
       <p className="testbot-error-desc">{message}</p>
       <div className="testbot-error-hint">
-        <p>请在 URL 中提供 API Key：</p>
-        <code>/admin/test-bot?api-key=YOUR_KEY</code>
+        <p>这是公开访问页，不需要注册，也不需要附带用户 API Key。</p>
+        <code>/guest/</code>
       </div>
     </div>
   </div>
@@ -55,7 +58,7 @@ const LoadingScreen = () => (
     <div className="testbot-loading-card">
       <PageBrand />
       <div className="loader" style={{ width: 36, height: 36 }} />
-      <p className="testbot-loading-text">正在验证 API Key…</p>
+      <p className="testbot-loading-text">正在连接{PUBLIC_PAGE_TITLE}…</p>
     </div>
   </div>
 );
@@ -63,8 +66,6 @@ const LoadingScreen = () => (
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 const TestBot: React.FC = () => {
-  const params = new URLSearchParams(window.location.search);
-  const apiKey = params.get('api-key') || '';
   const serverUrl = window.location.origin.replace(/\/$/, '');
 
   const [whoami, setWhoami] = useState<WhoamiResult | null>(null);
@@ -74,9 +75,12 @@ const TestBot: React.FC = () => {
   // Force light theme for the public test page; restore whatever was set before on unmount.
   useEffect(() => {
     const root = document.documentElement;
+    const previousTitle = document.title;
     const previousTheme = root.getAttribute('data-theme');
+    document.title = PUBLIC_PAGE_TITLE;
     root.setAttribute('data-theme', 'light');
     return () => {
+      document.title = previousTitle;
       if (previousTheme) {
         root.setAttribute('data-theme', previousTheme);
       } else {
@@ -86,11 +90,7 @@ const TestBot: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!apiKey) {
-      setAuthLoading(false);
-      return;
-    }
-    fetchApi<ApiEnvelope<WhoamiResult>>(serverUrl, apiKey, '/api/v1/system/whoami')
+    fetchApi<ApiEnvelope<WhoamiResult>>(serverUrl, '', '/api/v1/system/whoami')
       .then((res) => {
         if (!res.result?.account_id || !res.result?.user_id) {
           throw new Error('服务端未返回账户/用户信息');
@@ -101,24 +101,38 @@ const TestBot: React.FC = () => {
         setAuthError(err instanceof Error ? err.message : '身份验证失败');
       })
       .finally(() => setAuthLoading(false));
-  }, [apiKey, serverUrl]);
+  }, [serverUrl]);
 
-  if (!apiKey) {
-    return <ErrorScreen message="缺少必需参数 api-key。请通过 URL 提供有效的 API Key。" />;
-  }
   if (authLoading) return <LoadingScreen />;
   if (authError || !whoami) {
-    return <ErrorScreen message={`API Key 验证失败：${authError || '无法获取身份信息'}`} />;
+    return (
+      <ErrorScreen
+        message={`访问身份验证失败：${authError || '无法获取身份信息'}。请确认服务端已开启匿名 public_bot 配置。`}
+      />
+    );
   }
 
   return (
     <div className="testbot-root">
+      <section className="testbot-hero">
+        <div className="testbot-hero-copy">
+          <span className="testbot-hero-badge">24 小时在线服务</span>
+          <h1>{PUBLIC_PAGE_TITLE}</h1>
+          <p>无需注册，打开即可咨询入住、客房、发票、设施与人工服务相关问题。</p>
+        </div>
+        <div className="testbot-hero-topics" aria-label="可咨询事项">
+          {SERVICE_TOPICS.map((topic) => (
+            <span key={topic} className="testbot-topic-chip">{topic}</span>
+          ))}
+        </div>
+      </section>
       <ChatApp
         serverUrl={serverUrl}
-        apiKey={apiKey}
+        apiKey=""
         userId={whoami.user_id}
         accountId={whoami.account_id}
         role={whoami.role || 'user'}
+        experience="guest"
         hideUserSelector={true}
       />
     </div>

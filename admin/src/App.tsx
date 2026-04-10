@@ -12,6 +12,13 @@ import Resources from './pages/Resources';
 import RecallTest from './pages/RecallTest';
 import TestBot from './pages/TestBot';
 
+const getRouterBase = () => {
+  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/guest')) {
+    return '/guest';
+  }
+  return '/admin';
+};
+
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const { serverUrl } = useAuth();
   if (!serverUrl) {
@@ -20,14 +27,19 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   return <>{children}</>;
 };
 
-const AppRoutes = () => {
+const GuestAppRoutes = () => (
+  <Routes>
+    <Route path="/" element={<TestBot />} />
+    <Route path="*" element={<Navigate to="/" replace />} />
+  </Routes>
+);
+
+const AdminAppRoutes = () => {
   const { role } = useAuth();
   const defaultPage = role === 'user' ? '/resources' : '/dashboard';
 
   return (
     <Routes>
-      {/* Public route: no login required, credentials come from URL params */}
-      <Route path="/test-bot" element={<TestBot />} />
       <Route path="/login" element={<Login />} />
       <Route
         path="/*"
@@ -56,11 +68,14 @@ const AppRoutes = () => {
 import { ThemeProvider } from './contexts/ThemeContext';
 
 const App = () => {
+  const routerBase = getRouterBase();
+  const guestMode = routerBase === '/guest';
+
   return (
-    <BrowserRouter basename="/admin">
+    <BrowserRouter basename={routerBase}>
       <ThemeProvider>
         <AuthProvider>
-          <AppRoutes />
+          {guestMode ? <GuestAppRoutes /> : <AdminAppRoutes />}
         </AuthProvider>
       </ThemeProvider>
     </BrowserRouter>

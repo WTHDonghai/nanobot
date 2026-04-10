@@ -16,8 +16,11 @@ export const WELCOME_TEXT = `您好，我是您的AI工作助手，可为您提�
 请直接输入您的问题或指令。`;
 export const MAX_SESSION_CONTEXT_BUDGET = 100_000_000;
 
-export const makeWelcomeMessages = (status = ''): ChatMessage[] => [
-  { key: 'welcome', role: 'bot', text: WELCOME_TEXT, status },
+export const makeWelcomeMessages = (
+  status = '',
+  welcomeText = WELCOME_TEXT,
+): ChatMessage[] => [
+  { key: 'welcome', role: 'bot', text: welcomeText, status },
 ];
 
 export const unwrapResult = <T,>(response: ApiEnvelope<T>, fallbackMessage: string): T => {
@@ -239,9 +242,10 @@ export const normalizeMarkdownForDisplay = (value: string): string => {
 export const mapSessionMessages = (
   sessionMessages: SessionContextMessage[],
   serverUrl = '',
+  welcomeText = WELCOME_TEXT,
 ): ChatMessage[] => {
   if (sessionMessages.length === 0) {
-    return makeWelcomeMessages('该会话暂无消息，可以继续提问');
+    return makeWelcomeMessages('该会话暂无消息，可以继续提问', welcomeText);
   }
 
   return sessionMessages.map((message, index) => ({

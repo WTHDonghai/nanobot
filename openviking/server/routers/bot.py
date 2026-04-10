@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from openviking.server.auth import get_request_context
-from openviking.server.identity import RequestContext
+from openviking.server.identity import RequestContext, Role
 from openviking_cli.utils.logger import get_logger
 
 router = APIRouter(prefix="", tags=["bot"])
@@ -68,6 +68,24 @@ def require_auth_token(request: Request) -> str:
             detail="Missing authentication token",
         )
     return auth_token
+
+
+def _prepare_bot_request_body(body: object, ctx: RequestContext) -> dict:
+    """Normalize proxied bot request payloads and enforce USER scoping."""
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Request body must be a JSON object",
+        )
+
+    proxied = dict(body)
+    if ctx.role == Role.USER:
+        proxied["user_id"] = ctx.user.user_id
+    elif ctx.user.user_id and "user_id" not in proxied:
+        proxied["user_id"] = ctx.user.user_id
+    return proxied
+
+
 @router.get("/health")
 async def health_check(request: Request):
     """Health check endpoint for Bot API.
@@ -140,7 +158,7 @@ async def proxy_image(image_name: str, request: Request):
 @router.post("/chat")
 async def chat(
     request: Request,
-    _ctx: RequestContext = Depends(get_request_context),
+    ctx: RequestContext = Depends(get_request_context),
 ):
     """Send a message to the bot and get a response.
 
@@ -157,6 +175,7 @@ async def chat(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid JSON in request body",
         )
+    body = _prepare_bot_request_body(body, ctx)
 
     try:
         async with httpx.AsyncClient() as client:
@@ -197,7 +216,7 @@ async def chat(
 @router.post("/chat/stream")
 async def chat_stream(
     request: Request,
-    _ctx: RequestContext = Depends(get_request_context),
+    ctx: RequestContext = Depends(get_request_context),
 ):
     """Send a message to the bot and get a streaming response.
 
@@ -214,6 +233,7 @@ async def chat_stream(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid JSON in request body",
         )
+    body = _prepare_bot_request_body(body, ctx)
 
     async def event_stream() -> AsyncGenerator[str, None]:
         """Generate SSE events from bot response stream."""
@@ -267,7 +287,7 @@ async def chat_stream(
 @router.post("/handoff")
 async def handoff(
     request: Request,
-    _ctx: RequestContext = Depends(get_request_context),
+    ctx: RequestContext = Depends(get_request_context),
 ):
     """Create a human handoff via the bot service."""
     bot_url = get_bot_url()
@@ -280,6 +300,7 @@ async def handoff(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid JSON in request body",
         )
+    body = _prepare_bot_request_body(body, ctx)
 
     try:
         async with httpx.AsyncClient() as client:

@@ -18,6 +18,7 @@ import remarkGfm from 'remark-gfm';
 import { fetchApi, requestHumanHandoff } from '../../services/api';
 import {
   ApiEnvelope,
+  ChatExperience,
   ChatMessage,
   RawSessionListItem,
   SessionArchiveResult,
@@ -134,6 +135,7 @@ export type ChatAppProps = {
   accountId: string;
   userId: string;
   role: string;
+  experience?: ChatExperience;
   hideUserSelector?: boolean;
 };
 
@@ -174,9 +176,15 @@ const ChatApp: React.FC<ChatAppProps> = ({
   accountId,
   userId,
   role,
+  experience = 'default',
   hideUserSelector = false,
 }) => {
-  const [messages, setMessages] = useState<ChatMessage[]>(makeWelcomeMessages());
+  const isGuestExperience = experience === 'guest';
+  const welcomeText = isGuestExperience
+    ? '您好，欢迎使用住客服务助手。您可以咨询入住、早餐、发票、Wi‑Fi、设施开放时间或联系人工服务。'
+    : undefined;
+  const makeInitialMessages = (status = '') => makeWelcomeMessages(status, welcomeText);
+  const [messages, setMessages] = useState<ChatMessage[]>(makeInitialMessages());
   const [input, setInput] = useState('');
   const [users, setUsers] = useState<UserOption[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
@@ -222,7 +230,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
     persistLastActiveSession(null);
     setSessionId(null);
     setActiveSessionMeta(null);
-    setMessages(makeWelcomeMessages(status));
+    setMessages(makeInitialMessages(status));
     setInput('');
     setHandoffNotice('');
     setHandoffLoadingKey(null);
@@ -487,7 +495,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
         const matched = details.find((session) => session.session_id === activeId) || null;
         setActiveSessionMeta(matched);
         if (!matched && sessionId === activeId) {
-          resetConversation('当前会话已不存在，请重新开始');
+          resetConversation(isGuestExperience ? '之前的服务记录已不可用，请开始新的对话' : '当前会话已不存在，请重新开始');
         }
       }
 
@@ -523,7 +531,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
     setSessionMutating(true);
     try {
       const nextSessionId = await requestNewSession();
-      const welcomeMessages = makeWelcomeMessages('新会话已开始');
+      const welcomeMessages = makeInitialMessages(isGuestExperience ? '新的服务对话已开始' : '新会话已开始');
       setCachedSessionMessages(nextSessionId, welcomeMessages);
       persistLastActiveSession(nextSessionId);
       setSessionId(nextSessionId);
@@ -608,8 +616,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
       rememberSessionTitle(targetSessionId, derivedTitle);
       const nextMessages = mergedMessages.length > 0
-        ? mergeCachedMessageMetadata(mapSessionMessages(mergedMessages, serverUrl), cachedMessages || [])
-        : (cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages, serverUrl));
+        ? mergeCachedMessageMetadata(mapSessionMessages(mergedMessages, serverUrl, welcomeText), cachedMessages || [])
+        : (cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages, serverUrl, welcomeText));
 
       setCachedSessionMessages(targetSessionId, nextMessages);
       persistLastActiveSession(targetSessionId);
@@ -919,9 +927,14 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
       const url = `${serverUrl}/bot/v1/chat/stream`;
       streamStartedAt = performance.now();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (apiKey) {
+        headers['X-API-Key'] = apiKey;
+      }
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+        credentials: 'same-origin',
+        headers,
         body: JSON.stringify({ message: userMsg, session_id: activeSessionId, user_id: selectedUserId }),
       });
 
@@ -1126,23 +1139,28 @@ const ChatApp: React.FC<ChatAppProps> = ({
         summary: normalizedBotMessage || undefined,
         latest_user_message: normalizedUserMessage || undefined,
         latest_assistant_message: normalizedBotMessage || undefined,
-        source: 'admin_chat_ui',
+        source: isGuestExperience ? 'guest_public_ui' : 'admin_chat_ui',
         metadata: {
           account_id: role === 'user' ? accountId : selectedAccountId,
           ui_role: role,
+          ui_experience: experience,
           trigger_message_key: triggerMessageKey,
         },
       });
 
       const entryUrl = response.entry_url?.trim();
       if (!entryUrl) {
-        throw new Error('转人工入口链接缺失，请联系管理员检查配置。');
+        throw new Error(isGuestExperience ? '人工服务入口暂不可用，请稍后重试。' : '转人工入口链接缺失，请联系管理员检查配置。');
       }
 
-      setHandoffNotice(response.message || '已为您准备转人工服务入口。');
-      window.location.assign(entryUrl);
+      setHandoffNotice(response.message || (isGuestExperience ? '已为您准备人工服务入口。' : '已为您准备转人工服务入口。'));
+      if (isGuestExperience) {
+        window.open(entryUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        window.location.assign(entryUrl);
+      }
     } catch (err) {
-      setSessionError(err instanceof Error ? err.message : '转人工失败，请稍后重试。');
+      setSessionError(err instanceof Error ? err.message : (isGuestExperience ? '联系人工失败，请稍后重试。' : '转人工失败，请稍后重试。'));
     } finally {
       setHandoffLoadingKey(null);
     }
@@ -1165,18 +1183,23 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
   const ready = role === 'user' ? Boolean(selectedUserId) : Boolean(selectedAccountId && selectedUserId);
   const busy = loading || sessionReplayLoading || sessionMutating;
-  const currentIdentityLabel = selectedUserId || userId || '当前身份';
+  const currentIdentityLabel = isGuestExperience
+    ? '您的对话记录'
+    : (selectedUserId || userId || '当前身份');
   const notReadyMessage = sessionError
     ? '身份未就绪，请先处理上方错误提示。'
-    : '正在同步身份与会话上下文...';
+    : (isGuestExperience ? '正在为您准备服务记录...' : '正在同步身份与会话上下文...');
   const latestBotMessage = [...messages]
     .reverse()
     .find((message) => message.role === 'bot' && !message.loading && message.key !== 'welcome');
   const handoffButtonLoading = handoffLoadingKey === 'global-handoff'
     || handoffLoadingKey === latestBotMessage?.key;
+  const currentSessionLabel = isGuestExperience ? '当前服务' : '当前会话';
+  const currentSessionActionLabel = isGuestExperience ? '当前服务操作' : '当前会话操作';
+  const emptySessionTitle = isGuestExperience ? '等待开始' : '未开始新会话';
   const activeSessionTitle = sessionId
-    ? (renamedSessionTitles[sessionId] || derivedSessionTitles[sessionId] || (activeSessionMeta ? getSessionTitle(activeSessionMeta) : '当前会话'))
-    : '未开始新会话';
+    ? (renamedSessionTitles[sessionId] || derivedSessionTitles[sessionId] || (activeSessionMeta ? getSessionTitle(activeSessionMeta) : currentSessionLabel))
+    : emptySessionTitle;
 
   const handleExportPdf = async (message: ChatMessage, index: number) => {
     if (busy || exportingMessageKey) return;
@@ -1192,7 +1215,9 @@ const ChatApp: React.FC<ChatAppProps> = ({
       return;
     }
 
-    const exportTitle = activeSessionTitle === '未开始新会话' ? '会话导出' : activeSessionTitle;
+    const exportTitle = activeSessionTitle === emptySessionTitle
+      ? (isGuestExperience ? '对话导出' : '会话导出')
+      : activeSessionTitle;
     const exportTime = formatDateTime(new Date().toISOString());
     const exportStamp = exportTime.replace(/[^\d]/g, '').slice(0, 14) || `${Date.now()}`;
 
@@ -1222,6 +1247,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
         ready={ready}
         busy={busy}
         sessionListLoading={sessionListLoading}
+        experience={experience}
         currentIdentityLabel={currentIdentityLabel}
         notReadyMessage={notReadyMessage}
         onSelectSession={(id) => { void handleSelectSession(id); }}
@@ -1237,7 +1263,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
       <div className="chat-main-panel">
         <div className="chat-config-bar">
           <div className="chat-current-session">
-            <span className="chat-current-label">当前会话</span>
+            <span className="chat-current-label">{currentSessionLabel}</span>
             <span className="chat-current-title" title={activeSessionTitle}>{activeSessionTitle}</span>
             {sessionId && (
               <div
@@ -1248,8 +1274,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
                   className={`chat-session-icon-btn chat-current-action-btn ${activeActionMenu === 'current-session' ? 'active' : ''}`}
                   onClick={() => toggleActionMenu('current-session')}
                   disabled={busy || !activeSessionMeta}
-                  title="当前会话操作"
-                  aria-label="当前会话操作"
+                  title={currentSessionActionLabel}
+                  aria-label={currentSessionActionLabel}
                 >
                   <MoreHorizontal size={14} />
                 </button>
@@ -1265,7 +1291,9 @@ const ChatApp: React.FC<ChatAppProps> = ({
                 )}
               </div>
             )}
-            <code title={sessionId || ''}>{sessionId ? shortenSessionId(sessionId) : '待创建'}</code>
+            {!isGuestExperience && (
+              <code title={sessionId || ''}>{sessionId ? shortenSessionId(sessionId) : '待创建'}</code>
+            )}
             <span className="chat-current-meta">{messages.filter(m => m.key !== 'welcome').length} 条消息</span>
             <span className="chat-current-meta">
               最近更新 {formatRelativeTime(activeSessionMeta?.updated_at || activeSessionMeta?.created_at)}
@@ -1371,7 +1399,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
                               {normalizeMarkdownForDisplay(message.text)}
                             </ReactMarkdown>
                           </div>
-                          {message.role === 'bot' && message.key !== 'welcome' && (
+                          {!isGuestExperience && message.role === 'bot' && message.key !== 'welcome' && (
                             <div className="chat-bubble-actions" data-export-ignore="true">
                               <button
                                 className="chat-export-btn"
@@ -1420,7 +1448,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
             <button
               type="button"
               className="chat-transfer-btn chat-transfer-btn-inline"
-              title={handoffButtonLoading ? '转人工中...' : '转人工服务'}
+              title={handoffButtonLoading ? (isGuestExperience ? '正在连接人工...' : '转人工中...') : (isGuestExperience ? '联系人工服务' : '转人工服务')}
               onClick={() => void handleHumanHandoff(latestBotMessage)}
               disabled={Boolean(handoffLoadingKey) || !selectedUserId}
             >
@@ -1429,7 +1457,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
               ) : (
                 <Headphones size={13} />
               )}
-              {handoffButtonLoading ? '转人工中...' : '转人工'}
+              {handoffButtonLoading ? (isGuestExperience ? '正在连接人工...' : '转人工中...') : (isGuestExperience ? '联系人工' : '转人工')}
             </button>
           </div>
           <div className="chat-input-box">

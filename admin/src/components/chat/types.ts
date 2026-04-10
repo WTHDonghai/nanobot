@@ -6,6 +6,8 @@ export type ApiEnvelope<T> = {
   };
 };
 
+export type ChatExperience = 'default' | 'guest';
+
 export type UserOption = {
   user_id: string;
 };

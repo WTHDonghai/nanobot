@@ -5,7 +5,14 @@
     "root_api_key": "replace-with-a-strong-secret",
     "cors_origins": ["*"],
     "with_bot": true,
-    "bot_api_url": "http://vikingbot:18790"
+    "bot_api_url": "http://vikingbot:18790",
+    "public_bot": {
+      "enabled": true,
+      "account_id": "01-account",
+      "agent_id": "default",
+      "cookie_name": "ov_guest_id",
+      "secret": "replace-with-a-dedicated-public-bot-secret"
+    }
   },
   "storage": {
     "workspace": "/app/data",

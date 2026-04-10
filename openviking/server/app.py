@@ -15,6 +15,7 @@ from openviking.server.api_keys import APIKeyManager
 from openviking.server.config import ServerConfig, load_server_config, validate_server_config
 from openviking.server.dependencies import set_service
 from openviking.server.models import ERROR_CODE_TO_HTTP_STATUS, ErrorInfo, Response
+from openviking.server.public_bot import PublicBotIdentityResolver
 from openviking.server.routers import (
     admin_router,
     bot_router,
@@ -71,6 +72,7 @@ def create_app(
             logger.info("OpenVikingService initialized")
 
         set_service(service)
+        app.state.public_bot_identity_resolver = None
 
         # Initialize APIKeyManager after service (needs VikingFS)
         if config.auth_mode == "api_key" and config.root_api_key:
@@ -84,6 +86,20 @@ def create_app(
             logger.info(
                 "APIKeyManager initialized with encryption_enabled=%s", config.encryption_enabled
             )
+            if config.public_bot.enabled:
+                resolver = PublicBotIdentityResolver(
+                    config=config.public_bot,
+                    api_key_manager=api_key_manager,
+                    service=service,
+                    root_api_key=config.root_api_key,
+                )
+                await resolver.validate()
+                app.state.public_bot_identity_resolver = resolver
+                logger.info(
+                    "Public bot access enabled for account=%s cookie=%s",
+                    config.public_bot.account_id,
+                    config.public_bot.cookie_name,
+                )
         elif config.auth_mode == "trusted":
             app.state.api_key_manager = None
             if config.root_api_key:
@@ -142,6 +158,7 @@ def create_app(
     )
 
     app.state.config = config
+    app.state.public_bot_identity_resolver = None
 
     # Add CORS middleware
     app.add_middleware(
@@ -159,6 +176,14 @@ def create_app(
         response = await call_next(request)
         process_time = time.time() - start_time
         response.headers["X-Process-Time"] = str(process_time)
+        return response
+
+    @app.middleware("http")
+    async def attach_public_bot_cookie(request: Request, call_next: Callable):
+        response = await call_next(request)
+        resolver = getattr(request.app.state, "public_bot_identity_resolver", None)
+        if resolver is not None:
+            resolver.apply_cookie(request, response)
         return response
 
     # Add exception handler for OpenVikingError
@@ -242,8 +267,18 @@ def create_app(
             if full_path and target.is_file():
                 return FileResponse(str(target))
             return FileResponse(str(admin_dist / "index.html"))
+
+        @app.get("/guest")
+        @app.get("/guest/")
+        @app.get("/guest/{full_path:path}")
+        async def serve_guest_spa(full_path: str = ""):
+            target = admin_dist / full_path
+            if full_path and target.is_file():
+                return FileResponse(str(target))
+            return FileResponse(str(admin_dist / "index.html"))
             
         logger.info("Admin Panel hosted at /admin/")
+        logger.info("Guest Bot hosted at /guest/")
     else:
         logger.info("Admin Panel static files not found, /admin/ endpoint not mounted.")
 
