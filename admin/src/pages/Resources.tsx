@@ -103,19 +103,6 @@ const formatTime = (value: string) => {
   }).format(date);
 };
 
-const formatSourceType = (sourceType: string) => {
-  switch (sourceType) {
-    case 'file':
-      return '本地文件';
-    case 'directory':
-      return '本地目录';
-    case 'remote':
-      return '远程来源';
-    default:
-      return '未知来源';
-  }
-};
-
 const formatPath = (path: string) => (path ? `/${path}` : '/');
 
 const normalizeDocumentProcessingStatus = (
@@ -1831,11 +1818,6 @@ const Resources = () => {
                         {formatDocumentProcessingStatus(entry.processing_status)}
                       </span>
                     )}
-                    {/*<div className="fm-icon-meta">
-                      <span className="fm-badge">
-                        {folder ? '目录' : formatSourceType(entry.source_type)}
-                      </span>
-                    </div>*/}
                   </div>
                 );
               })}
@@ -1881,7 +1863,6 @@ const Resources = () => {
                           <span>{folder ? entry.name : entry.display_name}</span>
                         </div>
                       </td>
-                      {/*<td>{folder ? '目录' : formatSourceType(entry.source_type)}</td>*/}
                       <td>{folder ? '--' : entry.source_format || '待识别'}</td>
                       <td>
                         {folder ? '--' : (
@@ -1982,7 +1963,6 @@ const Resources = () => {
                     <FileText size={18} />
                     <span>{selectedEntry.display_name}</span>
                   </div>
-                  {/*<span className="fm-badge">{formatSourceType(selectedEntry.source_type)}</span>*/}
                 </div>
 
                 <div className="fm-inspector-actions">

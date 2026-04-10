@@ -24,7 +24,6 @@ import {
   SessionArchiveResult,
   SessionContextResult,
   SessionSummary,
-  UserOption,
 } from './types';
 import {
   MAX_SESSION_CONTEXT_BUDGET,
@@ -190,7 +189,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const makeInitialMessages = (status = '') => makeWelcomeMessages(status, welcomeText);
   const [messages, setMessages] = useState<ChatMessage[]>(makeInitialMessages());
   const [input, setInput] = useState('');
-  const [users, setUsers] = useState<UserOption[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
   const [selectedUserId, setSelectedUserId] = useState('');
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -791,15 +789,12 @@ const ChatApp: React.FC<ChatAppProps> = ({
   useEffect(() => {
     if (hideUserSelector && userId) {
       setSessionError('');
-      setUsers([{ user_id: userId }]);
       setSelectedUserId(userId);
     } else if (role !== 'user') {
       if (userId) {
         setSessionError('');
-        setUsers([{ user_id: userId }]);
         setSelectedUserId(userId);
       } else {
-        setUsers([]);
         setSelectedUserId('');
         setSessionError('当前登录身份缺少 user_id，暂时无法加载会话。');
       }
@@ -810,21 +805,17 @@ const ChatApp: React.FC<ChatAppProps> = ({
           const whoami = unwrapResult(res, '获取当前用户失败');
           if (whoami.user_id) {
             setSessionError('');
-            setUsers([{ user_id: whoami.user_id }]);
             setSelectedUserId(whoami.user_id);
           } else {
-            setUsers([]);
             setSelectedUserId('');
             setSessionError('服务端未返回当前用户身份，暂时无法加载会话。');
           }
         })
         .catch(() => {
-          setUsers([]);
           setSelectedUserId('');
           setSessionError('获取当前身份失败，请刷新页面或重新登录。');
         });
     } else {
-      setUsers([]);
       setSelectedUserId('');
       setSessionError('当前身份未就绪，暂时无法加载会话。');
     }
@@ -1191,9 +1182,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
   const ready = role === 'user' ? Boolean(selectedUserId) : Boolean(selectedAccountId && selectedUserId);
   const busy = loading || sessionReplayLoading || sessionMutating;
-  const currentIdentityLabel = isGuestExperience
-    ? '您的对话记录'
-    : (selectedUserId || userId || '当前身份');
   const notReadyMessage = sessionError
     ? '身份未就绪，请先处理上方错误提示。'
     : '正在为您准备服务记录...';
@@ -1255,8 +1243,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
         ready={ready}
         busy={busy}
         sessionListLoading={sessionListLoading}
-        experience={experience}
-        currentIdentityLabel={currentIdentityLabel}
         notReadyMessage={notReadyMessage}
         onSelectSession={(id) => { void handleSelectSession(id); }}
         onNewSession={handleNewSession}

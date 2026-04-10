@@ -10,7 +10,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import BrandMark from '../branding/BrandMark';
-import { ChatExperience, SessionSummary } from './types';
+import { SessionSummary } from './types';
 import { formatDateTime, formatRelativeTime, getSessionGroupLabel } from './utils';
 
 export type SessionSidebarProps = {
@@ -19,8 +19,6 @@ export type SessionSidebarProps = {
   ready: boolean;
   busy: boolean;
   sessionListLoading: boolean;
-  experience?: ChatExperience;
-  currentIdentityLabel: string;
   notReadyMessage: string;
   onSelectSession: (id: string) => void;
   onNewSession: () => void;
@@ -37,8 +35,6 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
   ready,
   busy,
   sessionListLoading,
-  experience = 'default',
-  currentIdentityLabel,
   notReadyMessage,
   onSelectSession,
   onNewSession,
@@ -48,7 +44,6 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
   getSessionTitle,
   getSessionSubtitle,
 }) => {
-  const isGuestExperience = experience === 'guest';
   const [sessionQuery, setSessionQuery] = useState('');
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
