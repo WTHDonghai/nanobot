@@ -1177,11 +1177,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
       }
 
       setHandoffNotice(response.message || '已为您准备人工服务入口。');
-      if (isGuestExperience) {
-        window.open(entryUrl, '_blank', 'noopener,noreferrer');
-      } else {
-        window.location.assign(entryUrl);
-      }
+      window.location.assign(entryUrl);
     } catch (err) {
       setSessionError(err instanceof Error ? err.message : '联系人工失败，请稍后重试。');
     } finally {
