@@ -7,9 +7,9 @@
   height: 100vh;
   overflow: hidden;
   background:
-    radial-gradient(circle at top left, rgba(15, 118, 110, 0.1), transparent 32%),
-    radial-gradient(circle at top right, rgba(217, 119, 6, 0.12), transparent 28%),
-    linear-gradient(180deg, #f8f5ef 0%, #f2ece1 100%);
+    radial-gradient(ellipse at top left, rgba(99, 102, 241, 0.11) 0%, transparent 38%),
+    radial-gradient(ellipse at bottom right, rgba(139, 92, 246, 0.08) 0%, transparent 36%),
+    linear-gradient(160deg, #f0f2ff 0%, #eef1f9 50%, #e8ecf6 100%);
 }
 
 .testbot-hero {

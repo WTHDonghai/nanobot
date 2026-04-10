@@ -1,11 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   CheckSquare,
-  History,
+  MessageSquareDashed,
   MoreHorizontal,
   Pencil,
   Plus,
-  RefreshCw,
   Search,
   Square,
   Trash2,
@@ -25,7 +24,6 @@ export type SessionSidebarProps = {
   notReadyMessage: string;
   onSelectSession: (id: string) => void;
   onNewSession: () => void;
-  onRefreshSessions: () => void;
   onRenameSession: (session: SessionSummary) => void;
   onDeleteSession: (session: SessionSummary) => void;
   onBatchDelete: (ids: string[]) => Promise<void>;
@@ -44,7 +42,6 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
   notReadyMessage,
   onSelectSession,
   onNewSession,
-  onRefreshSessions,
   onRenameSession,
   onDeleteSession,
   onBatchDelete,
@@ -121,55 +118,29 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
     setIsSelectMode(false);
   };
 
-  const panelTitle = isGuestExperience ? '对话记录' : '会话管理';
-  const refreshTitle = isGuestExperience ? '刷新对话记录' : '刷新会话历史';
-  const createLabel = isGuestExperience ? '开始新对话' : '新建会话';
-  const searchPlaceholder = isGuestExperience ? '搜索对话标题 / 时间' : '搜索 Session / 标题 / 时间';
+  const brandTitle = '西软客服助理';
+  const createLabel = '开始新对话';
+  const searchPlaceholder = '搜索对话标题 / 时间';
   const summaryLabel = normalizedQuery
     ? `匹配 ${filteredSessions.length} / ${sessions.length} 条记录`
     : `共 ${sessions.length} 条记录`;
-  const actionTitle = isGuestExperience ? '对话操作' : '会话操作';
+  const actionTitle = '对话操作';
+  const manageTitle = isSelectMode ? '退出批量选择' : '批量选择';
 
   return (
     <aside className="chat-session-panel">
-      <div className="chat-session-panel-header">
+      <div className="chat-session-panel-header guest">
         <div className="chat-session-panel-heading">
-          {isGuestExperience ? (
-            <div className="chat-session-panel-label">
-              <History size={16} /> {panelTitle}
+          <div className="chat-session-brand chat-session-brand--hero">
+            <BrandMark
+              size="lg"
+              className="chat-session-brand-mark chat-session-brand-mark--hero"
+              alt={`${brandTitle} logo`}
+            />
+            <div className="chat-session-brand-copy">
+              <div className="chat-session-brand-title">{brandTitle}</div>
             </div>
-          ) : (
-            <div className="chat-session-brand">
-              <BrandMark size="sm" className="chat-session-brand-mark" />
-              <div className="chat-session-brand-copy">
-                <div className="chat-session-brand-title">support-agent</div>
-              </div>
-            </div>
-          )}
-          <div className="chat-session-panel-subtitle">{currentIdentityLabel}</div>
-        </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          {sessions.length > 0 && (
-            <button
-              className={`btn btn-sm ${isSelectMode ? 'btn-primary' : 'btn-ghost'}`}
-              onClick={() => {
-                setIsSelectMode(!isSelectMode);
-                if (!isSelectMode) setSelectedSessionIds(new Set());
-              }}
-              disabled={!ready || busy || isBatchDeleting}
-              title={isSelectMode ? '取消管理' : '批量管理'}
-            >
-              {isSelectMode ? '完成' : '管理'}
-            </button>
-          )}
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => onRefreshSessions()}
-            disabled={!ready || busy || isSelectMode || isBatchDeleting}
-            title={refreshTitle}
-          >
-            <RefreshCw size={14} />
-          </button>
+          </div>
         </div>
       </div>
 
@@ -177,6 +148,21 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
         <button className="btn btn-primary chat-session-create-btn" onClick={onNewSession} disabled={!ready || busy}>
           <Plus size={16} /> {createLabel}
         </button>
+        {sessions.length > 0 && (
+          <button
+            className={`btn btn-ghost chat-session-manage-btn ${isSelectMode ? 'active' : ''}`}
+            onClick={() => {
+              const nextSelectMode = !isSelectMode;
+              setIsSelectMode(nextSelectMode);
+              if (!nextSelectMode) setSelectedSessionIds(new Set());
+            }}
+            disabled={!ready || busy || isBatchDeleting}
+            title={manageTitle}
+            aria-label={manageTitle}
+          >
+            <CheckSquare size={18} />
+          </button>
+        )}
       </div>
 
       <div className="chat-session-search">
@@ -191,7 +177,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
       </div>
 
       <div className="chat-session-summary">
-        {summaryLabel}
+        {(sessions.length > 0 || normalizedQuery) && summaryLabel}
       </div>
 
       <div className="chat-session-list">
@@ -284,7 +270,10 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
           </section>
         ))}
         {ready && !sessionListLoading && sessions.length === 0 && (
-          <div className="chat-session-empty">暂无历史会话，发送第一条消息后会自动记录。</div>
+          <div className="chat-session-empty">
+            <MessageSquareDashed size={28} strokeWidth={1.5} className="chat-session-empty-icon" />
+            <span>暂无历史对话，发送第一条消息后会自动记录。</span>
+          </div>
         )}
         {ready && !sessionListLoading && sessions.length > 0 && filteredSessions.length === 0 && (
           <div className="chat-session-empty">没有匹配的历史会话。</div>

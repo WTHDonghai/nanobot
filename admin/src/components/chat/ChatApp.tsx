@@ -180,9 +180,13 @@ const ChatApp: React.FC<ChatAppProps> = ({
   hideUserSelector = false,
 }) => {
   const isGuestExperience = experience === 'guest';
-  const welcomeText = isGuestExperience
-    ? '您好，欢迎使用住客服务助手。您可以咨询入住、早餐、发票、Wi‑Fi、设施开放时间或联系人工服务。'
-    : undefined;
+  const welcomeText = `您好，我是您的AI工作助手，可为您提供：
+
+1）全系统操作指南；
+
+2）常见问题排查。
+
+请直接输入您的问题或指令。`
   const makeInitialMessages = (status = '') => makeWelcomeMessages(status, welcomeText);
   const [messages, setMessages] = useState<ChatMessage[]>(makeInitialMessages());
   const [input, setInput] = useState('');
@@ -373,7 +377,11 @@ const ChatApp: React.FC<ChatAppProps> = ({
   }
 
   function getSessionSubtitle(session: SessionSummary): string {
-    return shortenSessionId(session.session_id);
+    if (typeof session.message_count === 'number' && session.message_count > 0) {
+      return `${session.message_count} 条消息`;
+    }
+    const timeStr = formatShortSessionTime(session.created_at || session.updated_at);
+    return timeStr !== '未命名会话' ? `创建于 ${timeStr}` : '初始化中...';
   }
 
   function toggleActionMenu(menuId: string) {
@@ -495,7 +503,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
         const matched = details.find((session) => session.session_id === activeId) || null;
         setActiveSessionMeta(matched);
         if (!matched && sessionId === activeId) {
-          resetConversation(isGuestExperience ? '之前的服务记录已不可用，请开始新的对话' : '当前会话已不存在，请重新开始');
+        resetConversation('之前的服务记录已不可用，请开始新的对话');
         }
       }
 
@@ -531,7 +539,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
     setSessionMutating(true);
     try {
       const nextSessionId = await requestNewSession();
-      const welcomeMessages = makeInitialMessages(isGuestExperience ? '新的服务对话已开始' : '新会话已开始');
+      const welcomeMessages = makeInitialMessages('新的服务对话已开始');
       setCachedSessionMessages(nextSessionId, welcomeMessages);
       persistLastActiveSession(nextSessionId);
       setSessionId(nextSessionId);
@@ -1150,17 +1158,17 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
       const entryUrl = response.entry_url?.trim();
       if (!entryUrl) {
-        throw new Error(isGuestExperience ? '人工服务入口暂不可用，请稍后重试。' : '转人工入口链接缺失，请联系管理员检查配置。');
+        throw new Error('人工服务入口暂不可用，请稍后重试。');
       }
 
-      setHandoffNotice(response.message || (isGuestExperience ? '已为您准备人工服务入口。' : '已为您准备转人工服务入口。'));
+      setHandoffNotice(response.message || '已为您准备人工服务入口。');
       if (isGuestExperience) {
         window.open(entryUrl, '_blank', 'noopener,noreferrer');
       } else {
         window.location.assign(entryUrl);
       }
     } catch (err) {
-      setSessionError(err instanceof Error ? err.message : (isGuestExperience ? '联系人工失败，请稍后重试。' : '转人工失败，请稍后重试。'));
+      setSessionError(err instanceof Error ? err.message : '联系人工失败，请稍后重试。');
     } finally {
       setHandoffLoadingKey(null);
     }
@@ -1188,15 +1196,15 @@ const ChatApp: React.FC<ChatAppProps> = ({
     : (selectedUserId || userId || '当前身份');
   const notReadyMessage = sessionError
     ? '身份未就绪，请先处理上方错误提示。'
-    : (isGuestExperience ? '正在为您准备服务记录...' : '正在同步身份与会话上下文...');
+    : '正在为您准备服务记录...';
   const latestBotMessage = [...messages]
     .reverse()
     .find((message) => message.role === 'bot' && !message.loading && message.key !== 'welcome');
   const handoffButtonLoading = handoffLoadingKey === 'global-handoff'
     || handoffLoadingKey === latestBotMessage?.key;
-  const currentSessionLabel = isGuestExperience ? '当前服务' : '当前会话';
-  const currentSessionActionLabel = isGuestExperience ? '当前服务操作' : '当前会话操作';
-  const emptySessionTitle = isGuestExperience ? '等待开始' : '未开始新会话';
+  const currentSessionLabel = '当前服务';
+  const currentSessionActionLabel = '当前服务操作';
+  const emptySessionTitle = '等待开始';
   const activeSessionTitle = sessionId
     ? (renamedSessionTitles[sessionId] || derivedSessionTitles[sessionId] || (activeSessionMeta ? getSessionTitle(activeSessionMeta) : currentSessionLabel))
     : emptySessionTitle;
@@ -1216,7 +1224,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
     }
 
     const exportTitle = activeSessionTitle === emptySessionTitle
-      ? (isGuestExperience ? '对话导出' : '会话导出')
+      ? '对话导出'
       : activeSessionTitle;
     const exportTime = formatDateTime(new Date().toISOString());
     const exportStamp = exportTime.replace(/[^\d]/g, '').slice(0, 14) || `${Date.now()}`;
@@ -1252,7 +1260,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
         notReadyMessage={notReadyMessage}
         onSelectSession={(id) => { void handleSelectSession(id); }}
         onNewSession={handleNewSession}
-        onRefreshSessions={() => { void loadSessions(sessionId); }}
         onRenameSession={openRenameDialog}
         onDeleteSession={(session) => { setDeleteTarget(session); }}
         onBatchDelete={handleBatchDeleteSessions}
@@ -1448,7 +1455,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
             <button
               type="button"
               className="chat-transfer-btn chat-transfer-btn-inline"
-              title={handoffButtonLoading ? (isGuestExperience ? '正在连接人工...' : '转人工中...') : (isGuestExperience ? '联系人工服务' : '转人工服务')}
+              title={handoffButtonLoading ? '正在连接人工...' : '联系人工服务'}
               onClick={() => void handleHumanHandoff(latestBotMessage)}
               disabled={Boolean(handoffLoadingKey) || !selectedUserId}
             >
@@ -1457,7 +1464,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
               ) : (
                 <Headphones size={13} />
               )}
-              {handoffButtonLoading ? (isGuestExperience ? '正在连接人工...' : '转人工中...') : (isGuestExperience ? '联系人工' : '转人工')}
+              {handoffButtonLoading ? '正在连接人工...' : '联系人工'}
             </button>
           </div>
           <div className="chat-input-box">
