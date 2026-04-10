@@ -7,7 +7,13 @@ import {
   SessionSummary,
 } from './types';
 
-export const WELCOME_TEXT = '你好！我是 XMS 技术支持专员。有什么可以帮助你？';
+export const WELCOME_TEXT = `您好，我是您的AI工作助手，可为您提供：
+
+1）全系统操作指南；
+
+2）常见问题排查。
+
+请直接输入您的问题或指令。`;
 export const MAX_SESSION_CONTEXT_BUDGET = 100_000_000;
 
 export const makeWelcomeMessages = (status = ''): ChatMessage[] => [
