@@ -5,7 +5,7 @@ import { fetchApi } from '../services/api';
 import ChatApp from '../components/chat/ChatApp';
 import './TestBot.css';
 
-const PUBLIC_PAGE_TITLE = '西软客服助理';
+const PUBLIC_PAGE_TITLE = '西软 AI 客服';
 
 type ApiEnvelope<T> = {
   status?: string;
