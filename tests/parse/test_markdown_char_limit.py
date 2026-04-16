@@ -282,6 +282,14 @@ class TestParseAndCreateStructureCharLimit:
         vfs.mkdir = AsyncMock()
         return vfs
 
+    @staticmethod
+    def _content_write_calls(mock_vfs):
+        return [
+            call
+            for call in mock_vfs.write_file.call_args_list
+            if not call[0][0].endswith(MarkdownParser.PREVIEW_ORDER_FILENAME)
+        ]
+
     @pytest.mark.asyncio
     async def test_small_doc_within_both_limits_saved_as_single_file(self):
         parser = self._make_parser(max_section_size=1000, max_section_chars=500)
@@ -291,8 +299,9 @@ class TestParseAndCreateStructureCharLimit:
         with patch.object(parser, "_get_viking_fs", return_value=mock_vfs):
             await parser._parse_and_create_structure(content, [], "viking://tmp/root")
 
-        mock_vfs.write_file.assert_called_once()
-        written_content = mock_vfs.write_file.call_args[0][1]
+        content_calls = self._content_write_calls(mock_vfs)
+        assert len(content_calls) == 1
+        written_content = content_calls[0][0][1]
         assert written_content == content
 
     @pytest.mark.asyncio
@@ -308,8 +317,9 @@ class TestParseAndCreateStructureCharLimit:
             await parser._parse_and_create_structure(content, [], "viking://tmp/root")
 
         # Must have been split: each written chunk ≤ max_section_chars
-        assert mock_vfs.write_file.call_count > 1
-        for call in mock_vfs.write_file.call_args_list:
+        content_calls = self._content_write_calls(mock_vfs)
+        assert len(content_calls) > 1
+        for call in content_calls:
             written = call[0][1]
             assert len(written) <= 30
 
@@ -328,7 +338,7 @@ class TestParseAndCreateStructureCharLimit:
             await parser._parse_and_create_structure(content, headings, "viking://tmp/root")
 
         # Must not have been saved as a single file equal to the full content
-        for call in mock_vfs.write_file.call_args_list:
+        for call in self._content_write_calls(mock_vfs):
             written = call[0][1]
             assert len(written) <= 50, (
                 f"Single file written with {len(written)} chars, exceeds limit of 50"

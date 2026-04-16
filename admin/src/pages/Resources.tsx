@@ -147,14 +147,11 @@ const buildTenantHeaders = (
   return headers;
 };
 
-const sortByNaturalPath = (a: string, b: string) => (
-  a.localeCompare(b, 'zh-CN', { numeric: true, sensitivity: 'base' })
-);
-
 const isDocxDocument = (document: KnowledgeDocument) => (
   (document.source_format || '').toLowerCase().includes('docx')
 );
 
+const DOCX_PREVIEW_ORDER_FILENAME = '.preview-order.json';
 const DOCX_ASSET_PLACEHOLDER_RE = /!\[([^\]]*)\]\(ov-asset:\/\/([^)]+)\)/g;
 const IMAGE_MIME_TYPES: Record<string, string> = {
   '.png': 'image/png',
@@ -171,6 +168,219 @@ const normalizeDocxMarkdown = (markdown: string) => (
     .replace(/<ins>(.*?)<\/ins>/g, '$1')
     .trim()
 );
+
+type DocxPreviewChunk = {
+  uri: string;
+  content: string;
+};
+
+const collectDocxPreviewMarkdownUris = (items: unknown[]) => (
+  items
+    .filter((item: unknown): item is string => typeof item === 'string')
+    .filter((uri: string) => uri.endsWith('.md'))
+    .filter((uri: string) => {
+      const filename = uri.split('/').pop() || '';
+      return !filename.startsWith('.');
+    })
+);
+
+const extractDocxPreviewRelativePaths = (value: unknown): string[] => {
+  if (!value || typeof value !== 'object') return [];
+  const markdownPaths = (value as { markdown_paths?: unknown }).markdown_paths;
+  if (!Array.isArray(markdownPaths)) return [];
+  return markdownPaths.filter((item: unknown): item is string => typeof item === 'string');
+};
+
+const buildDocxPreviewUriFromRelativePath = (resourceRootUri: string, relativePath: string) => (
+  `${resourceRootUri.replace(/\/+$/, '')}/${relativePath.replace(/^\/+/, '')}`
+);
+
+const extractFilenameStem = (uri: string) => {
+  const filename = uri.split('/').pop() || '';
+  return filename.replace(/\.md$/i, '');
+};
+
+const extractChunkIndex = (uri: string) => {
+  const matched = extractFilenameStem(uri).match(/_(\d+)$/);
+  return matched ? Number.parseInt(matched[1], 10) : 1;
+};
+
+const stripChunkIndexSuffix = (value: string) => value.replace(/_\d+$/, '');
+
+const CHINESE_DIGIT_VALUES: Record<string, number> = {
+  '零': 0,
+  '一': 1,
+  '二': 2,
+  '两': 2,
+  '三': 3,
+  '四': 4,
+  '五': 5,
+  '六': 6,
+  '七': 7,
+  '八': 8,
+  '九': 9,
+};
+
+const CHINESE_UNIT_VALUES: Record<string, number> = {
+  '十': 10,
+  '百': 100,
+  '千': 1000,
+  '万': 10000,
+};
+
+const parseChineseNumber = (value: string): number | null => {
+  const normalized = value.trim();
+  if (!normalized) return null;
+
+  let total = 0;
+  let section = 0;
+  let current = 0;
+
+  for (const char of normalized) {
+    if (char in CHINESE_DIGIT_VALUES) {
+      current = CHINESE_DIGIT_VALUES[char];
+      continue;
+    }
+    if (!(char in CHINESE_UNIT_VALUES)) {
+      return null;
+    }
+    const unit = CHINESE_UNIT_VALUES[char];
+    if (unit === 10000) {
+      section = (section + (current || 0)) * unit;
+      total += section;
+      section = 0;
+      current = 0;
+      continue;
+    }
+    section += (current || 1) * unit;
+    current = 0;
+  }
+
+  return total + section + current;
+};
+
+const parseHierarchicalArabicNumbers = (label: string): number[] | null => {
+  const matched = label.trim().match(/^(?:第\s*)?(\d+(?:[.．]\d+)*)/);
+  if (!matched) return null;
+  return matched[1]
+    .split(/[.．]/)
+    .map((segment) => Number.parseInt(segment, 10))
+    .filter((segment) => Number.isFinite(segment));
+};
+
+const parseSectionOrderTokens = (label: string): number[] | null => {
+  const normalized = label.trim();
+  if (!normalized) return null;
+
+  const arabicTokens = parseHierarchicalArabicNumbers(normalized);
+  if (arabicTokens && arabicTokens.length > 0) return arabicTokens;
+
+  const patterns = [
+    /^第\s*([零一二三四五六七八九十百千万两]+)\s*[章节部篇卷条款节]?/,
+    /^[（(【[]?\s*([零一二三四五六七八九十百千万两]+)\s*[)）】\]]?\s*[、.．]?/,
+    /^([零一二三四五六七八九十百千万两]+)\s*[、.．)]?/,
+  ];
+
+  for (const pattern of patterns) {
+    const matched = normalized.match(pattern);
+    if (!matched) continue;
+    const parsed = parseChineseNumber(matched[1]);
+    if (parsed !== null) return [parsed];
+  }
+
+  return null;
+};
+
+const extractFirstMarkdownHeading = (content: string) => {
+  const matched = content.match(/^\s{0,3}#{1,6}\s+(.+)$/m);
+  return matched?.[1]?.trim() || '';
+};
+
+const compareOrderTokens = (left: number[] | null, right: number[] | null) => {
+  if (!left && !right) return 0;
+  if (!left) return 1;
+  if (!right) return -1;
+
+  const maxLength = Math.max(left.length, right.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const leftValue = left[index];
+    const rightValue = right[index];
+    if (leftValue === undefined) return -1;
+    if (rightValue === undefined) return 1;
+    if (leftValue !== rightValue) return leftValue - rightValue;
+  }
+  return 0;
+};
+
+const sortDocxPreviewChunks = (chunks: DocxPreviewChunk[]) => (
+  chunks
+    .map((chunk, index) => {
+      const headingLabel = extractFirstMarkdownHeading(chunk.content);
+      const filenameLabel = stripChunkIndexSuffix(extractFilenameStem(chunk.uri));
+      return {
+        ...chunk,
+        originalIndex: index,
+        chunkIndex: extractChunkIndex(chunk.uri),
+        orderTokens: parseSectionOrderTokens(headingLabel) || parseSectionOrderTokens(filenameLabel),
+      };
+    })
+    .sort((left, right) => {
+      const orderComparison = compareOrderTokens(left.orderTokens, right.orderTokens);
+      if (orderComparison !== 0) return orderComparison;
+      if (left.chunkIndex !== right.chunkIndex) return left.chunkIndex - right.chunkIndex;
+      return left.originalIndex - right.originalIndex;
+    })
+    .map(({ uri, content }) => ({ uri, content }))
+);
+
+const applyDocxPreviewManifestOrder = (
+  listedUris: string[],
+  manifestRelativePaths: string[],
+  resourceRootUri: string,
+) => {
+  const listedSet = new Set(listedUris);
+  const orderedUris = manifestRelativePaths
+    .map((relativePath) => buildDocxPreviewUriFromRelativePath(resourceRootUri, relativePath))
+    .filter((uri) => listedSet.has(uri));
+
+  const orderedSet = new Set(orderedUris);
+  return [
+    ...orderedUris,
+    ...listedUris.filter((uri) => !orderedSet.has(uri)),
+  ];
+};
+
+async function readDocxPreviewManifest(
+  serverUrl: string,
+  apiKey: string,
+  accountId: string | null,
+  userId: string | null,
+  resourceRootUri: string,
+): Promise<string[] | null> {
+  const headers = buildTenantHeaders(apiKey, accountId, userId);
+  const params = new URLSearchParams({
+    uri: `${resourceRootUri}/${DOCX_PREVIEW_ORDER_FILENAME}`,
+  });
+  const response = await fetch(`${serverUrl}/api/v1/content/read?${params}`, { headers });
+  if (!response.ok) {
+    return null;
+  }
+
+  const data = await response.json();
+  const rawValue = data?.result;
+  const parsedValue = typeof rawValue === 'string'
+    ? (() => {
+      try {
+        return JSON.parse(rawValue);
+      } catch {
+        return null;
+      }
+    })()
+    : rawValue;
+
+  const relativePaths = extractDocxPreviewRelativePaths(parsedValue);
+  return relativePaths.length > 0 ? relativePaths : null;
+}
 
 const inferImageMimeType = (filename: string) => {
   const normalized = filename.toLowerCase();
@@ -346,14 +556,23 @@ const PreviewModal = ({
             throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || '预览失败');
           }
 
-          const markdownUris = (Array.isArray(listData.result) ? (listData.result as unknown[]) : [])
-            .filter((item: unknown): item is string => typeof item === 'string')
-            .filter((uri: string) => uri.endsWith('.md'))
-            .filter((uri: string) => {
-              const filename = uri.split('/').pop() || '';
-              return !filename.startsWith('.');
-            })
-            .sort(sortByNaturalPath);
+          const listedMarkdownUris = collectDocxPreviewMarkdownUris(
+            Array.isArray(listData.result) ? (listData.result as unknown[]) : [],
+          );
+          const manifestRelativePaths = await readDocxPreviewManifest(
+            serverUrl,
+            apiKey,
+            accountId,
+            userId,
+            document.resource_root_uri,
+          );
+          const markdownUris = manifestRelativePaths
+            ? applyDocxPreviewManifestOrder(
+              listedMarkdownUris,
+              manifestRelativePaths,
+              document.resource_root_uri,
+            )
+            : listedMarkdownUris;
 
           if (markdownUris.length > 0) {
             const markdownChunks = await Promise.all(markdownUris.map(async (uri: string) => {
@@ -366,10 +585,16 @@ const PreviewModal = ({
                 const detail = readData?.error?.message || readData?.detail;
                 throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail) || '预览失败');
               }
-              return typeof readData.result === 'string'
-                ? readData.result
-                : JSON.stringify(readData.result, null, 2);
+              return {
+                uri,
+                content: typeof readData.result === 'string'
+                  ? readData.result
+                  : JSON.stringify(readData.result, null, 2),
+              };
             }));
+            const orderedChunks = manifestRelativePaths
+              ? markdownChunks
+              : sortDocxPreviewChunks(markdownChunks);
 
             if (!cancelled) {
               const materialized = await materializeDocxMarkdownImages(
@@ -378,12 +603,21 @@ const PreviewModal = ({
                 accountId,
                 userId,
                 document.resource_root_uri,
-                normalizeDocxMarkdown(markdownChunks.filter(Boolean).join('\n\n')),
+                normalizeDocxMarkdown(
+                  orderedChunks
+                    .map((chunk) => chunk.content)
+                    .filter(Boolean)
+                    .join('\n\n'),
+                ),
               );
               previewObjectUrls = materialized.objectUrls;
               setContentMode('markdown');
               setContent(materialized.markdown);
-              setHint(`DOCX 正文预览，共加载 ${markdownUris.length} 个片段`);
+              setHint(
+                manifestRelativePaths
+                  ? `DOCX 正文预览，共加载 ${markdownUris.length} 个片段`
+                  : `DOCX 正文预览，共加载 ${markdownUris.length} 个片段`,
+              );
             }
             return;
           }

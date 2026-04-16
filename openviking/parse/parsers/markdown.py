@@ -18,6 +18,7 @@ The parser handles scenarios:
 """
 
 import hashlib
+import json
 import re
 import time
 from pathlib import Path
@@ -52,6 +53,7 @@ class MarkdownParser(BaseParser):
     DEFAULT_MAX_SECTION_SIZE = 1024  # Maximum tokens per section
     DEFAULT_MIN_SECTION_TOKENS = 512  # Minimum tokens to create a separate section
     MAX_MERGED_FILENAME_LENGTH = 32  # Maximum length for merged section filenames
+    PREVIEW_ORDER_FILENAME = ".preview-order.json"
 
     def __init__(
         self,
@@ -357,6 +359,37 @@ class MarkdownParser(BaseParser):
             return f"{safe[: max_length - 9]}_{hash_suffix}"
         return safe
 
+    @staticmethod
+    def _relative_markdown_path(root_dir: str, uri: str) -> str:
+        prefix = root_dir.rstrip("/") + "/"
+        if uri.startswith(prefix):
+            return uri[len(prefix) :]
+        return uri.split("/")[-1]
+
+    async def _write_content_file(
+        self,
+        viking_fs,
+        uri: str,
+        content: str,
+        root_dir: str,
+        preview_order: List[str],
+    ) -> None:
+        await viking_fs.write_file(uri, content)
+        preview_order.append(self._relative_markdown_path(root_dir, uri))
+
+    async def _write_preview_order_manifest(
+        self,
+        viking_fs,
+        root_dir: str,
+        preview_order: List[str],
+    ) -> None:
+        if not preview_order:
+            return
+
+        manifest_uri = f"{root_dir}/{self.PREVIEW_ORDER_FILENAME}"
+        manifest_body = json.dumps({"markdown_paths": preview_order}, ensure_ascii=False, indent=2)
+        await viking_fs.write_file(manifest_uri, manifest_body)
+
     # ========== New Parsing Logic (v5.0) ==========
 
     async def _parse_and_create_structure(
@@ -393,6 +426,7 @@ class MarkdownParser(BaseParser):
 
         # Create root directory
         await viking_fs.mkdir(root_dir)
+        preview_order: List[str] = []
 
         # Get document name
         doc_name = self._sanitize_for_path(Path(source_path).stem if source_path else "content")
@@ -400,8 +434,9 @@ class MarkdownParser(BaseParser):
         # Small document: save as single file (check both token and char limits)
         if estimated_tokens <= max_size and len(content) <= max_chars:
             file_path = f"{root_dir}/{doc_name}.md"
-            await viking_fs.write_file(file_path, content)
+            await self._write_content_file(viking_fs, file_path, content, root_dir, preview_order)
             logger.debug(f"[MarkdownParser] Small document saved as: {file_path}")
+            await self._write_preview_order_manifest(viking_fs, root_dir, preview_order)
             return
 
         # No headings: split by paragraphs
@@ -409,8 +444,15 @@ class MarkdownParser(BaseParser):
             logger.info("[MarkdownParser] No headings, splitting by paragraphs")
             parts = self._smart_split_content(content, max_size)
             for part_idx, part in enumerate(parts, 1):
-                await viking_fs.write_file(f"{root_dir}/{doc_name}_{part_idx}.md", part)
+                await self._write_content_file(
+                    viking_fs,
+                    f"{root_dir}/{doc_name}_{part_idx}.md",
+                    part,
+                    root_dir,
+                    preview_order,
+                )
             logger.debug(f"[MarkdownParser] Split into {len(parts)} parts")
+            await self._write_preview_order_manifest(viking_fs, root_dir, preview_order)
             return
 
         # Build virtual section list (pre-heading content as first virtual section)
@@ -444,8 +486,16 @@ class MarkdownParser(BaseParser):
 
         # Process sections with merge logic
         await self._process_sections_with_merge(
-            content, headings, root_dir, sections, doc_name, max_size, min_size
+            content,
+            headings,
+            root_dir,
+            sections,
+            max_size,
+            min_size,
+            root_dir,
+            preview_order,
         )
+        await self._write_preview_order_manifest(viking_fs, root_dir, preview_order)
 
     async def _process_sections_with_merge(
         self,
@@ -453,9 +503,10 @@ class MarkdownParser(BaseParser):
         headings: List[Tuple[int, int, str, int]],
         parent_dir: str,
         sections: List[Dict[str, Any]],
-        parent_name: str,
         max_size: int,
         min_size: int,
+        root_dir: str,
+        preview_order: List[str],
     ) -> None:
         """Process sections with small section merge logic."""
         viking_fs = self._get_viking_fs()
@@ -476,43 +527,74 @@ class MarkdownParser(BaseParser):
             # Handle small sections
             if tokens < min_size:
                 pending = await self._try_add_to_pending(
-                    viking_fs, parent_dir, pending, (name, content_text, tokens), max_size
+                    viking_fs,
+                    parent_dir,
+                    pending,
+                    (name, content_text, tokens),
+                    max_size,
+                    root_dir,
+                    preview_order,
                 )
                 continue
 
             # Try merge with pending
             if pending and self._can_merge(pending, tokens, max_size, has_children):
                 pending.append((name, content_text, tokens))
-                await self._save_merged(viking_fs, parent_dir, pending)
+                await self._save_merged(viking_fs, parent_dir, pending, root_dir, preview_order)
                 pending = []
                 continue
 
             # Save pending and process current section
-            pending = await self._flush_pending(viking_fs, parent_dir, pending)
-            await self._save_section(content, headings, parent_dir, sec, max_size, min_size)
+            pending = await self._flush_pending(
+                viking_fs, parent_dir, pending, root_dir, preview_order
+            )
+            await self._save_section(
+                content,
+                headings,
+                parent_dir,
+                sec,
+                max_size,
+                min_size,
+                root_dir,
+                preview_order,
+            )
 
         # Save remaining pending
-        await self._flush_pending(viking_fs, parent_dir, pending)
+        await self._flush_pending(viking_fs, parent_dir, pending, root_dir, preview_order)
 
     def _can_merge(self, pending: List, tokens: int, max_size: int, has_children: bool) -> bool:
         """Check if section can merge with pending."""
         return sum(t for _, _, t in pending) + tokens <= max_size and not has_children
 
     async def _try_add_to_pending(
-        self, viking_fs, parent_dir: str, pending: List, item: Tuple, max_size: int
+        self,
+        viking_fs,
+        parent_dir: str,
+        pending: List,
+        item: Tuple,
+        max_size: int,
+        root_dir: str,
+        preview_order: List[str],
     ) -> List:
         """Try add item to pending, flush if would exceed max_size."""
         name, content, tokens = item
         if pending and sum(t for _, _, t in pending) + tokens > max_size:
-            await self._save_merged(viking_fs, parent_dir, pending)
+            await self._save_merged(viking_fs, parent_dir, pending, root_dir, preview_order)
             pending = []
         pending.append(item)
         return pending
 
-    async def _flush_pending(self, viking_fs, parent_dir: str, pending: List) -> List:
+    async def _flush_pending(
+        self,
+        viking_fs,
+        parent_dir: str,
+        pending: List,
+        root_dir: str,
+        preview_order: List[str],
+    ) -> List:
         """Flush pending sections and return empty list."""
         if pending:
-            await self._save_merged(viking_fs, parent_dir, pending)
+            await self._save_merged(viking_fs, parent_dir, pending, root_dir, preview_order)
         return []
 
     async def _save_section(
@@ -523,15 +605,21 @@ class MarkdownParser(BaseParser):
         section: Dict[str, Any],
         max_size: int,
         min_size: int,
+        root_dir: Optional[str] = None,
+        preview_order: Optional[List[str]] = None,
     ) -> None:
         """Save a single section (file or directory)."""
         viking_fs = self._get_viking_fs()
+        root_dir = root_dir or parent_dir
+        preview_order = preview_order if preview_order is not None else []
         name, tokens, content_text = section["name"], section["tokens"], section["content"]
         has_children = section["has_children"]
 
         # Fits in one file (check both token and char limits)
         if tokens <= max_size and len(content_text) <= self.config.max_section_chars:
-            await viking_fs.write_file(f"{parent_dir}/{name}.md", content_text)
+            await self._write_content_file(
+                viking_fs, f"{parent_dir}/{name}.md", content_text, root_dir, preview_order
+            )
             logger.debug(f"[MarkdownParser] Saved: {name}.md")
             return
 
@@ -541,10 +629,19 @@ class MarkdownParser(BaseParser):
 
         if has_children:
             await self._process_children(
-                content, headings, section_dir, section, name, max_size, min_size
+                content,
+                headings,
+                section_dir,
+                section,
+                max_size,
+                min_size,
+                root_dir,
+                preview_order,
             )
         else:
-            await self._split_content(viking_fs, section_dir, name, content_text, max_size)
+            await self._split_content(
+                viking_fs, section_dir, name, content_text, max_size, root_dir, preview_order
+            )
 
     async def _process_children(
         self,
@@ -552,16 +649,19 @@ class MarkdownParser(BaseParser):
         headings: List[Tuple[int, int, str, int]],
         section_dir: str,
         section: Dict[str, Any],
-        name: str,
         max_size: int,
         min_size: int,
+        root_dir: Optional[str] = None,
+        preview_order: Optional[List[str]] = None,
     ) -> None:
         """Build and process child sections."""
+        root_dir = root_dir or section_dir
+        preview_order = preview_order if preview_order is not None else []
         children = []
         if section.get("direct_content"):
             children.append(
                 {
-                    "name": name,
+                    "name": section["name"],
                     "content": section["direct_content"],
                     "tokens": self._estimate_token_count(section["direct_content"]),
                     "has_children": False,
@@ -572,17 +672,35 @@ class MarkdownParser(BaseParser):
             children.append({"heading_idx": child_idx})
 
         await self._process_sections_with_merge(
-            content, headings, section_dir, children, name, max_size, min_size
+            content,
+            headings,
+            section_dir,
+            children,
+            max_size,
+            min_size,
+            root_dir,
+            preview_order,
         )
 
     async def _split_content(
-        self, viking_fs, section_dir: str, name: str, content: str, max_size: int
+        self,
+        viking_fs,
+        section_dir: str,
+        name: str,
+        content: str,
+        max_size: int,
+        root_dir: Optional[str] = None,
+        preview_order: Optional[List[str]] = None,
     ) -> None:
         """Split content by paragraphs."""
+        root_dir = root_dir or section_dir
+        preview_order = preview_order if preview_order is not None else []
         logger.info(f"[MarkdownParser] Splitting: {name}")
         parts = self._smart_split_content(content, max_size)
         for i, part in enumerate(parts, 1):
-            await viking_fs.write_file(f"{section_dir}/{name}_{i}.md", part)
+            await self._write_content_file(
+                viking_fs, f"{section_dir}/{name}_{i}.md", part, root_dir, preview_order
+            )
 
     def _generate_merged_filename(self, sections: List[Tuple[str, str, int]]) -> str:
         """
@@ -623,7 +741,12 @@ class MarkdownParser(BaseParser):
         return name or "merged"
 
     async def _save_merged(
-        self, viking_fs, parent_dir: str, sections: List[Tuple[str, str, int]]
+        self,
+        viking_fs,
+        parent_dir: str,
+        sections: List[Tuple[str, str, int]],
+        root_dir: Optional[str] = None,
+        preview_order: Optional[List[str]] = None,
     ) -> None:
         """Save merged sections as single file with smart naming.
 
@@ -631,6 +754,8 @@ class MarkdownParser(BaseParser):
         by _smart_split_content before writing, so no single file ever exceeds
         the hard character limit.
         """
+        root_dir = root_dir or parent_dir
+        preview_order = preview_order if preview_order is not None else []
         name = self._generate_merged_filename(sections)
         content = "\n\n".join(c for _, c, _ in sections)
         max_chars = self.config.max_section_chars
@@ -638,12 +763,16 @@ class MarkdownParser(BaseParser):
             max_size = self.config.max_section_size or self.DEFAULT_MAX_SECTION_SIZE
             parts = self._smart_split_content(content, max_size)
             for i, part in enumerate(parts, 1):
-                await viking_fs.write_file(f"{parent_dir}/{name}_{i}.md", part)
+                await self._write_content_file(
+                    viking_fs, f"{parent_dir}/{name}_{i}.md", part, root_dir, preview_order
+                )
             logger.debug(
                 f"[MarkdownParser] Merged then split: {name} ({len(sections)} sections → {len(parts)} parts)"
             )
         else:
-            await viking_fs.write_file(f"{parent_dir}/{name}.md", content)
+            await self._write_content_file(
+                viking_fs, f"{parent_dir}/{name}.md", content, root_dir, preview_order
+            )
             logger.debug(f"[MarkdownParser] Merged: {name}.md ({len(sections)} sections)")
 
     def _get_section_info(
