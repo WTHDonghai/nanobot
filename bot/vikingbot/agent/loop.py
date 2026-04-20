@@ -787,13 +787,13 @@ class AgentLoop:
             fallbacks = {
                 "zh-CN": "抱歉，我暂时还没能根据现有资料整理出明确答复。需要的话，我可以帮您转人工继续跟进，您看需要吗？",
                 "ja": "申し訳ありません。現在の資料だけでは明確な回答をまとめきれませんでした。必要であれば担当者へ引き継げますが、ご希望ですか。",
-                "en": "Sorry, I still couldn't produce a clear answer from the current materials. If you'd like, I can help transfer this to a human agent. Would you like me to do that?",
+                "en": "Sorry, I still couldn't produce a clear answer from the current bidding materials. If you'd like, I can help transfer this to a human agent. Would you like me to do that?",
             }
         else:
             fallbacks = {
-                "zh-CN": "抱歉，我暂时没有在现有支持资料中找到足够依据来回答这个问题。需要的话，我可以帮您转人工继续跟进，您看需要吗？",
-                "ja": "申し訳ありません。現在のサポート資料では、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば担当者へ引き継げますが、ご希望ですか。",
-                "en": "Sorry, I couldn't find enough supporting information in the current support materials to answer this clearly. If you'd like, I can help transfer this to a human agent. Would you like me to do that?",
+                "zh-CN": "抱歉，我暂时没有在当前投标知识库中找到足够依据来回答这个问题。需要的话，您可以进一步缩小范围，比如具体资质、方案主题、产品模块或参数点。",
+                "ja": "申し訳ありません。現在の入札ナレッジベースでは、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば、資格証明、提案テーマ、製品モジュール、または確認したい仕様をもう少し具体的に教えてください。",
+                "en": "Sorry, I couldn't find enough supporting information in the current bidding knowledge base to answer this clearly. If helpful, you can narrow it down to a specific certificate, solution topic, product module, or parameter.",
             }
         return fallbacks.get(language, fallbacks["en"])
 

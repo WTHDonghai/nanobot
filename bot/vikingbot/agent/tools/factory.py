@@ -75,9 +75,6 @@ def register_default_tools(
     exa_api_key = None  # TODO: Add to config if needed
     tavily_api_key = config.tools.web.search.tavily_api_key if config.tools.web.search else None
 
-    provider_api_key = config.agents.api_key or config.get_api_key(config.agents.gen_image_model)
-    provider_api_base = config.agents.api_base or config.get_api_base(config.agents.gen_image_model)
-    gen_image_model = config.agents.gen_image_model
     # File tools
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())
@@ -116,6 +113,9 @@ def register_default_tools(
 
     # Image generation tool
     if include_image_tool:
+        provider_api_key = config.agents.api_key or config.get_api_key(config.agents.gen_image_model)
+        provider_api_base = config.agents.api_base or config.get_api_base(config.agents.gen_image_model)
+        gen_image_model = config.agents.gen_image_model
         registry.register(
             ImageGenerationTool(
                 gen_image_model=gen_image_model,
