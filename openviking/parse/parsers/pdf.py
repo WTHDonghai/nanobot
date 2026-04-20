@@ -12,12 +12,15 @@ This design simplifies PDF handling by delegating structure analysis
 to the MarkdownParser after conversion.
 """
 
+import io
 import logging
 import re
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+
+from PIL import Image
 
 from openviking.parse.base import (
     NodeType,
@@ -33,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 
 class PDFParser(BaseParser):
+    EMBEDDED_IMAGES_DIR = "_images"
+    IMAGE_PLACEHOLDER_SCHEME = "ov-asset://"
+
     """
     PDF parser with dual conversion strategy.
 
@@ -117,11 +123,22 @@ class PDFParser(BaseParser):
 
         try:
             # Step 1: Convert PDF to Markdown
-            markdown_content, conversion_meta = await self._convert_to_markdown(pdf_path)
+            markdown_content, conversion_meta, embedded_images = await self._convert_to_markdown(
+                pdf_path
+            )
 
             # Step 2: Parse Markdown using MarkdownParser
             md_parser = self._get_markdown_parser()
-            result = await md_parser.parse_content(markdown_content, source_path=str(pdf_path))
+            result = await md_parser.parse_content(
+                markdown_content,
+                source_path=str(pdf_path),
+                instruction=instruction,
+                **kwargs,
+            )
+
+            written_images = await self._write_embedded_images(
+                result.temp_dir_path, embedded_images
+            )
 
             # Step 3: Update metadata for PDF origin
             result.source_format = "pdf"  # Override markdown format
@@ -129,6 +146,9 @@ class PDFParser(BaseParser):
             result.parser_version = "2.0"
             result.parse_time = time.time() - start_time
             result.meta.update(conversion_meta)
+            result.meta["embedded_image_count"] = len(written_images)
+            if written_images:
+                result.meta["embedded_images_dir"] = self.EMBEDDED_IMAGES_DIR
             result.meta["pdf_strategy"] = self.config.strategy
             result.meta["intermediate_markdown_length"] = len(markdown_content)
             result.meta["intermediate_markdown_preview"] = markdown_content[:500]
@@ -152,7 +172,9 @@ class PDFParser(BaseParser):
                 warnings=[f"Failed to parse PDF: {e}"],
             )
 
-    async def _convert_to_markdown(self, pdf_path: Path) -> tuple[str, Dict[str, Any]]:
+    async def _convert_to_markdown(
+        self, pdf_path: Path
+    ) -> tuple[str, Dict[str, Any], list[tuple[str, bytes]]]:
         """
         Convert PDF to Markdown using configured strategy.
 
@@ -191,8 +213,8 @@ class PDFParser(BaseParser):
             raise ValueError(f"Unknown strategy: {self.config.strategy}")
 
     async def _convert_local(
-        self, pdf_path: Path, storage=None, resource_name: Optional[str] = None
-    ) -> tuple[str, Dict[str, Any]]:
+        self, pdf_path: Path
+    ) -> tuple[str, Dict[str, Any], list[tuple[str, bytes]]]:
         """
         Convert PDF to Markdown using pdfplumber.
 
@@ -203,11 +225,8 @@ class PDFParser(BaseParser):
 
         Args:
             pdf_path: Path to PDF file
-            storage: Optional StoragePath for saving images
-            resource_name: Resource name for organizing saved images
-
         Returns:
-            Tuple of (markdown_content, metadata)
+            Tuple of (markdown_content, metadata, extracted_images)
 
         Raises:
             ImportError: If pdfplumber not installed
@@ -215,16 +234,8 @@ class PDFParser(BaseParser):
         """
         pdfplumber = lazy_import("pdfplumber")
 
-        # Import storage utilities
-        if storage is None:
-            from openviking_cli.utils.storage import get_storage
-
-            storage = get_storage()
-
-        if resource_name is None:
-            resource_name = pdf_path.stem
-
         parts = []
+        embedded_images: list[tuple[str, bytes]] = []
         meta = {
             "strategy": "local",
             "library": "pdfplumber",
@@ -297,17 +308,14 @@ class PDFParser(BaseParser):
                             # Extract image using underlying PDF object
                             image_obj = self._extract_image_from_page(page, img)
                             if image_obj:
-                                # Save image
-                                filename = f"page{page_num}_img{img_idx + 1}"
-                                image_path = storage.save_image(
-                                    resource_name, image_obj, filename=filename
+                                normalized_bytes, filename = self._prepare_image_asset(
+                                    image_obj, page_num=page_num, image_index=img_idx + 1
                                 )
-
-                                # Generate relative path for markdown
-                                rel_path = image_path.relative_to(Path.cwd())
+                                embedded_images.append((filename, normalized_bytes))
                                 parts.append(
                                     f"<!-- Page {page_num} Image {img_idx + 1} -->\n"
-                                    f"![Page {page_num} Image {img_idx + 1}]({rel_path})"
+                                    f"![Page {page_num} Image {img_idx + 1}]"
+                                    f"({self.IMAGE_PLACEHOLDER_SCHEME}{filename})"
                                 )
                                 meta["images_extracted"] += 1
                         except Exception as img_err:
@@ -319,7 +327,7 @@ class PDFParser(BaseParser):
 
             if not parts:
                 logger.warning(f"No content extracted from {pdf_path}")
-                return "", meta
+                return "", meta, embedded_images
 
             markdown_content = "\n\n".join(parts)
             logger.info(
@@ -329,7 +337,7 @@ class PDFParser(BaseParser):
                 f"{len(markdown_content)} chars"
             )
 
-            return markdown_content, meta
+            return markdown_content, meta, embedded_images
 
         except Exception as e:
             logger.error(f"pdfplumber conversion failed: {e}")
@@ -521,6 +529,12 @@ class PDFParser(BaseParser):
             Image bytes or None if extraction fails
         """
         try:
+            stream = img_info.get("stream") if isinstance(img_info, dict) else None
+            if stream and hasattr(stream, "get_data"):
+                data = stream.get_data()
+                if data:
+                    return data
+
             if hasattr(page, "page_obj") and hasattr(page.page_obj, "resources"):
                 resources = page.page_obj.resources
                 if resources and "XObject" in resources:
@@ -540,7 +554,9 @@ class PDFParser(BaseParser):
             logger.debug(f"Image extraction error: {e}")
             return None
 
-    async def _convert_mineru(self, pdf_path: Path) -> tuple[str, Dict[str, Any]]:
+    async def _convert_mineru(
+        self, pdf_path: Path
+    ) -> tuple[str, Dict[str, Any], list[tuple[str, bytes]]]:
         """
         Convert PDF to Markdown using MinerU API.
 
@@ -548,7 +564,7 @@ class PDFParser(BaseParser):
             pdf_path: Path to PDF file
 
         Returns:
-            Tuple of (markdown_content, metadata)
+            Tuple of (markdown_content, metadata, extracted_images)
 
         Raises:
             ImportError: If httpx not installed
@@ -606,11 +622,66 @@ class PDFParser(BaseParser):
                     f"{len(markdown_content)} chars"
                 )
 
-                return markdown_content, meta
+                return markdown_content, meta, []
 
         except Exception as e:
             logger.error(f"MinerU API call failed: {e}")
             raise
+
+    def _prepare_image_asset(
+        self,
+        image_bytes: bytes,
+        *,
+        page_num: int,
+        image_index: int,
+    ) -> tuple[bytes, str]:
+        """Best-effort normalize extracted PDF image bytes into a stable asset file."""
+        stem = f"page{page_num}_img{image_index}"
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                format_name = (img.format or "PNG").upper()
+                extension = {
+                    "JPEG": ".jpg",
+                    "JPG": ".jpg",
+                    "PNG": ".png",
+                    "WEBP": ".webp",
+                    "GIF": ".gif",
+                    "BMP": ".bmp",
+                    "TIFF": ".tiff",
+                }.get(format_name, ".png")
+                return image_bytes, f"{stem}{extension}"
+        except Exception:
+            # Keep the original bytes when format probing fails so we do not drop
+            # potentially useful image assets during PDF ingestion.
+            return image_bytes, f"{stem}.png"
+
+    async def _write_embedded_images(
+        self, temp_uri: Optional[str], image_entries: list[tuple[str, bytes]]
+    ) -> list[str]:
+        """Persist extracted PDF images under the parsed document root."""
+        if not temp_uri or not image_entries:
+            return []
+
+        viking_fs = self._get_viking_fs()
+        entries = await viking_fs.ls(temp_uri)
+        doc_dirs = [e for e in entries if e.get("isDir") and e["name"] not in {".", ".."}]
+
+        if len(doc_dirs) != 1:
+            logger.warning(
+                f"[PDFParser] Expected 1 document directory in {temp_uri}, found {len(doc_dirs)}"
+            )
+            return []
+
+        doc_root_uri = f"{temp_uri}/{doc_dirs[0]['name']}"
+        images_dir_uri = f"{doc_root_uri}/{self.EMBEDDED_IMAGES_DIR}"
+        await viking_fs.mkdir(images_dir_uri, exist_ok=True)
+
+        written_images: list[str] = []
+        for filename, image_data in image_entries:
+            await viking_fs.write(f"{images_dir_uri}/{filename}", image_data)
+            written_images.append(filename)
+
+        return written_images
 
     def _format_table_markdown(self, table: List[List[Optional[str]]]) -> str:
         """

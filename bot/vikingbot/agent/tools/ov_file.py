@@ -291,7 +291,8 @@ class VikingSearchTool(OVFileTool):
             "Search for resources in OpenViking using a query. This tool is for retrieval only: "
             "it returns candidate URIs, not final evidence. After finding a relevant document/text "
             "resource, call openviking_read on that URI before answering. Image assets under "
-            "/_images/ are auxiliary screenshots, not the main answer source."
+            "/_images/ can be primary evidence for certificate, license, screenshot, or "
+            "image-focused queries."
         )
 
     @property
@@ -402,6 +403,65 @@ class VikingSearchTool(OVFileTool):
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _is_image_focused_query(query: str) -> bool:
+        normalized = (query or "").strip().lower()
+        if not normalized:
+            return False
+
+        zh_terms = (
+            "资质",
+            "证书",
+            "证照",
+            "证件",
+            "许可证",
+            "营业执照",
+            "授权书",
+            "认证",
+            "扫描件",
+            "原件",
+            "盖章",
+            "图片",
+            "照片",
+            "截图",
+        )
+        en_terms = (
+            "certificate",
+            "certification",
+            "license",
+            "licence",
+            "scan",
+            "screenshot",
+            "image",
+            "photo",
+        )
+
+        return any(term in query for term in zh_terms) or any(term in normalized for term in en_terms)
+
+    @classmethod
+    def _resource_kind_rank(cls, query: str, resource: dict[str, Any]) -> int:
+        uri = resource.get("uri", "")
+        is_image = cls._is_image_uri(uri)
+        is_summary = cls._is_summary_uri(uri)
+        is_generic_summary = cls._is_generic_scope_summary_uri(uri)
+
+        if cls._is_image_focused_query(query):
+            if is_image:
+                return 0
+            if not is_summary:
+                return 1
+            if not is_generic_summary:
+                return 2
+            return 3
+
+        if not is_image and not is_summary:
+            return 0
+        if is_image:
+            return 1
+        if not is_generic_summary:
+            return 2
+        return 3
+
     @classmethod
     def _format_search_results(
         cls, query: str, results: dict[str, Any], target_uri: Optional[str] = ""
@@ -409,14 +469,13 @@ class VikingSearchTool(OVFileTool):
         resources = results.get("resources") or []
         memories = results.get("memories") or []
         skills = results.get("skills") or []
+        image_focused_query = cls._is_image_focused_query(query)
         ordered_resources = [
             resource
             for _, resource in sorted(
                 enumerate(resources),
                 key=lambda item: (
-                    cls._is_image_uri(item[1].get("uri", "")),
-                    cls._is_summary_uri(item[1].get("uri", "")),
-                    cls._is_generic_scope_summary_uri(item[1].get("uri", "")),
+                    cls._resource_kind_rank(query, item[1]),
                     -cls._resource_score(item[1]),
                     item[0],
                 ),
@@ -438,43 +497,65 @@ class VikingSearchTool(OVFileTool):
         image_resources = [
             resource for resource in ordered_resources if cls._is_image_uri(resource.get("uri", ""))
         ]
-        display_resources = document_resources if document_resources else ordered_resources
 
         lines = [f"OpenViking search query: {query}"]
         if target_uri:
             lines.append(f"Target URI: {target_uri}")
         lines.append(f"Total matches: {results.get('total', len(resources))}")
 
-        if display_resources:
+        def append_document_section() -> None:
+            if not concrete_document_resources:
+                return
             lines.append("")
-            lines.append("Resources:")
-            for idx, resource in enumerate(display_resources, start=1):
+            lines.append("Documents:")
+            for idx, resource in enumerate(concrete_document_resources, start=1):
                 uri = resource.get("uri", "")
                 match_reason = (resource.get("match_reason") or "").strip()
-                resource_type = "image asset" if cls._is_image_uri(uri) else "document"
 
-                lines.append(f"{idx}. [{resource_type}] {uri}")
+                lines.append(f"{idx}. [document] {uri}")
                 if match_reason:
                     lines.append(f"   Match reason: {match_reason}")
-                if cls._is_summary_uri(uri):
-                    if cls._is_generic_scope_summary_uri(uri):
-                        lines.append("   Generic scope summary only. Not a concrete document.")
-                    else:
-                        lines.append("   Summary only. Not a concrete document.")
-                    lines.append("   Do not answer from this alone; locate a concrete file first.")
-                else:
-                    lines.append("   Content preview omitted. Use openviking_read for evidence.")
+                lines.append("   Content preview omitted. Use openviking_read for evidence.")
 
-        if document_resources and image_resources:
+        def append_image_section() -> None:
+            if not image_resources:
+                return
             lines.append("")
-            lines.append(
-                f"Related image assets: {len(image_resources)} matched screenshot(s) were found, "
-                "but their raw Viking URIs are intentionally omitted here."
-            )
-            lines.append(
-                "To send images to the user, call openviking_read(level='read', include_images=true) "
-                "on the matched document URI, and only use the returned Markdown image lines."
-            )
+            lines.append("Image assets:")
+            for idx, resource in enumerate(image_resources, start=1):
+                uri = resource.get("uri", "")
+                match_reason = (resource.get("match_reason") or "").strip()
+
+                lines.append(f"{idx}. [image asset] {uri}")
+                if match_reason:
+                    lines.append(f"   Match reason: {match_reason}")
+                lines.append(
+                    "   Preview omitted. Use openviking_read(level='read', include_images=true) "
+                    "on this URI to get sendable Markdown image lines."
+                )
+
+        if image_focused_query:
+            append_image_section()
+            append_document_section()
+        else:
+            append_document_section()
+            append_image_section()
+
+        if summary_resources:
+            lines.append("")
+            lines.append("Summaries:")
+            for idx, resource in enumerate(summary_resources, start=1):
+                uri = resource.get("uri", "")
+                match_reason = (resource.get("match_reason") or "").strip()
+
+                lines.append(f"{idx}. [summary] {uri}")
+                if match_reason:
+                    lines.append(f"   Match reason: {match_reason}")
+                if cls._is_generic_scope_summary_uri(uri):
+                    lines.append("   Generic scope summary only. Not a concrete document.")
+                else:
+                    lines.append("   Summary only. Not a concrete document.")
+                lines.append("   Do not answer from this alone; locate a concrete file first.")
 
         if memories:
             lines.append("")
@@ -504,9 +585,9 @@ class VikingSearchTool(OVFileTool):
             )
             if image_resources:
                 lines.append(
-                    "If the reply should include screenshots, use "
-                    "openviking_read(level='read', include_images=true) on that document URI "
-                    "and only keep the returned Markdown image lines unchanged."
+                    "If the reply should include document illustrations, screenshots, or bid "
+                    "attachments, you can either read the document with include_images=true "
+                    "or read a matched image asset URI directly."
                 )
                 lines.append(
                     "Never place raw viking:// image URIs directly inside Markdown image syntax."

@@ -289,11 +289,50 @@ async def test_viking_search_tool_prioritizes_documents_over_image_assets() -> N
         target_uri="viking://resources/demo/",
     )
 
-    assert result.index("viking://resources/demo/房价码设置.md") < result.index(
-        "Related image assets:"
+    assert result.index("Documents:") < result.index("Image assets:")
+    assert "viking://resources/demo/房价码设置.md" in result
+    assert "viking://resources/demo/_images/image14.png" in result
+    assert "read the document with include_images=true" in result
+
+
+@pytest.mark.asyncio
+async def test_viking_search_tool_prioritizes_image_assets_for_certificate_queries() -> None:
+    tool = VikingSearchTool()
+    mock_client = AsyncMock()
+    mock_client.search.return_value = {
+        "total": 2,
+        "query": "投标资质证书",
+        "resources": [
+            {
+                "uri": "viking://resources/bid/资质汇总.md",
+                "abstract": "公司资质清单与说明。",
+                "match_reason": "Matched by content",
+            },
+            {
+                "uri": "viking://resources/bid/_images/营业执照.png",
+                "abstract": "公司营业执照扫描件。",
+                "match_reason": "Matched by visible text",
+            },
+        ],
+        "memories": [],
+        "skills": [],
+    }
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        query="投标资质证书",
+        target_uri="viking://resources/bid/",
     )
-    assert "viking://resources/demo/_images/image14.png" not in result
-    assert "only use the returned Markdown image lines" in result
+
+    assert result.index("Image assets:") < result.index("Documents:")
+    assert result.index("viking://resources/bid/_images/营业执照.png") < result.index(
+        "viking://resources/bid/资质汇总.md"
+    )
+    assert "read a matched image asset URI directly" in result
 
 
 @pytest.mark.asyncio
@@ -409,26 +448,28 @@ async def test_viking_search_tool_demotes_non_generic_summary_uris_below_concret
 @pytest.mark.asyncio
 async def test_viking_search_tool_formats_findresult_like_objects_from_admin_search() -> None:
     tool = VikingSearchTool()
-    mock_client = AsyncMock()
-    mock_client.admin_user_client = AsyncMock()
-    mock_client._matched_context_to_dict.side_effect = lambda item: {
-        "uri": getattr(item, "uri", ""),
-        "abstract": getattr(item, "abstract", ""),
-        "match_reason": getattr(item, "match_reason", ""),
-        "score": getattr(item, "score", 0.0),
-    }
-    mock_client.admin_user_client.search.return_value = SimpleNamespace(
-        resources=[
-            SimpleNamespace(
-                uri="viking://resources/demo/manual.md",
-                abstract="manual",
-                match_reason="Matched by content",
-                score=0.88,
+    mock_client = SimpleNamespace(
+        _matched_context_to_dict=lambda item: {
+            "uri": getattr(item, "uri", ""),
+            "abstract": getattr(item, "abstract", ""),
+            "match_reason": getattr(item, "match_reason", ""),
+            "score": getattr(item, "score", 0.0),
+        },
+        search=AsyncMock(
+            return_value=SimpleNamespace(
+                resources=[
+                    SimpleNamespace(
+                        uri="viking://resources/demo/manual.md",
+                        abstract="manual",
+                        match_reason="Matched by content",
+                        score=0.88,
+                    )
+                ],
+                memories=[],
+                skills=[],
+                total=1,
             )
-        ],
-        memories=[],
-        skills=[],
-        total=1,
+        ),
     )
     tool._get_client = AsyncMock(return_value=mock_client)
 
@@ -471,7 +512,7 @@ async def test_viking_grep_tool_reports_actual_match_count_when_backend_count_is
         pattern="宾客.*状态",
     )
 
-    assert result.startswith("Found 1 match:")
+    assert result.startswith("Found 1 match across 1 pattern:")
     assert "**2.1宾客状态**" in result
 
 
