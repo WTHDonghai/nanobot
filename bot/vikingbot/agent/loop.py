@@ -14,7 +14,7 @@ from loguru import logger
 from vikingbot.agent.context import ContextBuilder
 from vikingbot.agent.intent_router import (
     IntentRoute,
-    classify_knowledge_base_intent,
+    classify_intent,
     generate_route_response,
 )
 from vikingbot.agent.memory import MemoryStore
@@ -554,7 +554,7 @@ class AgentLoop:
                     )
             elif (
                 publish_events
-                and self.context._is_knowledge_base_mode()
+                and self.context._is_retrieval_mode()
                 and not has_kb_read_evidence
                 and not response.has_tool_calls
             ):
@@ -662,7 +662,7 @@ class AgentLoop:
                     {"role": "system", "content": self.context.build_tool_reflection_prompt()}
                 )
             else:
-                if self.context._is_knowledge_base_mode() and not has_kb_read_evidence:
+                if self.context._is_retrieval_mode() and not has_kb_read_evidence:
                     if response.content or response.reasoning_content:
                         messages = self.context.add_assistant_message(
                             messages,
@@ -672,7 +672,7 @@ class AgentLoop:
                     messages.append(
                         {
                             "role": "system",
-                            "content": self.context.build_kb_continue_search_prompt(
+                            "content": self.context.build_retrieval_continue_search_prompt(
                                 progress_summary=self._summarize_kb_tool_state(messages)
                             ),
                         }
@@ -698,9 +698,22 @@ class AgentLoop:
 
         return final_content, tools_used, token_usage, iteration
 
-    @staticmethod
-    def _is_concrete_kb_read_result(tool_name: str, arguments: dict, result: str) -> bool:
-        """Whether a tool result represents a concrete KB document read."""
+    def _is_concrete_kb_read_result(self, tool_name: str, arguments: dict, result: str) -> bool:
+        """Whether a tool result represents sufficient retrieval evidence."""
+        if self.context._is_bid_material_mode():
+            if tool_name not in {
+                "search_certificates",
+                "search_solution_materials",
+                "collect_bid_evidence",
+            }:
+                return False
+            if not isinstance(result, str) or not result.strip():
+                return False
+            if "Items: none" in result:
+                return False
+            match = re.search(r"Evidence items:\s*(\d+)", result)
+            return bool(match and int(match.group(1)) > 0)
+
         if tool_name != "openviking_read":
             return False
         if not isinstance(arguments, dict):
@@ -779,21 +792,36 @@ class AgentLoop:
         self, messages: list[dict], has_kb_read_evidence: bool
     ) -> str:
         """Return a user-facing fallback when the loop hits the iteration limit."""
-        if not self.context._is_knowledge_base_mode():
+        if not self.context._is_retrieval_mode():
             return f"Reached {self.max_iterations} iterations without completion."
 
         language = self._detect_reply_language(messages)
+        if self.context._is_bid_material_mode():
+            if has_kb_read_evidence:
+                fallbacks = {
+                    "zh-CN": "抱歉，我暂时还没能根据现有投标资料整理出明确答复。需要的话，我可以继续帮您缩小范围或补充证据包。",
+                    "ja": "申し訳ありません。現在の入札資料だけでは明確な回答をまとめきれませんでした。必要であれば、対象範囲をさらに絞って証拠を集め直せます。",
+                    "en": "Sorry, I still couldn't produce a clear answer from the current bidding materials. If helpful, I can narrow the scope and collect a tighter evidence pack.",
+                }
+            else:
+                fallbacks = {
+                    "zh-CN": "抱歉，我暂时没有在当前投标知识库中找到足够依据来回答这个问题。需要的话，您可以进一步缩小范围，比如具体资质、方案主题、产品模块或参数点。",
+                    "ja": "申し訳ありません。現在の入札ナレッジベースでは、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば、資格証明、提案テーマ、製品モジュール、または確認したい仕様をもう少し具体的に教えてください。",
+                    "en": "Sorry, I couldn't find enough supporting information in the current bidding knowledge base to answer this clearly. If helpful, you can narrow it down to a specific certificate, solution topic, product module, or parameter.",
+                }
+            return fallbacks.get(language, fallbacks["en"])
+
         if has_kb_read_evidence:
             fallbacks = {
-                "zh-CN": "抱歉，我暂时还没能根据现有资料整理出明确答复。需要的话，我可以帮您转人工继续跟进，您看需要吗？",
-                "ja": "申し訳ありません。現在の資料だけでは明確な回答をまとめきれませんでした。必要であれば担当者へ引き継げますが、ご希望ですか。",
-                "en": "Sorry, I still couldn't produce a clear answer from the current bidding materials. If you'd like, I can help transfer this to a human agent. Would you like me to do that?",
+                "zh-CN": "抱歉，我暂时还没能根据现有资料整理出明确答复。需要的话，您可以告诉我更具体的文档范围、模块或参数点。",
+                "ja": "申し訳ありません。現在の資料だけでは明確な回答をまとめきれませんでした。必要であれば、対象の文書範囲やモジュール、確認したい項目をもう少し具体的に教えてください。",
+                "en": "Sorry, I still couldn't produce a clear answer from the current materials. If helpful, you can narrow the scope to a document, module, or parameter.",
             }
         else:
             fallbacks = {
-                "zh-CN": "抱歉，我暂时没有在当前投标知识库中找到足够依据来回答这个问题。需要的话，您可以进一步缩小范围，比如具体资质、方案主题、产品模块或参数点。",
-                "ja": "申し訳ありません。現在の入札ナレッジベースでは、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば、資格証明、提案テーマ、製品モジュール、または確認したい仕様をもう少し具体的に教えてください。",
-                "en": "Sorry, I couldn't find enough supporting information in the current bidding knowledge base to answer this clearly. If helpful, you can narrow it down to a specific certificate, solution topic, product module, or parameter.",
+                "zh-CN": "抱歉，我暂时没有在当前知识库中找到足够依据来回答这个问题。需要的话，您可以进一步缩小范围，比如具体文档、模块、流程或参数点。",
+                "ja": "申し訳ありません。現在のナレッジベースでは、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば、対象の文書、モジュール、手順、または確認したい仕様をもう少し具体的に教えてください。",
+                "en": "Sorry, I couldn't find enough supporting information in the current knowledge base to answer this clearly. If helpful, you can narrow it down to a specific document, module, process, or parameter.",
             }
         return fallbacks.get(language, fallbacks["en"])
 
@@ -805,7 +833,7 @@ class AgentLoop:
     ) -> str | None:
         """Select tool-choice mode for the current LLM turn."""
         if (
-            self.context._is_knowledge_base_mode()
+            self.context._is_retrieval_mode()
             and not has_kb_read_evidence
             and tools
         ):
@@ -836,7 +864,16 @@ class AgentLoop:
             args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
             name = str(getattr(tool_call, "name", "") or "")
 
-            if name == "openviking_search":
+            if name == "search_certificates":
+                query = _clean_text(args.get("query") or "相关证书")
+                plan_steps.append(f"先检索证书材料：{query}")
+            elif name == "search_solution_materials":
+                query = _clean_text(args.get("query") or "相关方案")
+                plan_steps.append(f"先检索方案材料：{query}")
+            elif name == "collect_bid_evidence":
+                target = _clean_text(args.get("section_name") or "当前章节")
+                plan_steps.append(f"先整理章节证据包：{target}")
+            elif name == "openviking_search":
                 query = _clean_text(
                     args.get("query") or args.get("keyword") or args.get("q") or "当前问题"
                 )
@@ -1067,7 +1104,7 @@ class AgentLoop:
         LLM rewrite entirely and return the draft as-is.  This removes one
         expensive LLM round-trip from the critical path.
         """
-        if not self.context._is_knowledge_base_mode() or not draft_content:
+        if not self.context._is_retrieval_mode() or not draft_content:
             return draft_content
 
         image_evidence_blocks = self._extract_image_evidence_blocks(messages)
@@ -1093,7 +1130,7 @@ class AgentLoop:
         final_messages = [
             {
                 "role": "system",
-                "content": self.context.build_kb_final_response_system_prompt(),
+                "content": self.context.build_retrieval_final_response_system_prompt(),
             },
             {
                 "role": "user",
@@ -1125,7 +1162,7 @@ class AgentLoop:
                 correction_messages = [
                     {
                         "role": "system",
-                        "content": self.context.build_kb_final_response_system_prompt(),
+                        "content": self.context.build_retrieval_final_response_system_prompt(),
                     },
                     {
                         "role": "user",
@@ -1332,16 +1369,17 @@ class AgentLoop:
                 config=self.config,
             )
 
-            # Knowledge-base mode: classify intent before agent loop
-            if message_context._is_knowledge_base_mode():
+            # Retrieval-focused profiles: classify intent before agent loop
+            if message_context._is_retrieval_mode():
                 try:
                     logger.info("[IntentRouter] Classifying user intent...")
-                    decision = await classify_knowledge_base_intent(
+                    decision = await classify_intent(
                         provider=self.provider,
                         model=self.fast_model,
                         user_message=msg.content,
                         history=session.get_history(),
                         session_id=session_key.safe_name(),
+                        capability_profile=self.config.agents.capability_profile,
                     )
                     logger.info(
                         f"[IntentRouter] label={decision.label} route={decision.route} "
@@ -1357,6 +1395,7 @@ class AgentLoop:
                             user_message=msg.content,
                             history=session.get_history(),
                             session_id=session_key.safe_name(),
+                            capability_profile=self.config.agents.capability_profile,
                         )
                         response_text = self._normalize_final_output_text(response_text)
                         await self._persist_session_turn(session, msg, response_text)

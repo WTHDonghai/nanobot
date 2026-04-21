@@ -149,6 +149,7 @@ class ToolRegistry:
         tool_context = ToolContext(
             session_key=session_key,
             sandbox_manager=sandbox_manager,
+            workspace_id=sandbox_manager.to_workspace_id(session_key) if sandbox_manager else None,
             sender_id=sender_id,
         )
 
@@ -198,7 +199,7 @@ class ToolRegistry:
             context=HookContext(
                 event_type="tool.post_call",
                 session_key=session_key,
-                workspace_id=sandbox_manager.to_workspace_id(session_key),
+                workspace_id=sandbox_manager.to_workspace_id(session_key) if sandbox_manager else None,
             ),
             tool_name=name,
             params=params,

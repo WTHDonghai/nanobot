@@ -18,11 +18,13 @@ viking_resource_prefix = "viking://resources/"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff"}
 READABLE_TEXT_EXTENSIONS = {".md", ".markdown", ".mdown", ".mkd", ".txt"}
 WORD_IMAGE_PLACEHOLDER_RE = re.compile(r"!\[([^\]]*)\]\(ov-asset://([^)]+)\)")
+MARKDOWN_IMAGE_REF_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
 WORD_INCLUDEPICTURE_RE = re.compile(
     r"[\x01\x13\x14\x15]*INCLUDEPICTURE(?:\s+\\d)?\s+\"([^\"]+)\"(?:\s+\\\*\s+MERGEFORMATINET)?[\x01\x13\x14\x15]*",
     re.IGNORECASE,
 )
 WORD_CONTROL_CHAR_RE = re.compile(r"[\x01\x13\x14\x15]")
+GENERIC_IMAGE_LABEL_RE = re.compile(r"^(?:image\d+|page[_-]?\d+[_-]?img\d+)$", re.IGNORECASE)
 
 
 class VikingClient:
@@ -186,12 +188,23 @@ class VikingClient:
             logger.warning(f"Failed to download content from {uri}: {e}")
             return b""
 
-    async def export_related_images_for_send(self, uri: str, max_images: int = 4) -> list[str]:
+    async def export_related_images_for_send(self, uri: str, max_images: int | None = 4) -> list[str]:
         """Export nearby resource images into send:// references for bot channels."""
         image_uris = await self._find_related_image_uris(uri, max_images=max_images)
         return await self._export_image_uris_for_send(image_uris)
 
-    async def export_uri_for_send(self, uri: str, max_images: int = 4) -> list[str]:
+    async def find_related_image_uris(self, uri: str, max_images: int | None = 4) -> list[str]:
+        """Return nearby extracted image URIs for a document resource."""
+        return await self._find_related_image_uris(uri, max_images=max_images)
+
+    async def export_related_images(
+        self, uri: str, output_dir: Path, max_images: int | None = 4
+    ) -> list[dict[str, str]]:
+        """Materialize nearby document images to a local directory."""
+        image_uris = await self._find_related_image_uris(uri, max_images=max_images)
+        return await self._export_image_uris_to_directory(image_uris, output_dir=output_dir)
+
+    async def export_uri_for_send(self, uri: str, max_images: int | None = 4) -> list[str]:
         """Export one image URI or an image directory to send:// references."""
         stat = await self.stat(uri)
         if not stat:
@@ -211,10 +224,41 @@ class VikingClient:
                 if not entry.get("isDir") and Path(entry.get("name", "")).suffix.lower() in IMAGE_EXTENSIONS
             ]
             image_uris.sort(key=self._image_sort_key)
-            return await self._export_image_uris_for_send(image_uris[:max_images])
+            return await self._export_image_uris_for_send(self._apply_image_limit(image_uris, max_images))
 
         if Path(normalized_uri).suffix.lower() in IMAGE_EXTENSIONS:
             return await self._export_image_uris_for_send([normalized_uri])
+
+        return []
+
+    async def export_uri_images(
+        self, uri: str, output_dir: Path, max_images: int | None = 4
+    ) -> list[dict[str, str]]:
+        """Materialize one image URI or image directory to a local directory."""
+        stat = await self.stat(uri)
+        if not stat:
+            return []
+
+        normalized_uri = uri.rstrip("/")
+        if stat.get("isDir"):
+            try:
+                entries = await self.list_resources(path=normalized_uri, recursive=True)
+            except Exception as e:
+                logger.warning(f"Failed to list image directory {normalized_uri}: {e}")
+                return []
+
+            image_uris = [
+                entry["uri"]
+                for entry in entries
+                if not entry.get("isDir") and Path(entry.get("name", "")).suffix.lower() in IMAGE_EXTENSIONS
+            ]
+            image_uris.sort(key=self._image_sort_key)
+            return await self._export_image_uris_to_directory(
+                self._apply_image_limit(image_uris, max_images), output_dir=output_dir
+            )
+
+        if Path(normalized_uri).suffix.lower() in IMAGE_EXTENSIONS:
+            return await self._export_image_uris_to_directory([normalized_uri], output_dir=output_dir)
 
         return []
 
@@ -260,38 +304,101 @@ class VikingClient:
     async def materialize_inline_image_refs(self, content: str, source_uri: str) -> str:
         """Replace Word inline asset placeholders with sendable image references."""
         rendered = content
-        replacement_cache: dict[str, str] = {}
+        send_ref_cache: dict[str, str] = {}
 
-        if "ov-asset://" in content:
-            for match in WORD_IMAGE_PLACEHOLDER_RE.finditer(content):
-                alt_text = match.group(1)
-                asset_name = match.group(2)
-                placeholder = match.group(0)
+        for image_ref in self._collect_supported_markdown_image_refs(content):
+            markdown_ref = image_ref["markdown"]
+            raw_ref = image_ref["ref"]
 
-                if asset_name not in replacement_cache:
-                    resolved_uri = await self._resolve_image_asset_uri(source_uri, asset_name)
-                    if not resolved_uri:
+            send_ref = send_ref_cache.get(raw_ref)
+            if send_ref is None:
+                resolved_uri = await self._resolve_markdown_image_uri(source_uri, raw_ref)
+                if not resolved_uri:
+                    if raw_ref.startswith("ov-asset://"):
                         raise ValueError(
-                            f"Unable to resolve inline image asset '{asset_name}' from {source_uri}"
+                            f"Unable to resolve inline image asset '{raw_ref[len('ov-asset://'):]}' from {source_uri}"
                         )
+                    raise ValueError(f"Unable to resolve inline image uri '{raw_ref}' from {source_uri}")
 
-                    exported = await self._export_image_uris_for_send([resolved_uri])
-                    if not exported:
-                        raise ValueError(
-                            f"Unable to export inline image asset '{resolved_uri}' for send"
-                        )
+                exported = await self._export_image_uris_for_send([resolved_uri])
+                if not exported:
+                    raise ValueError(
+                        f"Unable to export inline image asset '{resolved_uri}' for send"
+                    )
 
-                    send_match = re.search(r"!\[[^\]]*\]\((send://[^)\s]+)\)", exported[0])
-                    if not send_match:
-                        raise ValueError(
-                            f"Inline image asset '{resolved_uri}' did not produce a send:// reference"
-                        )
-                    replacement_cache[asset_name] = f"![{alt_text}]({send_match.group(1)})"
+                send_match = re.search(r"!\[[^\]]*\]\((send://[^)\s]+)\)", exported[0])
+                if not send_match:
+                    raise ValueError(
+                        f"Inline image asset '{resolved_uri}' did not produce a send:// reference"
+                    )
+                send_ref = send_match.group(1)
+                send_ref_cache[raw_ref] = send_ref
 
-                rendered = rendered.replace(placeholder, replacement_cache[asset_name], 1)
+            replacement_alt = image_ref["caption"] or image_ref["alt_text"] or "image"
+            rendered = rendered.replace(markdown_ref, f"![{replacement_alt}]({send_ref})", 1)
 
         rendered = self._materialize_word_field_images(rendered)
         return self._strip_word_control_chars(rendered)
+
+    async def materialize_inline_image_refs_to_directory(
+        self, content: str, source_uri: str, output_dir: Path
+    ) -> str:
+        """Replace Word inline asset placeholders with local markdown image references."""
+        rendered = content
+        local_path_cache: dict[str, str] = {}
+
+        for image_ref in self._collect_supported_markdown_image_refs(content):
+            markdown_ref = image_ref["markdown"]
+            raw_ref = image_ref["ref"]
+
+            local_path = local_path_cache.get(raw_ref)
+            if local_path is None:
+                resolved_uri = await self._resolve_markdown_image_uri(source_uri, raw_ref)
+                if not resolved_uri:
+                    continue
+
+                exported = await self._export_image_uris_to_directory(
+                    [resolved_uri], output_dir=output_dir
+                )
+                if not exported:
+                    continue
+
+                local_path = str(exported[0].get("local_path") or "").strip()
+                if not local_path:
+                    continue
+                local_path_cache[raw_ref] = local_path
+
+            replacement_alt = image_ref["caption"] or image_ref["alt_text"] or "image"
+            rendered = rendered.replace(markdown_ref, f"![{replacement_alt}]({local_path})", 1)
+
+        rendered = self._materialize_word_field_images(rendered)
+        return self._strip_word_control_chars(rendered)
+
+    async def export_referenced_images(
+        self, content: str, source_uri: str, output_dir: Path, max_images: int | None = 4
+    ) -> list[dict[str, str]]:
+        """Export inline markdown image references from one document fragment."""
+        exported_files: list[dict[str, str]] = []
+        seen_uris: set[str] = set()
+
+        for image_ref in self._collect_supported_markdown_image_refs(content):
+            resolved_uri = await self._resolve_markdown_image_uri(source_uri, image_ref["ref"])
+            if not resolved_uri or resolved_uri in seen_uris:
+                continue
+            seen_uris.add(resolved_uri)
+
+            exported = await self._export_image_uris_to_directory([resolved_uri], output_dir=output_dir)
+            if not exported:
+                continue
+
+            image_file = exported[0]
+            if image_ref["caption"]:
+                image_file["caption"] = image_ref["caption"]
+            exported_files.append(image_file)
+            if max_images is not None and len(exported_files) >= max_images:
+                break
+
+        return exported_files
 
     async def _export_image_uris_for_send(self, image_uris: list[str]) -> list[str]:
         """Persist image URIs into bot send:// staging files."""
@@ -317,6 +424,43 @@ class VikingClient:
             exported_refs.append(f"![{label}](send://{filename})")
 
         return exported_refs
+
+    async def _export_image_uris_to_directory(
+        self, image_uris: list[str], output_dir: Path
+    ) -> list[dict[str, str]]:
+        """Persist image URIs into a caller-provided directory."""
+        if not image_uris:
+            return []
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        exported_files: list[dict[str, str]] = []
+
+        for idx, image_uri in enumerate(image_uris, start=1):
+            image_bytes = await self.download_content(image_uri)
+            if not image_bytes:
+                continue
+
+            suffix = Path(image_uri).suffix.lower()
+            if suffix not in IMAGE_EXTENSIONS:
+                suffix = ".png"
+
+            filename = f"{uuid.uuid4().hex}{suffix}"
+            image_path = output_dir / filename
+            image_path.write_bytes(image_bytes)
+
+            label = Path(image_uri).stem or f"image_{idx}"
+            page_match = re.search(r"(page|p)[_\-]?(\d+)", Path(image_uri).stem, re.IGNORECASE)
+            page_hint = page_match.group(2) if page_match else None
+            exported_files.append(
+                {
+                    "source_uri": image_uri,
+                    "local_path": str(image_path),
+                    "caption": label,
+                    "page_hint": page_hint or "",
+                }
+            )
+
+        return exported_files
 
     async def read_user_profile(self, user_id: str) -> str:
         """读取用户 profile。
@@ -396,7 +540,7 @@ class VikingClient:
             logger.warning(f"Failed to check user existence: {e}")
             return False
 
-    async def _find_related_image_uris(self, uri: str, max_images: int = 4) -> list[str]:
+    async def _find_related_image_uris(self, uri: str, max_images: int | None = 4) -> list[str]:
         """Find extracted document images near a content URI."""
         current_dir = await self._resolve_start_directory(uri)
         checked_dirs: set[str] = set()
@@ -425,7 +569,7 @@ class VikingClient:
                     if not entry.get("isDir") and Path(entry.get("name", "")).suffix.lower() in IMAGE_EXTENSIONS
                 ]
                 image_uris.sort(key=self._image_sort_key)
-                return image_uris[:max_images]
+                return self._apply_image_limit(image_uris, max_images)
 
             # Parsed document roots already own their sibling _images directory.
             if Path(self._uri_name(current_dir)).suffix:
@@ -460,6 +604,25 @@ class VikingClient:
 
         return None
 
+    async def _resolve_markdown_image_uri(self, source_uri: str, ref: str) -> Optional[str]:
+        """Resolve supported markdown image refs to concrete Viking image URIs."""
+        normalized_ref = str(ref or "").strip()
+        if not normalized_ref:
+            return None
+
+        if normalized_ref.startswith("ov-asset://"):
+            return await self._resolve_image_asset_uri(
+                source_uri,
+                normalized_ref[len("ov-asset://") :],
+            )
+
+        if normalized_ref.startswith("viking://"):
+            stat = await self.stat(normalized_ref)
+            if stat and not stat.get("isDir") and Path(normalized_ref).suffix.lower() in IMAGE_EXTENSIONS:
+                return normalized_ref.rstrip("/")
+
+        return None
+
     async def _resolve_start_directory(self, uri: str) -> str:
         """Resolve the best starting directory for sibling image lookup."""
         try:
@@ -490,6 +653,14 @@ class VikingClient:
         number = int(match.group(1)) if match else 10**9
         return number, name
 
+    @staticmethod
+    def _apply_image_limit(image_uris: list[str], max_images: int | None) -> list[str]:
+        if max_images is None:
+            return image_uris
+        if max_images <= 0:
+            return []
+        return image_uris[:max_images]
+
     @classmethod
     def _materialize_word_field_images(cls, content: str) -> str:
         """Convert Word INCLUDEPICTURE field codes into markdown images when possible."""
@@ -515,6 +686,78 @@ class VikingClient:
     @staticmethod
     def _uri_name(uri: str) -> str:
         return uri.rstrip("/").rsplit("/", 1)[-1]
+
+    @classmethod
+    def _collect_supported_markdown_image_refs(cls, content: str) -> list[dict[str, str]]:
+        """Collect markdown image refs that can be materialized by OpenViking."""
+        refs: list[dict[str, str]] = []
+        lines = (content or "").splitlines()
+
+        for index, line in enumerate(lines):
+            for match in MARKDOWN_IMAGE_REF_RE.finditer(line):
+                ref = match.group(2).strip()
+                if not ref.startswith(("ov-asset://", "viking://")):
+                    continue
+
+                alt_text = match.group(1).strip()
+                trailing_text = cls._clean_image_caption_text(line[match.end() :])
+                next_text = ""
+                if not trailing_text:
+                    for candidate in lines[index + 1 : index + 4]:
+                        cleaned = cls._clean_image_caption_text(candidate)
+                        if cleaned and not cleaned.startswith("!["):
+                            next_text = cleaned
+                            break
+
+                refs.append(
+                    {
+                        "markdown": match.group(0),
+                        "ref": ref,
+                        "alt_text": alt_text,
+                        "caption": cls._choose_image_caption(
+                            alt_text=alt_text,
+                            ref=ref,
+                            trailing_text=trailing_text,
+                            nearby_text=next_text,
+                        ),
+                    }
+                )
+
+        return refs
+
+    @classmethod
+    def _choose_image_caption(
+        cls,
+        *,
+        alt_text: str,
+        ref: str,
+        trailing_text: str,
+        nearby_text: str,
+    ) -> str:
+        for candidate in (trailing_text, nearby_text, alt_text):
+            cleaned = cls._clean_image_caption_text(candidate)
+            if not cleaned:
+                continue
+            if candidate == alt_text and cls._is_generic_image_label(cleaned):
+                continue
+            return cls._truncate_image_caption(cleaned)
+        return Path(ref).stem or "image"
+
+    @staticmethod
+    def _clean_image_caption_text(text: str) -> str:
+        cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+        cleaned = cleaned.lstrip("▲■●*-:： ")
+        return cleaned.strip()
+
+    @staticmethod
+    def _truncate_image_caption(text: str, max_chars: int = 80) -> str:
+        if len(text) <= max_chars:
+            return text
+        return f"{text[: max_chars - 3].rstrip()}..."
+
+    @staticmethod
+    def _is_generic_image_label(text: str) -> bool:
+        return bool(GENERIC_IMAGE_LABEL_RE.fullmatch(str(text or "").strip()))
 
     @classmethod
     def _is_readable_text_entry(cls, entry: Dict[str, Any]) -> bool:

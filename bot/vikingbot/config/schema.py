@@ -58,6 +58,7 @@ class CapabilityProfile(str, Enum):
     """Agent capability profile."""
 
     KNOWLEDGE_BASE = "knowledge-base"
+    BID_MATERIAL = "bid-material"
     FULL = "full"
 
 

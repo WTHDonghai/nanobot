@@ -39,6 +39,23 @@ async def test_materialize_inline_image_refs_raises_when_export_does_not_produce
 
 
 @pytest.mark.asyncio
+async def test_materialize_inline_image_refs_supports_raw_viking_image_refs() -> None:
+    client = object.__new__(VikingClient)
+    client._resolve_image_asset_uri = AsyncMock()
+    client.stat = AsyncMock(return_value={"isDir": False, "name": "image10.png"})
+    client._export_image_uris_for_send = AsyncMock(return_value=["![image10](send://image10.png)"])
+
+    rendered = await client.materialize_inline_image_refs(
+        "架构说明\n![部署图](viking://resources/demo/_images/image10.png)",
+        "viking://resources/demo/manual.md",
+    )
+
+    assert rendered == "架构说明\n![部署图](send://image10.png)"
+    client._resolve_image_asset_uri.assert_not_called()
+    client.stat.assert_awaited_once_with("viking://resources/demo/_images/image10.png")
+
+
+@pytest.mark.asyncio
 async def test_materialize_inline_image_refs_converts_http_includepicture_and_strips_controls() -> None:
     client = object.__new__(VikingClient)
     client._resolve_image_asset_uri = AsyncMock()
@@ -62,6 +79,33 @@ async def test_materialize_inline_image_refs_converts_http_includepicture_and_st
     assert "\x01" not in rendered
     client._resolve_image_asset_uri.assert_not_called()
     client._export_image_uris_for_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_export_referenced_images_prefers_nearby_human_readable_caption(tmp_path) -> None:
+    client = object.__new__(VikingClient)
+    client._resolve_image_asset_uri = AsyncMock(
+        return_value="viking://resources/demo/_images/image10.png"
+    )
+    client._export_image_uris_to_directory = AsyncMock(
+        return_value=[
+            {
+                "source_uri": "viking://resources/demo/_images/image10.png",
+                "local_path": str(tmp_path / "image10.png"),
+                "caption": "image10",
+                "page_hint": "",
+            }
+        ]
+    )
+
+    exported = await client.export_referenced_images(
+        "系统说明\n![image10](ov-asset://image10.png)\n▲XMS系统部署架构图",
+        "viking://resources/demo/manual.md",
+        output_dir=tmp_path,
+        max_images=2,
+    )
+
+    assert exported[0]["caption"] == "XMS系统部署架构图"
 
 
 @pytest.mark.asyncio

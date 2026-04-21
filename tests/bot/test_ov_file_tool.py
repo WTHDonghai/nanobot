@@ -296,21 +296,21 @@ async def test_viking_search_tool_prioritizes_documents_over_image_assets() -> N
 
 
 @pytest.mark.asyncio
-async def test_viking_search_tool_prioritizes_image_assets_for_certificate_queries() -> None:
+async def test_viking_search_tool_prioritizes_image_assets_for_image_focused_queries() -> None:
     tool = VikingSearchTool()
     mock_client = AsyncMock()
     mock_client.search.return_value = {
         "total": 2,
-        "query": "投标资质证书",
+        "query": "部署架构截图",
         "resources": [
             {
-                "uri": "viking://resources/bid/资质汇总.md",
-                "abstract": "公司资质清单与说明。",
+                "uri": "viking://resources/demo/部署说明.md",
+                "abstract": "部署说明与截图索引。",
                 "match_reason": "Matched by content",
             },
             {
-                "uri": "viking://resources/bid/_images/营业执照.png",
-                "abstract": "公司营业执照扫描件。",
+                "uri": "viking://resources/demo/_images/deploy_overview.png",
+                "abstract": "部署架构截图。",
                 "match_reason": "Matched by visible text",
             },
         ],
@@ -324,13 +324,13 @@ async def test_viking_search_tool_prioritizes_image_assets_for_certificate_queri
             session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
             workspace_id="workspace-1",
         ),
-        query="投标资质证书",
-        target_uri="viking://resources/bid/",
+        query="部署架构截图",
+        target_uri="viking://resources/demo/",
     )
 
     assert result.index("Image assets:") < result.index("Documents:")
-    assert result.index("viking://resources/bid/_images/营业执照.png") < result.index(
-        "viking://resources/bid/资质汇总.md"
+    assert result.index("viking://resources/demo/_images/deploy_overview.png") < result.index(
+        "viking://resources/demo/部署说明.md"
     )
     assert "read a matched image asset URI directly" in result
 

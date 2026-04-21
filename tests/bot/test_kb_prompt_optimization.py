@@ -10,7 +10,9 @@ from vikingbot.config.schema import CapabilityProfile, Config
 
 
 def test_kb_initial_search_prompt_prefers_focused_resource_scoped_lookup() -> None:
-    builder = ContextBuilder(Path("."))
+    config = Config()
+    config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
+    builder = ContextBuilder(Path("."), config=config)
     prompt = builder.build_kb_initial_search_prompt()
 
     assert 'target_uri="viking://resources/"' in prompt
@@ -20,7 +22,9 @@ def test_kb_initial_search_prompt_prefers_focused_resource_scoped_lookup() -> No
 
 
 def test_kb_continue_search_prompt_reads_concrete_doc_before_new_search() -> None:
-    builder = ContextBuilder(Path("."))
+    config = Config()
+    config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
+    builder = ContextBuilder(Path("."), config=config)
     prompt = builder.build_kb_continue_search_prompt("Current search state")
 
     assert 'Stay in target_uri="viking://resources/"' in prompt
@@ -40,3 +44,15 @@ def test_kb_tool_reflection_prompt_pushes_shortest_path() -> None:
     assert 'target_uri="viking://resources/"' in prompt
     assert "call the next retrieval tool directly instead of replying with a prose-only plan." in prompt
     assert "Avoid long OR/boolean expansions unless the first focused query fails." in prompt
+
+
+def test_bid_material_initial_search_prompt_uses_high_level_tools() -> None:
+    config = Config()
+    config.agents.capability_profile = CapabilityProfile.BID_MATERIAL
+    builder = ContextBuilder(Path("."), config=config)
+
+    prompt = builder.build_retrieval_initial_search_prompt()
+
+    assert "search_certificates" in prompt
+    assert "search_solution_materials" in prompt
+    assert "collect_bid_evidence" in prompt

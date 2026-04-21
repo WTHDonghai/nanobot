@@ -30,6 +30,7 @@ from vikingbot.cron.service import CronService
 from vikingbot.cron.types import CronJob
 from vikingbot.heartbeat.service import HeartbeatService
 from vikingbot.integrations.langfuse import LangfuseClient
+from vikingbot.mcp import BidMaterialMCPServer
 
 # Create sandbox manager
 from vikingbot.sandbox.manager import SandboxManager
@@ -300,6 +301,18 @@ def gateway(
         await asyncio.gather(*tasks)
 
     asyncio.run(run())
+
+
+@app.command("bid-material-mcp")
+def bid_material_mcp(
+    config_path: str = typer.Option(None, "--config", "-c", help="ov.conf path"),
+):
+    """Start the bid-material MCP server over stdio."""
+    path = Path(config_path).expanduser() if config_path is not None else None
+    config = ensure_config(path)
+    _init_bot_data(config)
+    server = BidMaterialMCPServer(config=config)
+    asyncio.run(server.run_stdio())
 
 
 def prepare_agent_loop(config, bus, session_manager, cron, quiet: bool = False, eval: bool = False):

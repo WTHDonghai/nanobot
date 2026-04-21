@@ -291,8 +291,7 @@ class VikingSearchTool(OVFileTool):
             "Search for resources in OpenViking using a query. This tool is for retrieval only: "
             "it returns candidate URIs, not final evidence. After finding a relevant document/text "
             "resource, call openviking_read on that URI before answering. Image assets under "
-            "/_images/ can be primary evidence for certificate, license, screenshot, or "
-            "image-focused queries."
+            "/_images/ may also be relevant evidence for image-focused queries."
         )
 
     @property
@@ -410,30 +409,21 @@ class VikingSearchTool(OVFileTool):
             return False
 
         zh_terms = (
-            "资质",
-            "证书",
-            "证照",
-            "证件",
-            "许可证",
-            "营业执照",
-            "授权书",
-            "认证",
-            "扫描件",
-            "原件",
-            "盖章",
             "图片",
             "照片",
             "截图",
+            "图示",
+            "图表",
+            "配图",
+            "示意图",
         )
         en_terms = (
-            "certificate",
-            "certification",
-            "license",
-            "licence",
-            "scan",
             "screenshot",
             "image",
             "photo",
+            "figure",
+            "diagram",
+            "chart",
         )
 
         return any(term in query for term in zh_terms) or any(term in normalized for term in en_terms)

@@ -5,6 +5,18 @@ PYTHON ?= python3
 SETUP_PY := setup.py
 AGFS_SERVER_DIR := third_party/agfs/agfs-server
 OV_CLI_DIR := crates/ov_cli
+MCP_PYTHON ?= $(CURDIR)/.venv/bin/python
+BID_MATERIAL_MCP_DEBUG_SCRIPT := $(CURDIR)/scripts/bid_material_mcp_debug.py
+BID_MATERIAL_MCP_CONFIG ?= $(HOME)/.openviking/ov-bidding.conf
+BID_MATERIAL_MCP_PROTOCOL ?= line
+BID_MATERIAL_MCP_OUTPUT ?= parsed
+BID_MATERIAL_MCP_QUERY ?= ISO 证书
+BID_MATERIAL_MCP_TARGET_URI ?= viking://resources/
+BID_MATERIAL_MCP_TOP_K ?= 5
+BID_MATERIAL_MCP_SECTION_NAME ?= 技术方案
+BID_MATERIAL_MCP_REQUIREMENT ?= 请收集与数据库加密方案相关的可引用证据
+BID_MATERIAL_MCP_TOOL ?= search_certificates
+BID_MATERIAL_MCP_ARGS_JSON ?= {"query":"ISO 证书","target_uri":"viking://resources/","top_k":5}
 
 # Dependency Versions
 MIN_PYTHON_VERSION := 3.10
@@ -29,7 +41,10 @@ CLEAN_DIRS := \
 	htmlcov/ \
 	**/__pycache__/
 
-.PHONY: all build clean help check-pip check-deps
+.PHONY: all build clean help check-pip check-deps \
+	bid-material-mcp-serve bid-material-mcp-list-tools bid-material-mcp-call \
+	bid-material-mcp-cert bid-material-mcp-solution bid-material-mcp-evidence \
+	bid-material-mcp-smoke
 
 all: build
 
@@ -38,6 +53,14 @@ help:
 	@echo "  build       - Build AGFS, ov CLI, and C++ extensions using setup.py"
 	@echo "  clean       - Remove build artifacts and temporary files"
 	@echo "  check-deps  - Check if required dependencies (Go, Rust, CMake, etc.) are installed"
+	@echo "  bid-material-mcp-serve      - Start the bid-material MCP server over stdio"
+	@echo "  bid-material-mcp-list-tools - Initialize the bid-material MCP server and print tools"
+	@echo "  bid-material-mcp-call       - Call one MCP tool with BID_MATERIAL_MCP_TOOL/BID_MATERIAL_MCP_ARGS_JSON"
+	@echo "                               Use BID_MATERIAL_MCP_OUTPUT=full for raw MCP envelopes"
+	@echo "  bid-material-mcp-cert       - Debug search_certificates with BID_MATERIAL_MCP_QUERY"
+	@echo "  bid-material-mcp-solution   - Debug search_solution_materials with BID_MATERIAL_MCP_QUERY"
+	@echo "  bid-material-mcp-evidence   - Debug collect_bid_evidence with BID_MATERIAL_MCP_SECTION_NAME/BID_MATERIAL_MCP_REQUIREMENT"
+	@echo "  bid-material-mcp-smoke      - Run list-tools first, then one MCP tool call as a smoke test"
 	@echo "  help        - Show this help message"
 
 check-pip:
@@ -112,3 +135,62 @@ clean:
 	@find . -name "*.pyc" -delete
 	@find . -name "__pycache__" -type d -exec rm -rf {} +
 	@echo "Cleanup completed."
+
+bid-material-mcp-serve:
+	$(MCP_PYTHON) -m vikingbot bid-material-mcp -c "$(BID_MATERIAL_MCP_CONFIG)"
+
+bid-material-mcp-list-tools:
+	$(PYTHON) $(BID_MATERIAL_MCP_DEBUG_SCRIPT) \
+		--python "$(MCP_PYTHON)" \
+		--config "$(BID_MATERIAL_MCP_CONFIG)" \
+		--protocol "$(BID_MATERIAL_MCP_PROTOCOL)" \
+		--output "$(BID_MATERIAL_MCP_OUTPUT)" \
+		list-tools
+
+bid-material-mcp-call:
+	$(PYTHON) $(BID_MATERIAL_MCP_DEBUG_SCRIPT) \
+		--python "$(MCP_PYTHON)" \
+		--config "$(BID_MATERIAL_MCP_CONFIG)" \
+		--protocol "$(BID_MATERIAL_MCP_PROTOCOL)" \
+		--output "$(BID_MATERIAL_MCP_OUTPUT)" \
+		call \
+		--tool "$(BID_MATERIAL_MCP_TOOL)" \
+		--arguments-json '$(BID_MATERIAL_MCP_ARGS_JSON)'
+
+bid-material-mcp-cert:
+	$(PYTHON) $(BID_MATERIAL_MCP_DEBUG_SCRIPT) \
+		--python "$(MCP_PYTHON)" \
+		--config "$(BID_MATERIAL_MCP_CONFIG)" \
+		--protocol "$(BID_MATERIAL_MCP_PROTOCOL)" \
+		--output "$(BID_MATERIAL_MCP_OUTPUT)" \
+		cert \
+		--query "$(BID_MATERIAL_MCP_QUERY)" \
+		--target-uri "$(BID_MATERIAL_MCP_TARGET_URI)" \
+		--top-k "$(BID_MATERIAL_MCP_TOP_K)"
+
+bid-material-mcp-solution:
+	$(PYTHON) $(BID_MATERIAL_MCP_DEBUG_SCRIPT) \
+		--python "$(MCP_PYTHON)" \
+		--config "$(BID_MATERIAL_MCP_CONFIG)" \
+		--protocol "$(BID_MATERIAL_MCP_PROTOCOL)" \
+		--output "$(BID_MATERIAL_MCP_OUTPUT)" \
+		solution \
+		--query "$(BID_MATERIAL_MCP_QUERY)" \
+		--target-uri "$(BID_MATERIAL_MCP_TARGET_URI)" \
+		--top-k "$(BID_MATERIAL_MCP_TOP_K)"
+
+bid-material-mcp-evidence:
+	$(PYTHON) $(BID_MATERIAL_MCP_DEBUG_SCRIPT) \
+		--python "$(MCP_PYTHON)" \
+		--config "$(BID_MATERIAL_MCP_CONFIG)" \
+		--protocol "$(BID_MATERIAL_MCP_PROTOCOL)" \
+		--output "$(BID_MATERIAL_MCP_OUTPUT)" \
+		evidence \
+		--section-name "$(BID_MATERIAL_MCP_SECTION_NAME)" \
+		--requirement "$(BID_MATERIAL_MCP_REQUIREMENT)" \
+		--target-uri "$(BID_MATERIAL_MCP_TARGET_URI)" \
+		--top-k "$(BID_MATERIAL_MCP_TOP_K)"
+
+bid-material-mcp-smoke:
+	$(MAKE) bid-material-mcp-list-tools
+	$(MAKE) bid-material-mcp-call

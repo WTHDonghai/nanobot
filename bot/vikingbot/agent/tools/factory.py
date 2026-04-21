@@ -2,6 +2,11 @@
 
 from typing import TYPE_CHECKING, Callable
 
+from vikingbot.agent.tools.bid_material import (
+    CollectBidEvidenceTool,
+    SearchCertificatesTool,
+    SearchSolutionMaterialsTool,
+)
 from vikingbot.agent.tools.cron import CronTool
 from vikingbot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from vikingbot.agent.tools.human_handoff import HumanHandoffTool
@@ -68,6 +73,14 @@ def register_default_tools(
             registry.register(VikingSearchTool())
             registry.register(VikingGrepTool())
             registry.register(VikingGlobTool())
+        return
+
+    if capability_profile == CapabilityProfile.BID_MATERIAL:
+        registry.register(SearchCertificatesTool())
+        registry.register(SearchSolutionMaterialsTool())
+        registry.register(CollectBidEvidenceTool())
+        if include_human_handoff_tool:
+            registry.register(HumanHandoffTool(HumanHandoffService(config.tools.human_handoff)))
         return
 
     exec_config = config.tools.exec

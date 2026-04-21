@@ -33,7 +33,7 @@ class ToolContext:
 
     session_key: SessionKey = None
     sandbox_manager: SandboxManager | None = None
-    workspace_id: str = sandbox_manager.to_workspace_id(session_key) if sandbox_manager else None
+    workspace_id: str | None = None
     sender_id: str | None = None
 
 
