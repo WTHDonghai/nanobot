@@ -180,6 +180,25 @@ def _build_parser() -> argparse.ArgumentParser:
     evidence_parser.add_argument("--requirement", required=True)
     evidence_parser.add_argument("--target-uri", default=DEFAULT_TARGET_URI)
     evidence_parser.add_argument("--top-k", type=int, default=8)
+
+    ov_search_parser = subparsers.add_parser("ov-search", help="Call openviking_search.")
+    ov_search_parser.add_argument("--query", required=True)
+    ov_search_parser.add_argument("--target-uri", default=DEFAULT_TARGET_URI)
+
+    ov_list_parser = subparsers.add_parser("ov-list", help="Call openviking_list.")
+    ov_list_parser.add_argument("--uri", default=DEFAULT_TARGET_URI)
+    ov_list_parser.add_argument("--recursive", action="store_true")
+
+    ov_glob_parser = subparsers.add_parser("ov-glob", help="Call openviking_glob.")
+    ov_glob_parser.add_argument("--pattern", required=True)
+    ov_glob_parser.add_argument("--uri", default=DEFAULT_TARGET_URI)
+
+    ov_read_parser = subparsers.add_parser("ov-read", help="Call openviking_read.")
+    ov_read_parser.add_argument("--uri", required=True)
+    ov_read_parser.add_argument("--level", choices=("abstract", "overview", "read"), default="read")
+    ov_read_parser.add_argument("--include-images", dest="include_images", action="store_true", default=True)
+    ov_read_parser.add_argument("--no-include-images", dest="include_images", action="store_false")
+    ov_read_parser.add_argument("--max-images", type=int, default=8)
     return parser
 
 
@@ -204,6 +223,28 @@ def _command_arguments(args: argparse.Namespace) -> tuple[str | None, dict[str, 
             "requirement": args.requirement,
             "target_uri": args.target_uri,
             "top_k": args.top_k,
+        }
+    if args.command == "ov-search":
+        return "openviking_search", {
+            "query": args.query,
+            "target_uri": args.target_uri,
+        }
+    if args.command == "ov-list":
+        return "openviking_list", {
+            "uri": args.uri,
+            "recursive": args.recursive,
+        }
+    if args.command == "ov-glob":
+        return "openviking_glob", {
+            "pattern": args.pattern,
+            "uri": args.uri,
+        }
+    if args.command == "ov-read":
+        return "openviking_read", {
+            "uri": args.uri,
+            "level": args.level,
+            "include_images": args.include_images,
+            "max_images": args.max_images,
         }
     return None, None
 

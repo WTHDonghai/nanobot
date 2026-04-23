@@ -10,6 +10,7 @@ from typing import Any, BinaryIO
 
 from vikingbot.config.schema import Config
 from vikingbot.services.bid_material import BidMaterialService
+from vikingbot.services.openviking_explorer import DEFAULT_TARGET_URI, OpenVikingExplorerService
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
@@ -24,9 +25,16 @@ class _MCPToolDefinition:
 class BidMaterialMCPServer:
     """Small MCP server exposing three high-level bid-material tools."""
 
-    def __init__(self, config: Config | None = None, service: BidMaterialService | None = None) -> None:
+    def __init__(
+        self,
+        config: Config | None = None,
+        service: BidMaterialService | None = None,
+        explorer: OpenVikingExplorerService | None = None,
+    ) -> None:
         self.config = config or Config()
-        self.service = service or BidMaterialService(agent_id=self.config.ov_server.agent_id or "bid-material-mcp")
+        agent_id = self.config.ov_server.agent_id or "bid-material-mcp"
+        self.service = service or BidMaterialService(agent_id=agent_id)
+        self.explorer = explorer or OpenVikingExplorerService(agent_id=agent_id)
         self._tools = {
             "search_certificates": _MCPToolDefinition(
                 name="search_certificates",
@@ -38,7 +46,7 @@ class BidMaterialMCPServer:
                         "target_uri": {
                             "type": "string",
                             "description": "Optional search scope",
-                            "default": "viking://resources/",
+                            "default": DEFAULT_TARGET_URI,
                         },
                         "top_k": {
                             "type": "integer",
@@ -60,7 +68,7 @@ class BidMaterialMCPServer:
                         "target_uri": {
                             "type": "string",
                             "description": "Optional search scope",
-                            "default": "viking://resources/",
+                            "default": DEFAULT_TARGET_URI,
                         },
                         "top_k": {
                             "type": "integer",
@@ -83,7 +91,7 @@ class BidMaterialMCPServer:
                         "target_uri": {
                             "type": "string",
                             "description": "Optional search scope",
-                            "default": "viking://resources/",
+                            "default": DEFAULT_TARGET_URI,
                         },
                         "top_k": {
                             "type": "integer",
@@ -92,6 +100,91 @@ class BidMaterialMCPServer:
                         },
                     },
                     "required": ["section_name", "requirement"],
+                    "additionalProperties": False,
+                },
+            ),
+            "openviking_search": _MCPToolDefinition(
+                name="openviking_search",
+                description="Search OpenViking resources and return candidate document, image, and summary URIs. Use this when high-level bid-material retrieval is too shallow and Hermes needs to inspect the underlying material filesystem.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Filesystem search query"},
+                        "target_uri": {
+                            "type": "string",
+                            "description": "Optional search scope",
+                            "default": DEFAULT_TARGET_URI,
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+            "openviking_list": _MCPToolDefinition(
+                name="openviking_list",
+                description="List files and folders under one OpenViking URI so Hermes can inspect what bidding materials exist in the current scope.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "description": "Folder URI to inspect",
+                            "default": DEFAULT_TARGET_URI,
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "description": "Whether to list recursively",
+                            "default": False,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            "openviking_glob": _MCPToolDefinition(
+                name="openviking_glob",
+                description="Find concrete files with a glob pattern under one OpenViking scope. Use this to narrow from chapter folders or summary directories to exact material files.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Glob pattern, for example **/*.md or **/*架构*",
+                        },
+                        "uri": {
+                            "type": "string",
+                            "description": "Optional search scope",
+                            "default": DEFAULT_TARGET_URI,
+                        },
+                    },
+                    "required": ["pattern"],
+                    "additionalProperties": False,
+                },
+            ),
+            "openviking_read": _MCPToolDefinition(
+                name="openviking_read",
+                description="Read one OpenViking document, image, or directory target. Returns markdown with local image paths for Hermes instead of send:// channel images.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "uri": {"type": "string", "description": "Concrete resource URI to read"},
+                        "level": {
+                            "type": "string",
+                            "description": "Reading level. Use read by default; abstract/overview are only for deliberate summarization.",
+                            "enum": ["abstract", "overview", "read"],
+                            "default": "read",
+                        },
+                        "include_images": {
+                            "type": "boolean",
+                            "description": "When level=read, materialize inline or nearby images into local markdown links.",
+                            "default": True,
+                        },
+                        "max_images": {
+                            "type": "integer",
+                            "description": "Maximum number of fallback nearby images to append when inline image anchors are absent.",
+                            "default": 8,
+                        },
+                    },
+                    "required": ["uri"],
                     "additionalProperties": False,
                 },
             ),
@@ -195,7 +288,7 @@ class BidMaterialMCPServer:
         if name == "search_certificates":
             pack = await self.service.search_certificates(
                 query=str(arguments["query"]),
-                target_uri=str(arguments.get("target_uri") or "viking://resources/"),
+                target_uri=str(arguments.get("target_uri") or DEFAULT_TARGET_URI),
                 top_k=int(arguments.get("top_k", 5)),
             )
             return self.service.pack_to_json(pack)
@@ -203,7 +296,7 @@ class BidMaterialMCPServer:
         if name == "search_solution_materials":
             pack = await self.service.search_solution_materials(
                 query=str(arguments["query"]),
-                target_uri=str(arguments.get("target_uri") or "viking://resources/"),
+                target_uri=str(arguments.get("target_uri") or DEFAULT_TARGET_URI),
                 top_k=int(arguments.get("top_k", 5)),
             )
             return self.service.pack_to_json(pack)
@@ -212,10 +305,40 @@ class BidMaterialMCPServer:
             pack = await self.service.collect_bid_evidence(
                 section_name=str(arguments["section_name"]),
                 requirement=str(arguments["requirement"]),
-                target_uri=str(arguments.get("target_uri") or "viking://resources/"),
+                target_uri=str(arguments.get("target_uri") or DEFAULT_TARGET_URI),
                 top_k=int(arguments.get("top_k", 8)),
             )
             return self.service.pack_to_json(pack)
+
+        if name == "openviking_search":
+            payload = await self.explorer.openviking_search(
+                query=str(arguments["query"]),
+                target_uri=str(arguments.get("target_uri") or DEFAULT_TARGET_URI),
+            )
+            return json.dumps(payload, ensure_ascii=False)
+
+        if name == "openviking_list":
+            payload = await self.explorer.openviking_list(
+                uri=str(arguments.get("uri") or DEFAULT_TARGET_URI),
+                recursive=bool(arguments.get("recursive", False)),
+            )
+            return json.dumps(payload, ensure_ascii=False)
+
+        if name == "openviking_glob":
+            payload = await self.explorer.openviking_glob(
+                pattern=str(arguments["pattern"]),
+                uri=str(arguments.get("uri") or DEFAULT_TARGET_URI),
+            )
+            return json.dumps(payload, ensure_ascii=False)
+
+        if name == "openviking_read":
+            payload = await self.explorer.openviking_read(
+                uri=str(arguments["uri"]),
+                level=str(arguments.get("level") or "read"),
+                include_images=bool(arguments.get("include_images", True)),
+                max_images=int(arguments.get("max_images", 8)),
+            )
+            return json.dumps(payload, ensure_ascii=False)
 
         raise ValueError(f"Unknown tool: {name}")
 

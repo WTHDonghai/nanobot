@@ -61,9 +61,71 @@ class FakeBidMaterialService:
         return f'# Resource\n\nSource: {kwargs["uri"]}\n\n![image](/tmp/cert.png)'
 
 
+class FakeOpenVikingExplorerService:
+    async def openviking_search(self, **kwargs):
+        return {
+            "query": kwargs["query"],
+            "target_uri": kwargs["target_uri"],
+            "total": 1,
+            "documents": [
+                {
+                    "uri": "viking://resources/demo/doc.md",
+                    "kind": "document",
+                    "score": 0.9,
+                    "match_reason": "matched",
+                    "abstract": "demo abstract",
+                    "category": "",
+                    "context_type": "",
+                }
+            ],
+            "images": [],
+            "summaries": [],
+            "next_step": "Read the most relevant concrete document URI with openviking_read before drafting.",
+        }
+
+    async def openviking_list(self, **kwargs):
+        return {
+            "uri": kwargs["uri"],
+            "recursive": kwargs["recursive"],
+            "count": 1,
+            "entries": [
+                {
+                    "name": "demo",
+                    "uri": "viking://resources/demo",
+                    "is_dir": True,
+                    "size": 0,
+                }
+            ],
+        }
+
+    async def openviking_glob(self, **kwargs):
+        return {
+            "pattern": kwargs["pattern"],
+            "uri": kwargs["uri"],
+            "count": 1,
+            "matches": ["viking://resources/demo/doc.md"],
+        }
+
+    async def openviking_read(self, **kwargs):
+        return {
+            "uri": kwargs["uri"],
+            "level": kwargs["level"],
+            "kind": "document",
+            "resolved_uri": kwargs["uri"],
+            "note": "",
+            "candidate_uris": [],
+            "image_count": 1,
+            "content_markdown": "正文\n\n![架构图](/tmp/demo.png)",
+        }
+
+
 @pytest.mark.asyncio
 async def test_mcp_initialize_and_tools_list() -> None:
-    server = BidMaterialMCPServer(config=Config(), service=FakeBidMaterialService())
+    server = BidMaterialMCPServer(
+        config=Config(),
+        service=FakeBidMaterialService(),
+        explorer=FakeOpenVikingExplorerService(),
+    )
 
     initialize = await server.handle_message(
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
@@ -78,16 +140,26 @@ async def test_mcp_initialize_and_tools_list() -> None:
         "search_certificates",
         "search_solution_materials",
         "collect_bid_evidence",
+        "openviking_search",
+        "openviking_list",
+        "openviking_glob",
+        "openviking_read",
     }
     solution_tool = next(
         tool for tool in tools["result"]["tools"] if tool["name"] == "search_solution_materials"
     )
     assert "max_images_per_item" not in solution_tool["inputSchema"]["properties"]
+    read_tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "openviking_read")
+    assert read_tool["inputSchema"]["properties"]["level"]["default"] == "read"
 
 
 @pytest.mark.asyncio
 async def test_mcp_tool_call_returns_text_payload() -> None:
-    server = BidMaterialMCPServer(config=Config(), service=FakeBidMaterialService())
+    server = BidMaterialMCPServer(
+        config=Config(),
+        service=FakeBidMaterialService(),
+        explorer=FakeOpenVikingExplorerService(),
+    )
 
     response = await server.handle_message(
         {
@@ -109,7 +181,11 @@ async def test_mcp_tool_call_returns_text_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_resources_read_returns_markdown_payload() -> None:
-    server = BidMaterialMCPServer(config=Config(), service=FakeBidMaterialService())
+    server = BidMaterialMCPServer(
+        config=Config(),
+        service=FakeBidMaterialService(),
+        explorer=FakeOpenVikingExplorerService(),
+    )
 
     response = await server.handle_message(
         {
@@ -124,6 +200,32 @@ async def test_mcp_resources_read_returns_markdown_payload() -> None:
     assert contents[0]["uri"] == "viking://resources/demo/cert.md"
     assert contents[0]["mimeType"] == "text/markdown"
     assert "![image](/tmp/cert.png)" in contents[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_openviking_read_returns_structured_payload() -> None:
+    server = BidMaterialMCPServer(
+        config=Config(),
+        service=FakeBidMaterialService(),
+        explorer=FakeOpenVikingExplorerService(),
+    )
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "openviking_read",
+                "arguments": {"uri": "viking://resources/demo/doc.md", "level": "read"},
+            },
+        }
+    )
+
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload["kind"] == "document"
+    assert payload["image_count"] == 1
+    assert "![架构图](/tmp/demo.png)" in payload["content_markdown"]
 
 
 def test_stdio_message_helpers_support_line_and_framed_protocols() -> None:

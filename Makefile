@@ -17,6 +17,11 @@ BID_MATERIAL_MCP_SECTION_NAME ?= 技术方案
 BID_MATERIAL_MCP_REQUIREMENT ?= 请收集与数据库加密方案相关的可引用证据
 BID_MATERIAL_MCP_TOOL ?= search_certificates
 BID_MATERIAL_MCP_ARGS_JSON ?= {"query":"ISO 证书","target_uri":"viking://resources/","top_k":5}
+BID_MATERIAL_MCP_GLOB_PATTERN ?= **/*.md
+BID_MATERIAL_MCP_READ_URI ?= viking://resources/
+BID_MATERIAL_MCP_READ_LEVEL ?= read
+BID_MATERIAL_MCP_READ_INCLUDE_IMAGES ?= true
+BID_MATERIAL_MCP_READ_MAX_IMAGES ?= 8
 
 # Dependency Versions
 MIN_PYTHON_VERSION := 3.10
@@ -44,7 +49,8 @@ CLEAN_DIRS := \
 .PHONY: all build clean help check-pip check-deps \
 	bid-material-mcp-serve bid-material-mcp-list-tools bid-material-mcp-call \
 	bid-material-mcp-cert bid-material-mcp-solution bid-material-mcp-evidence \
-	bid-material-mcp-smoke
+	bid-material-mcp-ov-search bid-material-mcp-ov-list bid-material-mcp-ov-glob \
+	bid-material-mcp-ov-read bid-material-mcp-smoke
 
 all: build
 
@@ -60,6 +66,10 @@ help:
 	@echo "  bid-material-mcp-cert       - Debug search_certificates with BID_MATERIAL_MCP_QUERY"
 	@echo "  bid-material-mcp-solution   - Debug search_solution_materials with BID_MATERIAL_MCP_QUERY"
 	@echo "  bid-material-mcp-evidence   - Debug collect_bid_evidence with BID_MATERIAL_MCP_SECTION_NAME/BID_MATERIAL_MCP_REQUIREMENT"
+	@echo "  bid-material-mcp-ov-search  - Debug openviking_search with BID_MATERIAL_MCP_QUERY"
+	@echo "  bid-material-mcp-ov-list    - Debug openviking_list with BID_MATERIAL_MCP_TARGET_URI"
+	@echo "  bid-material-mcp-ov-glob    - Debug openviking_glob with BID_MATERIAL_MCP_GLOB_PATTERN"
+	@echo "  bid-material-mcp-ov-read    - Debug openviking_read with BID_MATERIAL_MCP_READ_URI"
 	@echo "  bid-material-mcp-smoke      - Run list-tools first, then one MCP tool call as a smoke test"
 	@echo "  help        - Show this help message"
 
@@ -190,6 +200,47 @@ bid-material-mcp-evidence:
 		--requirement "$(BID_MATERIAL_MCP_REQUIREMENT)" \
 		--target-uri "$(BID_MATERIAL_MCP_TARGET_URI)" \
 		--top-k "$(BID_MATERIAL_MCP_TOP_K)"
+
+bid-material-mcp-ov-search:
+	$(PYTHON) $(BID_MATERIAL_MCP_DEBUG_SCRIPT) \
+		--python "$(MCP_PYTHON)" \
+		--config "$(BID_MATERIAL_MCP_CONFIG)" \
+		--protocol "$(BID_MATERIAL_MCP_PROTOCOL)" \
+		--output "$(BID_MATERIAL_MCP_OUTPUT)" \
+		ov-search \
+		--query "$(BID_MATERIAL_MCP_QUERY)" \
+		--target-uri "$(BID_MATERIAL_MCP_TARGET_URI)"
+
+bid-material-mcp-ov-list:
+	$(PYTHON) $(BID_MATERIAL_MCP_DEBUG_SCRIPT) \
+		--python "$(MCP_PYTHON)" \
+		--config "$(BID_MATERIAL_MCP_CONFIG)" \
+		--protocol "$(BID_MATERIAL_MCP_PROTOCOL)" \
+		--output "$(BID_MATERIAL_MCP_OUTPUT)" \
+		ov-list \
+		--uri "$(BID_MATERIAL_MCP_TARGET_URI)"
+
+bid-material-mcp-ov-glob:
+	$(PYTHON) $(BID_MATERIAL_MCP_DEBUG_SCRIPT) \
+		--python "$(MCP_PYTHON)" \
+		--config "$(BID_MATERIAL_MCP_CONFIG)" \
+		--protocol "$(BID_MATERIAL_MCP_PROTOCOL)" \
+		--output "$(BID_MATERIAL_MCP_OUTPUT)" \
+		ov-glob \
+		--pattern '$(BID_MATERIAL_MCP_GLOB_PATTERN)' \
+		--uri "$(BID_MATERIAL_MCP_TARGET_URI)"
+
+bid-material-mcp-ov-read:
+	$(PYTHON) $(BID_MATERIAL_MCP_DEBUG_SCRIPT) \
+		--python "$(MCP_PYTHON)" \
+		--config "$(BID_MATERIAL_MCP_CONFIG)" \
+		--protocol "$(BID_MATERIAL_MCP_PROTOCOL)" \
+		--output "$(BID_MATERIAL_MCP_OUTPUT)" \
+		ov-read \
+		--uri "$(BID_MATERIAL_MCP_READ_URI)" \
+		--level "$(BID_MATERIAL_MCP_READ_LEVEL)" \
+		--max-images "$(BID_MATERIAL_MCP_READ_MAX_IMAGES)" \
+		$(if $(filter true,$(BID_MATERIAL_MCP_READ_INCLUDE_IMAGES)),--include-images,--no-include-images)
 
 bid-material-mcp-smoke:
 	$(MAKE) bid-material-mcp-list-tools
