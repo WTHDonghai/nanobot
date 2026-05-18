@@ -31,6 +31,28 @@ def test_register_default_tools_knowledge_base_profile_only_keeps_openviking_qa_
     }
 
 
+def test_register_default_tools_technical_support_profile_uses_openviking_qa_tools() -> None:
+    registry = ToolRegistry()
+    config = Config()
+    config.agents.capability_profile = CapabilityProfile.TECHNICAL_SUPPORT
+
+    register_default_tools(
+        registry=registry,
+        config=config,
+        send_callback=None,
+        subagent_manager=None,
+        cron_service=None,
+    )
+
+    assert set(registry.tool_names) == {
+        "openviking_read",
+        "openviking_list",
+        "openviking_search",
+        "openviking_grep",
+        "openviking_glob",
+    }
+
+
 def test_register_default_tools_full_profile_includes_human_handoff() -> None:
     registry = ToolRegistry()
     config = Config()
@@ -65,6 +87,11 @@ def test_register_default_tools_bid_material_profile_registers_high_level_tools(
     )
 
     assert set(registry.tool_names) == {
+        "openviking_read",
+        "openviking_list",
+        "openviking_search",
+        "openviking_grep",
+        "openviking_glob",
         "search_certificates",
         "search_solution_materials",
         "collect_bid_evidence",

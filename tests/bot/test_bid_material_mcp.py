@@ -8,8 +8,9 @@ import json
 
 import pytest
 
-from vikingbot.config.schema import Config
+from vikingbot.config.schema import CapabilityProfile, Config
 from vikingbot.mcp.bid_material_server import BidMaterialMCPServer
+from vikingbot.mcp.knowledge_server import KnowledgeMCPServer
 from vikingbot.services.bid_material import EvidencePack
 
 
@@ -119,11 +120,72 @@ class FakeOpenVikingExplorerService:
         }
 
 
-@pytest.mark.asyncio
-async def test_mcp_initialize_and_tools_list() -> None:
-    server = BidMaterialMCPServer(
+class FakeMissingOpenVikingExplorerService(FakeOpenVikingExplorerService):
+    async def openviking_read(self, **kwargs):
+        return {
+            "uri": kwargs["uri"],
+            "level": kwargs["level"],
+            "kind": "missing",
+            "resolved_uri": kwargs["uri"],
+            "note": f"File not found: {kwargs['uri']}",
+            "candidate_uris": [],
+            "content_markdown": "",
+        }
+
+
+class FakeDirectoryOpenVikingExplorerService(FakeOpenVikingExplorerService):
+    async def openviking_read(self, **kwargs):
+        return {
+            "uri": kwargs["uri"],
+            "level": kwargs["level"],
+            "kind": "directory",
+            "resolved_uri": "",
+            "note": "Directory cannot be read directly. Pick one concrete text URI from candidate_uris.",
+            "candidate_uris": [
+                "viking://resources/demo/chapter-1.md",
+                "viking://resources/demo/chapter-2.md",
+            ],
+            "content_markdown": "",
+        }
+
+
+def test_mcp_servers_keep_distinct_default_agent_ids() -> None:
+    knowledge_server = KnowledgeMCPServer(
+        config=Config(),
+        explorer=FakeOpenVikingExplorerService(),
+    )
+    bid_server = BidMaterialMCPServer(
         config=Config(),
         service=FakeBidMaterialService(),
+        explorer=FakeOpenVikingExplorerService(),
+    )
+
+    assert knowledge_server._agent_id == "knowledge-mcp"
+    assert bid_server._agent_id == "bid-material-mcp"
+
+
+def test_mcp_servers_respect_configured_agent_id() -> None:
+    config = Config()
+    config.ov_server.agent_id = "configured-agent"
+
+    knowledge_server = KnowledgeMCPServer(
+        config=config,
+        explorer=FakeOpenVikingExplorerService(),
+    )
+    bid_server = BidMaterialMCPServer(
+        config=config,
+        service=FakeBidMaterialService(),
+        explorer=FakeOpenVikingExplorerService(),
+    )
+
+    assert knowledge_server._agent_id == "configured-agent"
+    assert bid_server._agent_id == "configured-agent"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_mcp_initialize_and_tools_list_is_domain_neutral() -> None:
+    server = KnowledgeMCPServer(
+        config=Config(),
         explorer=FakeOpenVikingExplorerService(),
     )
 
@@ -133,24 +195,95 @@ async def test_mcp_initialize_and_tools_list() -> None:
     tools = await server.handle_message(
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
     )
+    resources = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}}
+    )
 
     assert initialize["result"]["capabilities"]["tools"]["listChanged"] is False
     assert initialize["result"]["capabilities"]["resources"]["listChanged"] is False
+    assert initialize["result"]["serverInfo"]["name"] == "vikingbot-knowledge-base"
+    assert resources["result"]["resources"][0]["name"] == "knowledge-root"
+    assert "bid" not in resources["result"]["resources"][0]["description"].lower()
     assert {tool["name"] for tool in tools["result"]["tools"]} == {
-        "search_certificates",
-        "search_solution_materials",
-        "collect_bid_evidence",
         "openviking_search",
         "openviking_list",
         "openviking_glob",
         "openviking_read",
+        "collect_evidence",
     }
+    assert all("bid" not in tool["description"].lower() for tool in tools["result"]["tools"])
+    read_tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "openviking_read")
+    assert read_tool["inputSchema"]["properties"]["level"]["default"] == "read"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_mcp_ignores_application_profile_tools() -> None:
+    config = Config()
+    config.agents.capability_profile = CapabilityProfile.BID_MATERIAL
+    server = KnowledgeMCPServer(
+        config=config,
+        explorer=FakeOpenVikingExplorerService(),
+    )
+
+    tools = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    )
+
+    assert {tool["name"] for tool in tools["result"]["tools"]} == {
+        "openviking_search",
+        "openviking_list",
+        "openviking_glob",
+        "openviking_read",
+        "collect_evidence",
+    }
+
+
+@pytest.mark.asyncio
+async def test_knowledge_mcp_prompts_list_is_empty_for_client_probe() -> None:
+    server = KnowledgeMCPServer(
+        config=Config(),
+        explorer=FakeOpenVikingExplorerService(),
+    )
+
+    response = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 4, "method": "prompts/list", "params": {}}
+    )
+
+    assert response["result"]["prompts"] == []
+
+
+@pytest.mark.asyncio
+async def test_bid_material_mcp_alias_keeps_profile_tools() -> None:
+    config = Config()
+    server = BidMaterialMCPServer(
+        config=config,
+        service=FakeBidMaterialService(),
+        explorer=FakeOpenVikingExplorerService(),
+        include_profile_tools=True,
+    )
+
+    initialize = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
+    tools = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    )
+    resources = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}}
+    )
+
+    assert config.agents.capability_profile == CapabilityProfile.KNOWLEDGE_BASE
+    assert initialize["result"]["serverInfo"]["name"] == "vikingbot-bid-material"
+    assert resources["result"]["resources"][0]["name"] == "bid-material-root"
+    assert {
+        "search_certificates",
+        "search_solution_materials",
+        "collect_bid_evidence",
+    }.issubset({tool["name"] for tool in tools["result"]["tools"]})
     solution_tool = next(
         tool for tool in tools["result"]["tools"] if tool["name"] == "search_solution_materials"
     )
     assert "max_images_per_item" not in solution_tool["inputSchema"]["properties"]
-    read_tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "openviking_read")
-    assert read_tool["inputSchema"]["properties"]["level"]["default"] == "read"
 
 
 @pytest.mark.asyncio
@@ -181,9 +314,8 @@ async def test_mcp_tool_call_returns_text_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_resources_read_returns_markdown_payload() -> None:
-    server = BidMaterialMCPServer(
+    server = KnowledgeMCPServer(
         config=Config(),
-        service=FakeBidMaterialService(),
         explorer=FakeOpenVikingExplorerService(),
     )
 
@@ -199,7 +331,79 @@ async def test_mcp_resources_read_returns_markdown_payload() -> None:
     contents = response["result"]["contents"]
     assert contents[0]["uri"] == "viking://resources/demo/cert.md"
     assert contents[0]["mimeType"] == "text/markdown"
-    assert "![image](/tmp/cert.png)" in contents[0]["text"]
+    assert "![架构图](/tmp/demo.png)" in contents[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_collect_evidence_returns_generic_pack() -> None:
+    server = KnowledgeMCPServer(
+        config=Config(),
+        explorer=FakeOpenVikingExplorerService(),
+    )
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "collect_evidence",
+                "arguments": {"query": "部署方式", "target_uri": "viking://resources/"},
+            },
+        }
+    )
+
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload["summary"] == "Collected 1 concrete evidence item(s)."
+    assert payload["items"][0]["uri"] == "viking://resources/demo/doc.md"
+
+
+@pytest.mark.asyncio
+async def test_mcp_collect_evidence_excludes_missing_or_empty_reads() -> None:
+    server = KnowledgeMCPServer(
+        config=Config(),
+        explorer=FakeMissingOpenVikingExplorerService(),
+    )
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "collect_evidence",
+                "arguments": {"query": "部署方式", "target_uri": "viking://resources/"},
+            },
+        }
+    )
+
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload["summary"] == "No concrete evidence was collected."
+    assert payload["items"] == []
+    assert payload["gaps"][0]["kind"] == "missing"
+    assert payload["gaps"][0]["uri"] == "viking://resources/demo/doc.md"
+
+
+@pytest.mark.asyncio
+async def test_mcp_resources_read_returns_navigation_text_for_directory() -> None:
+    server = KnowledgeMCPServer(
+        config=Config(),
+        explorer=FakeDirectoryOpenVikingExplorerService(),
+    )
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "resources/read",
+            "params": {"uri": "viking://resources/demo"},
+        }
+    )
+
+    text = response["result"]["contents"][0]["text"]
+    assert "Directory cannot be read directly" in text
+    assert "Candidate URIs:" in text
+    assert "- viking://resources/demo/chapter-1.md" in text
 
 
 @pytest.mark.asyncio
@@ -229,7 +433,7 @@ async def test_mcp_openviking_read_returns_structured_payload() -> None:
 
 
 def test_stdio_message_helpers_support_line_and_framed_protocols() -> None:
-    line_message, line_mode = BidMaterialMCPServer._read_stdio_message(
+    line_message, line_mode = KnowledgeMCPServer._read_stdio_message(
         io.BytesIO(b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}\n')
     )
     assert line_mode == "line"
@@ -239,12 +443,12 @@ def test_stdio_message_helpers_support_line_and_framed_protocols() -> None:
     framed_input = io.BytesIO(
         f"Content-Length: {len(framed_body)}\r\n\r\n".encode("ascii") + framed_body
     )
-    framed_message, framed_mode = BidMaterialMCPServer._read_stdio_message(framed_input)
+    framed_message, framed_mode = KnowledgeMCPServer._read_stdio_message(framed_input)
     assert framed_mode == "framed"
     assert framed_message["id"] == 2
 
     line_output = io.BytesIO()
-    BidMaterialMCPServer._write_stdio_message(
+    KnowledgeMCPServer._write_stdio_message(
         line_output,
         {"jsonrpc": "2.0", "id": 3, "result": {}},
         "line",
@@ -252,7 +456,7 @@ def test_stdio_message_helpers_support_line_and_framed_protocols() -> None:
     assert json.loads(line_output.getvalue().decode("utf-8"))["id"] == 3
 
     framed_output = io.BytesIO()
-    BidMaterialMCPServer._write_stdio_message(
+    KnowledgeMCPServer._write_stdio_message(
         framed_output,
         {"jsonrpc": "2.0", "id": 4, "result": {}},
         "framed",

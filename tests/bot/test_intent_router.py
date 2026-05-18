@@ -12,6 +12,7 @@ from vikingbot.agent.intent_router import (
     IntentDecision,
     IntentRoute,
     ROUTER_TOOL,
+    TECHNICAL_SUPPORT_ROUTER_TOOL,
     _parse_router_tool_call,
     classify_intent,
     classify_knowledge_base_intent,
@@ -150,6 +151,44 @@ def test_classify_bid_material_intent_uses_bid_material_router_tool() -> None:
 
     assert decision.label == "certificate_lookup"
     assert provider.calls[0]["tools"] == [BID_MATERIAL_ROUTER_TOOL]
+
+
+def test_classify_technical_support_intent_uses_xms_router_tool() -> None:
+    provider = StubProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_1",
+                        name="route_request",
+                        arguments={
+                            "label": "knowledge_query",
+                            "route": "agent",
+                            "confidence": "high",
+                            "reason": "asks about an XMS report permission issue",
+                        },
+                        tokens=10,
+                    )
+                ],
+            )
+        ]
+    )
+
+    decision = asyncio.run(
+        classify_intent(
+            provider=provider,
+            model="stub-model",
+            user_message="XMS 报表权限在哪里配置？",
+            history=[],
+            session_id="test-session",
+            capability_profile=CapabilityProfile.TECHNICAL_SUPPORT,
+        )
+    )
+
+    assert decision.route == IntentRoute.AGENT
+    assert provider.calls[0]["tools"] == [TECHNICAL_SUPPORT_ROUTER_TOOL]
+    assert "XMS means the hotel management system" in provider.calls[0]["messages"][0]["content"]
 
 
 def test_generate_route_response_returns_model_text() -> None:

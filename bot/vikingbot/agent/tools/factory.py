@@ -66,7 +66,10 @@ def register_default_tools(
     """
     capability_profile = config.agents.capability_profile
 
-    if capability_profile == CapabilityProfile.KNOWLEDGE_BASE:
+    if capability_profile in {
+        CapabilityProfile.KNOWLEDGE_BASE,
+        CapabilityProfile.TECHNICAL_SUPPORT,
+    }:
         if include_viking_tools:
             registry.register(VikingReadTool())
             registry.register(VikingListTool())
@@ -76,6 +79,12 @@ def register_default_tools(
         return
 
     if capability_profile == CapabilityProfile.BID_MATERIAL:
+        if include_viking_tools:
+            registry.register(VikingReadTool())
+            registry.register(VikingListTool())
+            registry.register(VikingSearchTool())
+            registry.register(VikingGrepTool())
+            registry.register(VikingGlobTool())
         registry.register(SearchCertificatesTool())
         registry.register(SearchSolutionMaterialsTool())
         registry.register(CollectBidEvidenceTool())
