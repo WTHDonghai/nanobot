@@ -367,13 +367,8 @@ enum Commands {
         #[arg(short, long, default_value = "")]
         uri: String,
         /// Maximum number of results
-        #[arg(
-            short = 'n',
-            long = "node-limit",
-            alias = "limit",
-            default_value = "10"
-        )]
-        node_limit: i32,
+        #[arg(short = 'n', long = "node-limit", alias = "limit")]
+        node_limit: Option<i32>,
         /// Score threshold
         #[arg(short, long)]
         threshold: Option<f64>,
@@ -389,13 +384,8 @@ enum Commands {
         #[arg(long)]
         session_id: Option<String>,
         /// Maximum number of results
-        #[arg(
-            short = 'n',
-            long = "node-limit",
-            alias = "limit",
-            default_value = "10"
-        )]
-        node_limit: i32,
+        #[arg(short = 'n', long = "node-limit", alias = "limit")]
+        node_limit: Option<i32>,
         /// Score threshold
         #[arg(short, long)]
         threshold: Option<f64>,
@@ -1269,11 +1259,14 @@ async fn handle_get(uri: String, local_path: String, ctx: CliContext) -> Result<
 async fn handle_find(
     query: String,
     uri: String,
-    node_limit: i32,
+    node_limit: Option<i32>,
     threshold: Option<f64>,
     ctx: CliContext,
 ) -> Result<()> {
-    let mut params = vec![format!("--uri={}", uri), format!("-n {}", node_limit)];
+    let mut params = vec![format!("--uri={}", uri)];
+    if let Some(limit) = node_limit {
+        params.push(format!("-n {}", limit));
+    }
     if let Some(t) = threshold {
         params.push(format!("--threshold {}", t));
     }
@@ -1296,11 +1289,14 @@ async fn handle_search(
     query: String,
     uri: String,
     session_id: Option<String>,
-    node_limit: i32,
+    node_limit: Option<i32>,
     threshold: Option<f64>,
     ctx: CliContext,
 ) -> Result<()> {
-    let mut params = vec![format!("--uri={}", uri), format!("-n {}", node_limit)];
+    let mut params = vec![format!("--uri={}", uri)];
+    if let Some(limit) = node_limit {
+        params.push(format!("-n {}", limit));
+    }
     if let Some(s) = &session_id {
         params.push(format!("--session-id {}", s));
     }

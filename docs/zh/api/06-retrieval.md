@@ -9,7 +9,7 @@ OpenViking 提供两种搜索方法：`find` 用于简单的语义搜索，`sear
 | 意图分析 | 否 | 是 |
 | 会话上下文 | 否 | 是 |
 | 查询扩展 | 否 | 是 |
-| 默认限制数 | 10 | 10 |
+| 默认限制数 | `default_search_limit`（默认 10） | `default_search_limit`（默认 10） |
 | 使用场景 | 简单查询 | 对话式搜索 |
 
 ## API 参考
@@ -24,7 +24,7 @@ OpenViking 提供两种搜索方法：`find` 用于简单的语义搜索，`sear
 |------|------|------|--------|------|
 | query | str | 是 | - | 搜索查询字符串 |
 | target_uri | str | 否 | "" | 限制搜索范围到指定的 URI 前缀 |
-| limit | int | 否 | 10 | 最大返回结果数 |
+| limit | int | 否 | `default_search_limit` | 最大返回结果数 |
 | score_threshold | float | 否 | None | 最低相关性分数阈值 |
 | filter | Dict | 否 | None | 元数据过滤器 |
 
@@ -88,6 +88,8 @@ curl -X POST http://localhost:1933/api/v1/search/find \
 ```bash
 openviking find "how to authenticate users" [--uri viking://resources/] [--limit 10]
 ```
+
+如果省略 `limit` / `node_limit`，OpenViking 会使用 `ov.conf` 中的 `default_search_limit`（默认 10）。
 
 **响应**
 
@@ -181,7 +183,7 @@ curl -X POST http://localhost:1933/api/v1/search/find \
 | target_uri | str | 否 | "" | 限制搜索范围到指定的 URI 前缀 |
 | session | Session | 否 | None | 用于上下文感知搜索的会话（SDK） |
 | session_id | str | 否 | None | 用于上下文感知搜索的会话 ID（HTTP） |
-| limit | int | 否 | 10 | 最大返回结果数 |
+| limit | int | 否 | `default_search_limit` | 最大返回结果数 |
 | score_threshold | float | 否 | None | 最低相关性分数阈值 |
 | filter | Dict | 否 | None | 元数据过滤器 |
 
@@ -232,6 +234,8 @@ curl -X POST http://localhost:1933/api/v1/search/search \
 ```bash
 openviking search "best practices" [--session-id abc123] [--limit 10]
 ```
+
+如果省略 `limit` / `node_limit`，OpenViking 会使用 `ov.conf` 中的 `default_search_limit`（默认 10）。
 
 **响应**
 

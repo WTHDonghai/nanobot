@@ -1426,7 +1426,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
                               {normalizeMarkdownForDisplay(message.text)}
                             </ReactMarkdown>
                           </div>
-                          {!isGuestExperience && message.role === 'bot' && message.key !== 'welcome' && (
+                          {message.role === 'bot' && message.key !== 'welcome' && (
                             <div className="chat-bubble-actions" data-export-ignore="true">
                               <button
                                 className="chat-export-btn"

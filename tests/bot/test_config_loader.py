@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
-from vikingbot.config.loader import _merge_ov_server_config
+from vikingbot.config.loader import _apply_runtime_ov_server_overrides, _merge_ov_server_config
 
 
 def test_merge_ov_server_config_uses_loopback_for_wildcard_bind_host() -> None:
@@ -22,3 +22,12 @@ def test_merge_ov_server_config_preserves_explicit_server_url() -> None:
     _merge_ov_server_config(bot_data, ov_data)
 
     assert bot_data["server_url"] == "http://openviking:1933"
+
+
+def test_runtime_ov_server_override_wins_over_config(monkeypatch) -> None:
+    bot_data = {"server_url": "http://127.0.0.1:1933"}
+
+    monkeypatch.setenv("VIKINGBOT_OV_SERVER_URL", "http://127.0.0.1:1934")
+    _apply_runtime_ov_server_overrides(bot_data)
+
+    assert bot_data["server_url"] == "http://127.0.0.1:1934"

@@ -145,7 +145,12 @@ def main():
         if enable_bot_logging is None:
             enable_bot_logging = args.with_bot
         # Start vikingbot gateway if --with-bot is set
-        bot_process = _start_vikingbot_gateway(enable_bot_logging, args.bot_log_dir)
+        bot_process = _start_vikingbot_gateway(
+            enable_bot_logging,
+            args.bot_log_dir,
+            server_host=config.host,
+            server_port=config.port,
+        )
 
     # Create and run server app
     app = create_app(config)
@@ -194,7 +199,12 @@ def _handle_vikingbot_failure(output: str, returncode: int) -> None:
         print(f"\nDetailed error:\n{output}", file=sys.stderr)
 
 
-def _start_vikingbot_gateway(enable_logging: bool, log_dir: str) -> Optional[BotProcess]:
+def _start_vikingbot_gateway(
+    enable_logging: bool,
+    log_dir: str,
+    server_host: str,
+    server_port: int,
+) -> Optional[BotProcess]:
     """Start vikingbot gateway as a subprocess."""
     print("Starting vikingbot gateway...")
 
@@ -246,6 +256,9 @@ def _start_vikingbot_gateway(enable_logging: bool, log_dir: str) -> Optional[Bot
     try:
         # Set environment to ensure it uses the same Python environment
         env = os.environ.copy()
+        bot_server_url = f"http://{_resolve_bot_callback_host(server_host)}:{server_port}"
+        env["VIKINGBOT_OV_SERVER_URL"] = bot_server_url
+        print(f"Vikingbot will connect to OpenViking at: {bot_server_url}")
 
         process = subprocess.Popen(
             vikingbot_cmd,
@@ -279,6 +292,14 @@ def _start_vikingbot_gateway(enable_logging: bool, log_dir: str) -> Optional[Bot
             log_file.close()
         print(f"Warning: Failed to start vikingbot gateway: {e}")
         return None
+
+
+def _resolve_bot_callback_host(host: str) -> str:
+    """Return a concrete host the local vikingbot child process can call."""
+    host_text = str(host or "").strip()
+    if not host_text or host_text in {"0.0.0.0", "::", "[::]", "*"}:
+        return "127.0.0.1"
+    return host_text
 
 
 def _stop_vikingbot_gateway(bot_process: BotProcess) -> None:

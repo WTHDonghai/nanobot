@@ -104,6 +104,7 @@ def load_config() -> Config:
             bot_server_data = bot_data.get("ov_server", {})
             ov_server_data = full_data.get("server", {})
             _merge_ov_server_config(bot_server_data, ov_server_data)
+            _apply_runtime_ov_server_overrides(bot_server_data)
             bot_data["ov_server"] = bot_server_data
 
             return Config.model_validate(bot_data)
@@ -154,6 +155,15 @@ def _merge_ov_server_config(bot_data: dict, ov_data: dict) -> None:
         bot_data["mode"] = "remote"
     else:
         bot_data["mode"] = "local"
+
+
+def _apply_runtime_ov_server_overrides(bot_data: dict) -> None:
+    """Apply process-level overrides for embedded gateway launches."""
+    server_url = os.environ.get("VIKINGBOT_OV_SERVER_URL") or os.environ.get(
+        "OPENVIKING_BOT_OV_SERVER_URL"
+    )
+    if server_url:
+        bot_data["server_url"] = server_url
 
 
 def _resolve_server_url_host(host: Any) -> str:

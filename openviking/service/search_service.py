@@ -12,11 +12,27 @@ from openviking.server.identity import RequestContext
 from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import NotInitializedError
 from openviking_cli.utils import get_logger
+from openviking_cli.utils.config import get_openviking_config
 
 if TYPE_CHECKING:
     from openviking.session import Session
 
 logger = get_logger(__name__)
+
+FALLBACK_SEARCH_LIMIT = 10
+
+
+def resolve_search_limit(limit: Optional[int]) -> int:
+    """Resolve the effective top-k for semantic retrieval."""
+    if limit is not None:
+        return limit
+
+    try:
+        configured = int(get_openviking_config().default_search_limit)
+    except Exception:
+        configured = FALLBACK_SEARCH_LIMIT
+
+    return max(1, configured)
 
 
 class SearchService:
@@ -41,7 +57,7 @@ class SearchService:
         ctx: RequestContext,
         target_uri: str = "",
         session: Optional["Session"] = None,
-        limit: int = 10,
+        limit: Optional[int] = None,
         score_threshold: Optional[float] = None,
         filter: Optional[Dict] = None,
     ) -> Any:
@@ -64,12 +80,21 @@ class SearchService:
         if session:
             session_info = await session.get_context_for_search(query)
 
+        actual_limit = resolve_search_limit(limit)
+        logger.info(
+            "Search resolved limit: operation=search query=%r target_uri=%r "
+            "requested_limit=%r effective_limit=%s",
+            query,
+            target_uri,
+            limit,
+            actual_limit,
+        )
         result = await viking_fs.search(
             query=query,
             ctx=ctx,
             target_uri=target_uri,
             session_info=session_info,
-            limit=limit,
+            limit=actual_limit,
             score_threshold=score_threshold,
             filter=filter,
         )
@@ -80,7 +105,7 @@ class SearchService:
         query: str,
         ctx: RequestContext,
         target_uri: str = "",
-        limit: int = 10,
+        limit: Optional[int] = None,
         score_threshold: Optional[float] = None,
         filter: Optional[Dict] = None,
     ) -> Any:
@@ -97,11 +122,20 @@ class SearchService:
             FindResult
         """
         viking_fs = self._ensure_initialized()
+        actual_limit = resolve_search_limit(limit)
+        logger.info(
+            "Search resolved limit: operation=find query=%r target_uri=%r "
+            "requested_limit=%r effective_limit=%s",
+            query,
+            target_uri,
+            limit,
+            actual_limit,
+        )
         result = await viking_fs.find(
             query=query,
             ctx=ctx,
             target_uri=target_uri,
-            limit=limit,
+            limit=actual_limit,
             score_threshold=score_threshold,
             filter=filter,
         )

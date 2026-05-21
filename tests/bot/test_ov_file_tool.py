@@ -296,6 +296,41 @@ async def test_viking_search_tool_prioritizes_documents_over_image_assets() -> N
 
 
 @pytest.mark.asyncio
+async def test_viking_search_tool_forwards_limit() -> None:
+    tool = VikingSearchTool()
+    mock_client = AsyncMock()
+    mock_client.search.return_value = {
+        "total": 1,
+        "query": "宾客状态",
+        "limit": 7,
+        "resources": [
+            {
+                "uri": "viking://resources/demo/宾客状态.md",
+                "abstract": "宾客状态说明。",
+            },
+        ],
+        "memories": [],
+        "skills": [],
+    }
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        query="宾客状态",
+        target_uri="viking://resources/demo/",
+        limit=7,
+    )
+
+    mock_client.search.assert_awaited_once_with(
+        "宾客状态", target_uri="viking://resources/demo/", limit=7
+    )
+    assert "Requested limit: 7" in result
+
+
+@pytest.mark.asyncio
 async def test_viking_search_tool_prioritizes_image_assets_for_image_focused_queries() -> None:
     tool = VikingSearchTool()
     mock_client = AsyncMock()

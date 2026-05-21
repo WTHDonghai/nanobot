@@ -502,6 +502,20 @@ class AgentLoop:
             "total_tokens": 0,
         }
         has_kb_read_evidence = False
+        trace_enabled = self.context._is_retrieval_mode()
+        trace_session = session_key.safe_name()
+        trace_profile = getattr(
+            getattr(getattr(self.context, "config", None), "agents", None),
+            "capability_profile",
+            "unknown",
+        )
+
+        if trace_enabled:
+            logger.info(
+                f"[KB_TRACE] session={trace_session} start "
+                f"max_iterations={self.max_iterations} "
+                f"profile={trace_profile}"
+            )
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -521,6 +535,13 @@ class AgentLoop:
                 tools=tool_definitions,
                 has_kb_read_evidence=has_kb_read_evidence,
             )
+            if trace_enabled:
+                logger.info(
+                    f"[KB_TRACE] session={trace_session} iteration={iteration}/{self.max_iterations} "
+                    f"tool_choice={tool_choice or 'auto'} "
+                    f"has_concrete_kb_read_evidence={has_kb_read_evidence} "
+                    f"available_tools={len(tool_definitions)}"
+                )
             response = await self.provider.chat(
                 messages=messages,
                 tools=tool_definitions,
@@ -533,6 +554,14 @@ class AgentLoop:
                 token_usage["prompt_tokens"] += cur_token["prompt_tokens"]
                 token_usage["completion_tokens"] += cur_token["completion_tokens"]
                 token_usage["total_tokens"] += cur_token["total_tokens"]
+
+            if trace_enabled:
+                logger.info(
+                    f"[KB_TRACE] session={trace_session} iteration={iteration}/{self.max_iterations} "
+                    f"llm_response tool_calls={len(response.tool_calls or [])} "
+                    f"content_chars={len(response.content or '')} "
+                    f"reasoning_chars={len(response.reasoning_content or '')}"
+                )
 
             if publish_events and response.reasoning_content:
                 await self.bus.publish_outbound(
@@ -625,6 +654,7 @@ class AgentLoop:
                 # Stage 3: Process results sequentially in original order
                 for _idx, tool_call, result, tool_execute_duration in results:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    tool_call_index = len(tools_used) + 1
                     logger.info(f"[TOOL_CALL]: {tool_call.name}({args_str[:200]})")
                     logger.info(f"[RESULT]: {str(result)[:600]}")
 
@@ -639,6 +669,25 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    evidence_ok, evidence_reason = self._classify_kb_evidence_result(
+                        tool_name=tool_call.name,
+                        arguments=tool_call.arguments,
+                        result=result,
+                    )
+                    if trace_enabled:
+                        logger.info(
+                            f"[KB_TRACE] session={trace_session} tool_call#{tool_call_index} "
+                            f"iteration={iteration}/{self.max_iterations} name={tool_call.name} "
+                            f"duration_ms={tool_execute_duration:.1f} "
+                            f"evidence_ok={evidence_ok} evidence_reason={evidence_reason}"
+                        )
+                        result_summary = self._summarize_tool_result_for_trace(
+                            tool_call.name, tool_call.arguments, result
+                        ).replace("\n", " | ")
+                        logger.debug(
+                            f"[KB_TRACE] session={trace_session} tool_call#{tool_call_index} "
+                            f"tool_result_summary {result_summary}"
+                        )
 
                     tool_used_dict = {
                         "tool_name": tool_call.name,
@@ -652,17 +701,20 @@ class AgentLoop:
                         "output_token": cal_str_tokens(result, text_type="mixed"),
                     }
                     tools_used.append(tool_used_dict)
-                    has_kb_read_evidence = has_kb_read_evidence or self._is_concrete_kb_read_result(
-                        tool_name=tool_call.name,
-                        arguments=tool_call.arguments,
-                        result=result,
-                    )
+                    has_kb_read_evidence = has_kb_read_evidence or evidence_ok
 
                 messages.append(
                     {"role": "system", "content": self.context.build_tool_reflection_prompt()}
                 )
             else:
                 if self.context._is_retrieval_mode() and not has_kb_read_evidence:
+                    if trace_enabled:
+                        logger.info(
+                            f"[KB_TRACE] session={trace_session} iteration={iteration}/{self.max_iterations} "
+                            "evidence_state=insufficient "
+                            "reason=no_concrete_openviking_read_or_bid_evidence; "
+                            "action=continue_retrieval"
+                        )
                     if response.content or response.reasoning_content:
                         messages = self.context.add_assistant_message(
                             messages,
@@ -679,12 +731,27 @@ class AgentLoop:
                     )
                     continue
                 final_content = response.content
+                if trace_enabled:
+                    logger.info(
+                        f"[KB_TRACE] session={trace_session} iteration={iteration}/{self.max_iterations} "
+                        f"final_answer_from_model chars={len(final_content or '')}"
+                    )
                 break
 
         if final_content is None or (
             isinstance(final_content, str) and not final_content.strip()
         ):
             if iteration >= self.max_iterations:
+                if trace_enabled:
+                    trace_reason = (
+                        "iteration_limit_with_concrete_kb_read_evidence"
+                        if has_kb_read_evidence
+                        else "no_concrete_kb_read_evidence"
+                    )
+                    logger.info(
+                        f"[KB_TRACE] session={trace_session} iteration_limit action=fallback "
+                        f"reason={trace_reason} tool_messages={self._count_tool_messages(messages)}"
+                    )
                 final_content = self._build_iteration_limit_fallback(
                     messages=messages,
                     has_kb_read_evidence=has_kb_read_evidence,
@@ -700,6 +767,21 @@ class AgentLoop:
 
     def _is_concrete_kb_read_result(self, tool_name: str, arguments: dict, result: str) -> bool:
         """Whether a tool result represents sufficient retrieval evidence."""
+        is_concrete, _reason = self._classify_kb_evidence_result(tool_name, arguments, result)
+        return is_concrete
+
+    def _classify_kb_evidence_result(
+        self, tool_name: str, arguments: dict | None, result: str
+    ) -> tuple[bool, str]:
+        """Classify whether a tool result is concrete evidence and explain the reason."""
+        if not self.context._is_retrieval_mode():
+            return False, "not_retrieval_mode"
+
+        result_text = result if isinstance(result, str) else str(result or "")
+        error_reason = self._classify_tool_error_result(result_text)
+        if error_reason:
+            return False, error_reason
+
         if (
             self.context._is_bid_material_mode()
             and tool_name
@@ -709,33 +791,213 @@ class AgentLoop:
                 "collect_bid_evidence",
             }
         ):
-            if not isinstance(result, str) or not result.strip():
-                return False
-            if "Items: none" in result:
-                return False
-            match = re.search(r"Evidence items:\s*(\d+)", result)
-            return bool(match and int(match.group(1)) > 0)
+            if not result_text.strip():
+                return False, "bid_material_tool_returned_empty_result"
+            if "Items: none" in result_text:
+                return False, "bid_material_tool_returned_items_none"
+            match = re.search(r"Evidence items:\s*(\d+)", result_text)
+            if not match:
+                return False, "bid_material_tool_missing_evidence_items_count"
+            evidence_items = int(match.group(1))
+            if evidence_items <= 0:
+                return False, "bid_material_tool_evidence_items_zero"
+            return True, f"bid_material_tool_returned_evidence_items={evidence_items}"
 
         if tool_name != "openviking_read":
-            return False
+            if tool_name in {"openviking_search", "openviking_glob", "openviking_list"}:
+                return False, f"{tool_name}_returns_candidates_only_requires_openviking_read"
+            return False, "tool_result_is_not_document_read_evidence"
         if not isinstance(arguments, dict):
-            return False
+            return False, "openviking_read_arguments_not_dict"
         if arguments.get("level", "abstract") != "read":
-            return False
+            return False, f"openviking_read_level_is_{arguments.get('level', 'abstract')}"
 
         uri = str(arguments.get("uri", "") or "")
         if not uri or is_summary_uri(uri) or is_generic_scope_summary_uri(uri):
-            return False
+            if not uri:
+                return False, "openviking_read_missing_uri"
+            if is_generic_scope_summary_uri(uri):
+                return False, "openviking_read_uri_is_generic_scope_summary_not_concrete_doc"
+            return False, "openviking_read_uri_is_summary_not_concrete_doc"
 
-        if not isinstance(result, str) or not result.strip():
-            return False
-        if result.startswith("Error reading from Viking:"):
-            return False
-        if "不能直接执行 level='read'" in result:
-            return False
-        if "下没有可读取的正文文件" in result:
-            return False
-        return True
+        if not result_text.strip():
+            return False, "openviking_read_returned_empty_result"
+        if "不能直接执行 level='read'" in result_text:
+            return False, "openviking_read_target_is_directory_requires_child_uri"
+        if "下没有可读取的正文文件" in result_text:
+            return False, "openviking_read_directory_has_no_readable_text"
+        return True, "openviking_read_level_read_concrete_uri_with_non_empty_result"
+
+    @staticmethod
+    def _classify_tool_error_result(result_text: str) -> str | None:
+        """Return a stable trace reason when a tool result is an execution error."""
+        if not result_text:
+            return None
+
+        if "All connection attempts failed" in result_text:
+            return "tool_connection_failed"
+        if "ConnectError" in result_text or "Connection refused" in result_text:
+            return "tool_connection_failed"
+        if result_text.startswith("Error executing "):
+            return "tool_execution_error"
+        if result_text.startswith("Error searching Viking with glob"):
+            return "openviking_glob_error"
+        if result_text.startswith("Error searching Viking with grep"):
+            return "openviking_grep_error"
+        if result_text.startswith("Error searching Viking"):
+            return "openviking_search_error"
+        if result_text.startswith("Error listing Viking resources"):
+            return "openviking_list_error"
+        if result_text.startswith("Error reading from Viking"):
+            return "openviking_read_error"
+        if result_text.startswith("Error:"):
+            return "tool_returned_error"
+        return None
+
+    @classmethod
+    def _summarize_tool_result_for_trace(
+        cls,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        result: Any,
+        max_items: int = 8,
+        max_preview_chars: int = 260,
+    ) -> str:
+        """Build a compact, grep-friendly trace summary of returned tool fragments."""
+        result_text = result if isinstance(result, str) else str(result or "")
+        args = arguments if isinstance(arguments, dict) else {}
+        lines = [f"result_chars={len(result_text)}"]
+
+        if not result_text.strip():
+            lines.append("fragments=0")
+            return "\n".join(lines)
+
+        if tool_name == "openviking_search":
+            limit_match = re.search(r"Requested limit:\s*(.+?)\s*$", result_text, re.MULTILINE)
+            if limit_match:
+                lines.append(
+                    f"requested_limit={cls._truncate_trace_text(limit_match.group(1), 80)}"
+                )
+            total_match = re.search(r"Total matches:\s*(\d+)", result_text)
+            if total_match:
+                lines.append(f"total_matches={total_match.group(1)}")
+            entries = cls._extract_search_entries_for_trace(result_text, max_items=max_items)
+            lines.append(f"search_entries={len(entries)}")
+            lines.extend(entries)
+            if entries:
+                return "\n".join(lines)
+
+        if tool_name in {"openviking_glob", "openviking_list"}:
+            uris = cls._extract_viking_uris_for_trace(result_text, max_items=max_items)
+            lines.append(f"candidate_uris={len(uris)}")
+            lines.extend(f"{index}. uri={uri}" for index, uri in enumerate(uris, start=1))
+            if uris:
+                return "\n".join(lines)
+
+        if tool_name == "openviking_read":
+            uri = str(args.get("uri") or "")
+            level = str(args.get("level", "abstract"))
+            image_refs = len(re.findall(r"!\[[^\]]*\]\([^)]+\)", result_text))
+            lines.append(f"read_uri={uri or '(missing)'} level={level} image_refs={image_refs}")
+
+        if tool_name in {
+            "search_certificates",
+            "search_solution_materials",
+            "collect_bid_evidence",
+        }:
+            evidence_match = re.search(r"Evidence items:\s*(\d+)", result_text)
+            if evidence_match:
+                lines.append(f"evidence_items={evidence_match.group(1)}")
+
+        fragments = cls._extract_text_fragments_for_trace(
+            result_text,
+            max_items=max_items,
+            max_preview_chars=max_preview_chars,
+        )
+        lines.append(f"fragments={len(fragments)}")
+        lines.extend(
+            f"{index}. preview={fragment}" for index, fragment in enumerate(fragments, start=1)
+        )
+        return "\n".join(lines)
+
+    @classmethod
+    def _extract_search_entries_for_trace(cls, text: str, max_items: int = 8) -> list[str]:
+        """Extract result entries from formatted OpenViking search output."""
+        source_lines = text.splitlines()
+        entries: list[str] = []
+
+        for index, line in enumerate(source_lines):
+            match = re.match(r"\s*(\d+)\.\s+\[([^\]]+)\]\s+(.+?)\s*$", line)
+            if not match:
+                continue
+
+            reason = ""
+            for next_line in source_lines[index + 1 : index + 4]:
+                reason_match = re.match(r"\s*Match reason:\s*(.+?)\s*$", next_line)
+                if reason_match:
+                    reason = cls._truncate_trace_text(reason_match.group(1), 180)
+                    break
+
+            entry = f"{len(entries) + 1}. kind={match.group(2)} uri={match.group(3)}"
+            if reason:
+                entry += f" match_reason={reason}"
+            entries.append(entry)
+            if len(entries) >= max_items:
+                break
+
+        return entries
+
+    @staticmethod
+    def _extract_viking_uris_for_trace(text: str, max_items: int = 8) -> list[str]:
+        """Extract unique viking:// URIs from a tool result."""
+        uris: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"viking://[^\s)]+", text):
+            uri = match.group(0).rstrip(".,;:")
+            if uri in seen:
+                continue
+            seen.add(uri)
+            uris.append(uri)
+            if len(uris) >= max_items:
+                break
+        return uris
+
+    @classmethod
+    def _extract_text_fragments_for_trace(
+        cls, text: str, max_items: int = 8, max_preview_chars: int = 260
+    ) -> list[str]:
+        """Extract readable fragment previews from a tool result."""
+        normalized = text.replace("\r\n", "\n").strip()
+        blocks = [
+            block.strip()
+            for block in re.split(r"\n\s*\n+", normalized)
+            if block and block.strip()
+        ]
+        if len(blocks) <= 1:
+            blocks = [line.strip() for line in normalized.splitlines() if line.strip()]
+
+        fragments: list[str] = []
+        for block in blocks:
+            compact = re.sub(r"\s+", " ", block).strip()
+            if not compact or compact == "---" or compact.startswith("!["):
+                continue
+            fragments.append(cls._truncate_trace_text(compact, max_preview_chars))
+            if len(fragments) >= max_items:
+                break
+        return fragments
+
+    @staticmethod
+    def _truncate_trace_text(text: str, max_chars: int) -> str:
+        """Trim a trace field while keeping it single-line."""
+        compact = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(compact) <= max_chars:
+            return compact
+        return f"{compact[: max_chars - 3]}..."
+
+    @staticmethod
+    def _count_tool_messages(messages: list[dict]) -> int:
+        """Count tool result messages in the agent message history."""
+        return sum(1 for message in messages if message.get("role") == "tool")
 
     @classmethod
     def _summarize_kb_tool_state(cls, messages: list[dict]) -> str:

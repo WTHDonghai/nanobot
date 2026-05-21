@@ -584,7 +584,7 @@ class AsyncHTTPClient(BaseClient):
         self,
         query: str,
         target_uri: str = "",
-        limit: int = 10,
+        limit: Optional[int] = None,
         node_limit: Optional[int] = None,
         score_threshold: Optional[float] = None,
         filter: Optional[Dict[str, Any]] = None,
@@ -595,16 +595,18 @@ class AsyncHTTPClient(BaseClient):
         if target_uri:
             target_uri = VikingURI.normalize(target_uri)
         actual_limit = node_limit if node_limit is not None else limit
+        request_json = {
+            "query": query,
+            "target_uri": target_uri,
+            "score_threshold": score_threshold,
+            "filter": filter,
+            "telemetry": telemetry,
+        }
+        if actual_limit is not None:
+            request_json["limit"] = actual_limit
         response = await self._http.post(
             "/api/v1/search/find",
-            json={
-                "query": query,
-                "target_uri": target_uri,
-                "limit": actual_limit,
-                "score_threshold": score_threshold,
-                "filter": filter,
-                "telemetry": telemetry,
-            },
+            json=request_json,
         )
         response_data = self._handle_response_data(response)
         return FindResult.from_dict(response_data.get("result") or {})
@@ -615,7 +617,7 @@ class AsyncHTTPClient(BaseClient):
         target_uri: str = "",
         session: Optional[Any] = None,
         session_id: Optional[str] = None,
-        limit: int = 10,
+        limit: Optional[int] = None,
         node_limit: Optional[int] = None,
         score_threshold: Optional[float] = None,
         filter: Optional[Dict[str, Any]] = None,
@@ -627,17 +629,19 @@ class AsyncHTTPClient(BaseClient):
             target_uri = VikingURI.normalize(target_uri)
         actual_limit = node_limit if node_limit is not None else limit
         sid = session_id or (session.session_id if session else None)
+        request_json = {
+            "query": query,
+            "target_uri": target_uri,
+            "session_id": sid,
+            "score_threshold": score_threshold,
+            "filter": filter,
+            "telemetry": telemetry,
+        }
+        if actual_limit is not None:
+            request_json["limit"] = actual_limit
         response = await self._http.post(
             "/api/v1/search/search",
-            json={
-                "query": query,
-                "target_uri": target_uri,
-                "session_id": sid,
-                "limit": actual_limit,
-                "score_threshold": score_threshold,
-                "filter": filter,
-                "telemetry": telemetry,
-            },
+            json=request_json,
         )
         response_data = self._handle_response_data(response)
         return FindResult.from_dict(response_data.get("result") or {})

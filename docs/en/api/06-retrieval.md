@@ -9,7 +9,7 @@ OpenViking provides two search methods: `find` for simple semantic search and `s
 | Intent Analysis | No | Yes |
 | Session Context | No | Yes |
 | Query Expansion | No | Yes |
-| Default Limit | 10 | 10 |
+| Default Limit | `default_search_limit` (10 by default) | `default_search_limit` (10 by default) |
 | Use Case | Simple queries | Conversational search |
 
 ## API Reference
@@ -24,7 +24,7 @@ Basic vector similarity search.
 |-----------|------|----------|---------|-------------|
 | query | str | Yes | - | Search query string |
 | target_uri | str | No | "" | Limit search to specific URI prefix |
-| limit | int | No | 10 | Maximum number of results |
+| limit | int | No | `default_search_limit` | Maximum number of results |
 | score_threshold | float | No | None | Minimum relevance score threshold |
 | filter | Dict | No | None | Metadata filters |
 
@@ -88,6 +88,8 @@ curl -X POST http://localhost:1933/api/v1/search/find \
 ```bash
 openviking find "how to authenticate users" [--uri viking://resources/] [--limit 10]
 ```
+
+If `limit` / `node_limit` is omitted, OpenViking uses `default_search_limit` from `ov.conf` (10 by default).
 
 **Response**
 
@@ -181,7 +183,7 @@ Search with session context and intent analysis.
 | target_uri | str | No | "" | Limit search to specific URI prefix |
 | session | Session | No | None | Session for context-aware search (SDK) |
 | session_id | str | No | None | Session ID for context-aware search (HTTP) |
-| limit | int | No | 10 | Maximum number of results |
+| limit | int | No | `default_search_limit` | Maximum number of results |
 | score_threshold | float | No | None | Minimum relevance score threshold |
 | filter | Dict | No | None | Metadata filters |
 
@@ -232,6 +234,8 @@ curl -X POST http://localhost:1933/api/v1/search/search \
 ```bash
 openviking search "best practices" [--session-id abc123] [--limit 10]
 ```
+
+If `limit` / `node_limit` is omitted, OpenViking uses `default_search_limit` from `ov.conf` (10 by default).
 
 **Response**
 

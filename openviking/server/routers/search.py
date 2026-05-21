@@ -37,7 +37,7 @@ class FindRequest(BaseModel):
 
     query: str
     target_uri: str = ""
-    limit: int = 10
+    limit: Optional[int] = None
     node_limit: Optional[int] = None
     score_threshold: Optional[float] = None
     filter: Optional[Dict[str, Any]] = None
@@ -51,7 +51,7 @@ class SearchRequest(BaseModel):
     query: str
     target_uri: str = ""
     session_id: Optional[str] = None
-    limit: int = 10
+    limit: Optional[int] = None
     node_limit: Optional[int] = None
     score_threshold: Optional[float] = None
     filter: Optional[Dict[str, Any]] = None

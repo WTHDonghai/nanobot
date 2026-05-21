@@ -304,6 +304,11 @@ class VikingSearchTool(OVFileTool):
                     "type": "string",
                     "description": "Optional target URI to limit search scope, if is None, then search the entire range.(e.g., viking://resources/)",
                 },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional maximum number of search candidates to return. Omit to use the OpenViking server default.",
+                },
             },
             "required": ["query"],
         }
@@ -313,11 +318,12 @@ class VikingSearchTool(OVFileTool):
         tool_context: "ToolContext",
         query: str,
         target_uri: Optional[str] = "",
+        limit: Optional[int] = None,
         **kwargs: Any,
     ) -> str:
         try:
             client = await self._get_client(tool_context)
-            raw_results = await client.search(query, target_uri=target_uri)
+            raw_results = await client.search(query, target_uri=target_uri, limit=limit)
             results = self._normalize_search_results(client=client, results=raw_results, query=query, target_uri=target_uri)
 
             if not results:
@@ -491,6 +497,8 @@ class VikingSearchTool(OVFileTool):
         lines = [f"OpenViking search query: {query}"]
         if target_uri:
             lines.append(f"Target URI: {target_uri}")
+        if "limit" in results:
+            lines.append(f"Requested limit: {results.get('limit') or 'server default'}")
         lines.append(f"Total matches: {results.get('total', len(resources))}")
 
         def append_document_section() -> None:

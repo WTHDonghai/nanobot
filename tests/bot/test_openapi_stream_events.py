@@ -22,6 +22,12 @@ from vikingbot.config.schema import CapabilityProfile, Config, SessionKey
 from vikingbot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
+KB_FALLBACK_RESPONSE = (
+    "抱歉，我暂时没有在当前知识库中找到足够依据来回答这个问题。需要的话，您可以进一步缩小范围，"
+    "比如具体文档、模块、流程或参数点。"
+)
+
+
 class StubProvider(LLMProvider):
     """Minimal provider stub for event-ordering tests."""
 
@@ -135,6 +141,8 @@ async def test_openapi_channel_forwards_iteration_events() -> None:
 async def test_agent_loop_publishes_tool_call_before_execution_starts() -> None:
     config = Config()
     config.agents.capability_profile = CapabilityProfile.FULL
+    config.agents.api_key = "test-key"
+    config.agents.api_base = "http://provider.example"
 
     provider = StubProvider(
         [
@@ -236,10 +244,7 @@ async def test_agent_loop_publishes_kb_text_draft_as_reasoning_before_retry() ->
             sender_id="user-1",
         )
 
-    assert (
-        final_content
-        == "抱歉，我暂时没有在现有支持资料中找到足够依据来回答这个问题。需要的话，我可以帮您转人工继续跟进，您看需要吗？"
-    )
+    assert final_content == KB_FALLBACK_RESPONSE
     assert tools_used == []
     assert token_usage["total_tokens"] == 0
     assert iteration == 2
@@ -285,16 +290,52 @@ async def test_agent_loop_requires_tool_call_until_kb_document_evidence_is_ready
             sender_id="user-1",
         )
 
-    assert (
-        final_content
-        == "抱歉，我暂时没有在现有支持资料中找到足够依据来回答这个问题。需要的话，我可以帮您转人工继续跟进，您看需要吗？"
-    )
+    assert final_content == KB_FALLBACK_RESPONSE
     assert tools_used == []
     assert token_usage["total_tokens"] == 0
     assert iteration == 2
     assert len(provider.calls) == 2
     assert provider.calls[0]["tool_choice"] == "required"
     assert provider.calls[1]["tool_choice"] == "required"
+
+
+def test_agent_loop_classifies_openviking_connection_errors_as_not_evidence() -> None:
+    assert (
+        AgentLoop._classify_tool_error_result(
+            "Error searching Viking: All connection attempts failed"
+        )
+        == "tool_connection_failed"
+    )
+    assert (
+        AgentLoop._classify_tool_error_result("Error reading from Viking: ConnectError")
+        == "tool_connection_failed"
+    )
+    assert (
+        AgentLoop._classify_tool_error_result("Error searching Viking with glob: timeout")
+        == "openviking_glob_error"
+    )
+
+
+def test_agent_loop_search_trace_summary_includes_limit_and_total() -> None:
+    summary = AgentLoop._summarize_tool_result_for_trace(
+        "openviking_search",
+        {},
+        "\n".join(
+            [
+                "OpenViking search query: 宾客状态",
+                "Target URI: viking://resources/",
+                "Requested limit: server default",
+                "Total matches: 50",
+                "",
+                "Documents:",
+                "1. [document] viking://resources/demo/宾客状态.md",
+                "   Content preview omitted. Use openviking_read for evidence.",
+            ]
+        ),
+    )
+
+    assert "requested_limit=server default" in summary
+    assert "total_matches=50" in summary
 
 
 @pytest.mark.asyncio

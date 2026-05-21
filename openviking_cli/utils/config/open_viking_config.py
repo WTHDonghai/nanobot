@@ -129,7 +129,11 @@ class OpenVikingConfig(BaseModel):
         description="Default search mode: 'fast' (vector only) or 'thinking' (vector + LLM rerank)",
     )
 
-    default_search_limit: int = Field(default=3, description="Default number of results to return")
+    default_search_limit: int = Field(
+        default=10,
+        ge=1,
+        description="Default number of semantic search results when limit is omitted",
+    )
 
     enable_memory_decay: bool = Field(default=True, description="Enable automatic memory decay")
 
