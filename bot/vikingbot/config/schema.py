@@ -488,7 +488,7 @@ class HumanHandoffToolConfig(BaseModel):
 
     enabled: bool = True
     entry_url: str = (
-        "https://cschat.antcloud.com.cn/index.htm?tntInstId=yLS_FlpK&scene=SCE01228243"
+        "https://cschat.antcloud.com.cn/index.htm?tntInstId=yLS_FlpK&scene=SCE01225733"
     )
     service_url: str = ""
     timeout_seconds: int = 10
