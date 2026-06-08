@@ -113,6 +113,10 @@ config:
     max_retries: 2
     thinking: false
     max_concurrent: 100
+  bot:
+    tools:
+      human_handoff:
+        entry_url: "https://cschat.antcloud.com.cn/index.htm?tntInstId=yLS_FlpK&scene=SCE01205703"
 
 # Extra environment variables to set on the container.
 # Use this for secrets or overrides that should not be in the ConfigMap.

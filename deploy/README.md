@@ -191,6 +191,7 @@ BUILD_TARGET=server-runtime \
 - `server.with_bot` 要设为 `true`
 - `server.bot_api_url` 要指向 `http://vikingbot:18790`
 - `bot.ov_server.server_url` 不能写 `127.0.0.1`，要写 `http://openviking:1933`
+- “联系人工”入口配置在 `bot.tools.human_handoff.entry_url`。后续只需要改 `deploy/ov.conf` 并重启 `vikingbot` 服务，不需要重新构建镜像。若配置未生效，按钮会打开 `human-handoff-url-not-configured.invalid` 占位地址
 
 如果省略 `bot.ov_server.server_url`，bot 会从根层 `server.host` 自动推导；当 `server.host=0.0.0.0` 时，它会回退到 `127.0.0.1`，这只适合同机单容器，不适合双容器。
 

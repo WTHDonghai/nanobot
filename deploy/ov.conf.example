@@ -57,6 +57,11 @@
       "server_url": "http://openviking:1933",
       "account_id": "01-account",
       "admin_user_id": "01-user-admin"
+    },
+    "tools": {
+      "human_handoff": {
+        "entry_url": "https://cschat.antcloud.com.cn/index.htm?tntInstId=yLS_FlpK&scene=SCE01205703"
+      }
     }
   },
   "log": {

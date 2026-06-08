@@ -173,6 +173,10 @@ All configurations are under the `bot` field in `ov.conf`, with default values f
   - If you don't use the locally started OpenViking Server, you can configure the url and the corresponding root user's API Key here
     - root_api_key: In a multi-tenant scenario, the API KEY must have root privileges; otherwise, the bot cannot automatically register multiple OpenViking users, which is used to implement memory isolation.
     - account_id: Defaults to default, which is the account ID of OpenViking. All users under an OpenViking account share resources.
+- `tools.human_handoff`: Human handoff configuration.
+  - `entry_url`: URL opened by the "contact human support" action.
+    The code default is an obvious placeholder URL; set this in `ov.conf` for production.
+  - `service_url`: Optional remote service for creating handoff tickets. If empty, `entry_url` is returned directly.
 - `channels`: Message platform configuration, see [Message Platform Configuration](bot/docs/CHANNEL.md) for details
 
 ```json
@@ -193,6 +197,11 @@ All configurations are under the `bot` field in `ov.conf`, with default values f
     "ov_server": {
       "server_url": "http://127.0.0.1:1933",
       "root_api_key": "test"
+    },
+    "tools": {
+      "human_handoff": {
+        "entry_url": "https://cschat.antcloud.com.cn/index.htm?tntInstId=yLS_FlpK&scene=SCE01205703"
+      }
     },
     "channels": [
       {

@@ -483,13 +483,16 @@ class ExecToolConfig(BaseModel):
     timeout: int = 60
 
 
+DEFAULT_HUMAN_HANDOFF_ENTRY_URL = (
+    "https://human-handoff-url-not-configured.invalid/"
+)
+
+
 class HumanHandoffToolConfig(BaseModel):
     """Human handoff tool/service configuration."""
 
     enabled: bool = True
-    entry_url: str = (
-        "https://cschat.antcloud.com.cn/index.htm?tntInstId=yLS_FlpK&scene=SCE01225733"
-    )
+    entry_url: str = DEFAULT_HUMAN_HANDOFF_ENTRY_URL
     service_url: str = ""
     timeout_seconds: int = 10
     extra_headers: dict[str, str] = Field(default_factory=dict)

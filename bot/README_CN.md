@@ -176,6 +176,10 @@ bot将连接远程的OpenViking服务器，使用前需启动Openviking Server�
   - 若不使用本地启动的OpenViking Server，可在此配置url和对应的root user的API Key
     - root_api_key: 多租户场景API KEY必须有root权限，否则bot无法自动注册多个OpenViking用户，用于实现memory的隔离
     - account_id: 默认default，ov的账号ID，OpenViking account下所有user共享resources
+- tools.human_handoff：转人工配置。
+  - entry_url：“联系人工”按钮打开的人工服务入口 URL
+    代码默认值是明显的占位 URL；生产环境请在 `ov.conf` 中显式配置
+  - service_url：可选的远程转人工服务；为空时直接返回 `entry_url`
 - channels：消息平台配置，详见 [消息平台配置](bot/docs/CHANNEL.md)
 
 ```json
@@ -196,6 +200,11 @@ bot将连接远程的OpenViking服务器，使用前需启动Openviking Server�
     "ov_server": {
       "server_url": "http://127.0.0.1:1933",
       "root_api_key": "test"
+    },
+    "tools": {
+      "human_handoff": {
+        "entry_url": "https://cschat.antcloud.com.cn/index.htm?tntInstId=yLS_FlpK&scene=SCE01205703"
+      }
     },
     "channels": [
       {
@@ -553,4 +562,3 @@ which nodejs
 | `ov chat --no-format` | 显示纯文本回复（无 Markdown） |
 
 交互模式退出：`exit`、`quit`、`/exit`、`/quit`、`:q` 或 `Ctrl+D`。
-

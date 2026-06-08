@@ -1,7 +1,46 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
-from vikingbot.config.loader import _apply_runtime_ov_server_overrides, _merge_ov_server_config
+import json
+
+import vikingbot.config.loader as config_loader
+from vikingbot.config.schema import DEFAULT_HUMAN_HANDOFF_ENTRY_URL
+from vikingbot.config.loader import (
+    _apply_runtime_ov_server_overrides,
+    _merge_ov_server_config,
+    load_config,
+)
+
+
+def test_load_config_reads_human_handoff_entry_url_from_ov_conf(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "ov.conf"
+    entry_url = "https://cschat.antcloud.com.cn/index.htm?tntInstId=yLS_FlpK&scene=SCE01205703"
+    config_path.write_text(
+        json.dumps(
+            {
+                "bot": {
+                    "tools": {
+                        "human_handoff": {
+                            "entry_url": entry_url,
+                        }
+                    }
+                }
+            }
+        )
+    )
+
+    monkeypatch.setattr(config_loader, "CONFIG_PATH", config_path)
+    config = load_config()
+
+    assert config.tools.human_handoff.entry_url == entry_url
+
+
+def test_default_human_handoff_entry_url_is_obvious_placeholder() -> None:
+    assert DEFAULT_HUMAN_HANDOFF_ENTRY_URL == (
+        "https://human-handoff-url-not-configured.invalid/"
+    )
 
 
 def test_merge_ov_server_config_uses_loopback_for_wildcard_bind_host() -> None:
