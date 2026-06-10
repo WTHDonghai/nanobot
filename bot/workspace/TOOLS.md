@@ -17,6 +17,7 @@ openviking_read(uri: str, level: str = "abstract") -> str
 Read resource content from OpenViking. Levels: `abstract`, `overview`, `read`.
 
 - `openviking_search` is retrieval only. After finding a relevant resource, call `openviking_read` before answering.
+- Final answers may use only facts explicitly supported by read document content; do not add unstated details or examples.
 - When `openviking_read(level="read", include_images=true)` returns Markdown image lines, keep those lines unchanged in the final reply.
 - Never invent Markdown image syntax from raw `viking://...` image URIs yourself.
 

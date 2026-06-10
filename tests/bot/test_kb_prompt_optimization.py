@@ -56,3 +56,29 @@ def test_bid_material_initial_search_prompt_uses_high_level_tools() -> None:
     assert "search_certificates" in prompt
     assert "search_solution_materials" in prompt
     assert "collect_bid_evidence" in prompt
+
+
+def test_retrieval_final_response_prompt_forbids_unsupported_facts(tmp_path: Path) -> None:
+    config = Config()
+    config.agents.capability_profile = CapabilityProfile.TECHNICAL_SUPPORT
+    builder = ContextBuilder(tmp_path, config=config)
+
+    prompt = builder.build_retrieval_final_response_system_prompt()
+
+    assert "Every factual statement must be explicitly supported by the provided evidence." in prompt
+    assert "Do not use model knowledge to complete missing parts." in prompt
+    assert "Do not add unstated details" in prompt
+    assert "answer only the supported part" in prompt
+
+
+def test_technical_support_policy_forbids_unstated_xms_details(tmp_path: Path) -> None:
+    config = Config()
+    config.agents.capability_profile = CapabilityProfile.TECHNICAL_SUPPORT
+    builder = ContextBuilder(tmp_path, config=config)
+
+    prompt = builder.build_tool_reflection_prompt()
+    final_prompt = builder.build_retrieval_final_response_system_prompt()
+
+    assert "do not add unstated XMS details" in prompt
+    assert "only facts explicitly supported by retrieved XMS documentation" in final_prompt
+    assert "Do not invent or embellish XMS module names" in final_prompt
