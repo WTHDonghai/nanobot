@@ -335,7 +335,7 @@ async def test_agent_loop_publishes_tool_call_before_execution_starts() -> None:
 
         loop.tools.execute = execute_tool
 
-        final_content, tools_used, token_usage, iteration = await loop._run_agent_loop(
+        final_content, tools_used, token_usage, iteration = await loop._run_agent_loop_classic(
             messages=[{"role": "user", "content": "帮我查预订信息"}],
             session_key=SessionKey(type="cli", channel_id="default", chat_id="event-order"),
             publish_events=True,
@@ -389,7 +389,7 @@ async def test_agent_loop_publishes_kb_text_draft_as_reasoning_before_retry() ->
         )
         loop.tools.get_definitions = lambda: []
 
-        final_content, tools_used, token_usage, iteration = await loop._run_agent_loop(
+        final_content, tools_used, token_usage, iteration = await loop._run_agent_loop_classic(
             messages=[{"role": "user", "content": "帮我查宾客状态"}],
             session_key=SessionKey(type="cli", channel_id="default", chat_id="kb-text-draft"),
             publish_events=True,
@@ -438,7 +438,7 @@ async def test_agent_loop_requires_tool_call_until_kb_document_evidence_is_ready
             }
         ]
 
-        final_content, tools_used, token_usage, iteration = await loop._run_agent_loop(
+        final_content, tools_used, token_usage, iteration = await loop._run_agent_loop_classic(
             messages=[{"role": "user", "content": "入住后可以提现吗"}],
             session_key=SessionKey(type="cli", channel_id="default", chat_id="kb-required"),
             publish_events=False,
@@ -481,7 +481,7 @@ async def test_agent_loop_stops_on_provider_error_response() -> None:
         )
         loop.tools.get_definitions = lambda: []
 
-        final_content, tools_used, token_usage, iteration = await loop._run_agent_loop(
+        final_content, tools_used, token_usage, iteration = await loop._run_agent_loop_classic(
             messages=[{"role": "user", "content": "如何办理入住"}],
             session_key=SessionKey(type="cli", channel_id="default", chat_id="provider-error"),
             publish_events=False,

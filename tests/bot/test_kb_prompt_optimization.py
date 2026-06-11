@@ -385,8 +385,6 @@ def test_retrieval_finalizer_can_add_useful_image_to_plain_text_draft() -> None:
         provider = SequenceProvider(
             [
                 LLMResponse(content="1"),
-                LLMResponse(content="Open Report Expert from the Query menu."),
-                LLMResponse(content="Open Report Expert from the Query menu."),
             ]
         )
         loop = AgentLoop(
@@ -429,7 +427,52 @@ def test_retrieval_finalizer_can_add_useful_image_to_plain_text_draft() -> None:
         )
         reply, provider = asyncio.run(run_case(workspace))
 
-    assert "send://report-expert.png" in reply
+    assert "相关图文说明" in reply
+    assert "Open Report Expert from the Query menu. The screen shows the report search area." in reply
+    assert "![Report expert screen](send://report-expert.png)" in reply
     assert provider.calls[0]["session_id"].endswith(":kb-image-select")
-    assert provider.calls[1]["session_id"].endswith(":kb-final")
-    assert provider.calls[2]["session_id"].endswith(":kb-final-correct")
+    assert len(provider.calls) == 1
+
+
+def test_retrieval_finalizer_inlines_images_when_agent_selects_them() -> None:
+    async def run_case(workspace: Path) -> tuple[str, SequenceProvider]:
+        image_line = "![入住按钮](send://check-in.png)"
+        provider = SequenceProvider([LLMResponse(content="1")])
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=Config(),
+        )
+        evidence_block = f"单击入住按钮完成登记。\n\n{image_line}"
+        messages = [
+            {"role": "user", "content": "如何办理入住？"},
+            {
+                "role": "system",
+                "content": loop._build_relevant_evidence_prompt(
+                    "如何办理入住？",
+                    [evidence_block],
+                    source_uri="viking://resources/demo/check-in.md",
+                ),
+            },
+        ]
+        session_key = SessionKey(type="cli", channel_id="default", chat_id="inline-image-test")
+        reply = await loop._finalize_kb_response(
+            "打开宾客主单，核对信息后点击入住按钮。",
+            session_key,
+            messages,
+        )
+        return reply, provider
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        reply, provider = asyncio.run(run_case(workspace))
+
+    assert "相关图文说明" in reply
+    assert "单击入住按钮完成登记。" in reply
+    assert "![入住按钮](send://check-in.png)" in reply
+    assert len(provider.calls) == 1

@@ -249,7 +249,7 @@ def test_run_agent_loop_can_reuse_latest_grounded_history_answer() -> None:
         ]
 
         final_content, tools_used, _token_usage, iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[
                     {"role": "user", "content": "S是什么状态？"},
                     {"role": "assistant", "content": "S 表示临时挂账。"},
@@ -321,7 +321,7 @@ def test_run_agent_loop_forces_retrieval_after_empty_structured_history_answer()
         ]
 
         final_content, tools_used, _token_usage, iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[
                     {"role": "user", "content": "S是什么状态？"},
                     {
@@ -373,7 +373,7 @@ def test_run_agent_loop_continues_search_when_kb_answer_has_no_document_evidence
         )
 
         final_content, tools_used, _token_usage, iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[{"role": "user", "content": "部署模式有哪些？"}],
                 session_key=SessionKey(type="cli", channel_id="default", chat_id="no-evidence"),
                 publish_events=False,

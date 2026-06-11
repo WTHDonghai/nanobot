@@ -144,7 +144,14 @@ export const rewriteBotImageUris = (value: string, serverUrl: string): string =>
 
   return markdownRewritten.replace(
     /send:\/\/[^\s)>"']+|https?:\/\/[^\s)>"']+\/bot\/v1\/images\/[^\s)>"']+|\/bot\/v1\/images\/[^\s)>"']+/g,
-    (ref) => {
+    (ref, offset: number, source: string) => {
+      const before = source.slice(0, offset);
+      const lastOpenParen = before.lastIndexOf('](');
+      const lastCloseParen = before.lastIndexOf(')');
+      if (lastOpenParen > lastCloseParen) {
+        return ref;
+      }
+
       if (!ref.startsWith('send://')) {
         return normalizeBotImageUrl(ref);
       }

@@ -346,6 +346,96 @@ def test_finalize_kb_response_does_not_rewrite_text_without_current_turn_documen
     assert provider.calls == []
 
 
+def test_run_agent_loop_uses_fast_batch_without_fallback() -> None:
+    config = Config()
+    provider = StubProvider(
+        [
+            LLMResponse(
+                content='{"sections":[1,2],"coverage":"full","missing":"","next_query":""}'
+            ),
+            LLMResponse(content="宾客入住时，先打开本日将到列表进入主单，再核对信息并点击入住。"),
+            LLMResponse(content="NONE"),
+        ]
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=config,
+            max_iterations=5,
+        )
+        loop.tools.get_definitions = lambda: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_search",
+                    "description": "Search docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_read",
+                    "description": "Read docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+        loop.tools.execute = AsyncMock(
+            side_effect=[
+                (
+                    "OpenViking search query: 如何办理入住\n"
+                    "Target URI: viking://resources/\n"
+                    "Requested limit: 8\n"
+                    "Total matches: 2\n\n"
+                    "Documents:\n"
+                    "1. [document] viking://resources/demo/check-in.md\n"
+                    "   Content preview omitted. Use openviking_read for evidence.\n"
+                    "2. [document] viking://resources/demo/group-check-in.md\n"
+                    "   Content preview omitted. Use openviking_read for evidence.\n"
+                ),
+                "## 单间房入住\n按 Ctrl+A 打开本日将到列表，进入宾客主单，核对信息后点击入住。",
+                "## 团队登记\n团队主单需先入住，再办理成员入住。",
+            ]
+        )
+
+        final_content, tools_used, _token_usage, iteration = asyncio.run(
+            loop._run_agent_loop(
+                messages=[{"role": "user", "content": "如何办理入住？"}],
+                session_key=SessionKey(type="cli", channel_id="default", chat_id="kb-fast"),
+                publish_events=False,
+            )
+        )
+
+    assert iteration == 1
+    assert final_content.startswith("宾客入住时")
+    assert [tool["tool_name"] for tool in tools_used] == [
+        "openviking_search",
+        "openviking_read",
+        "openviking_read",
+    ]
+    search_args = loop.tools.execute.await_args_list[0].args[1]
+    assert search_args["limit"] == AgentLoop.KB_FAST_BATCH_SEARCH_LIMIT
+    read_args = [call.args[1] for call in loop.tools.execute.await_args_list[1:]]
+    assert [args["uri"] for args in read_args] == [
+        "viking://resources/demo/check-in.md",
+        "viking://resources/demo/group-check-in.md",
+    ]
+    assert all(args["include_images"] is True for args in read_args)
+    assert provider.calls[0]["session_id"].endswith(":kb-fast-evidence-select")
+    assert provider.calls[1]["session_id"].endswith(":kb-selected-evidence-answer")
+    assert len(provider.calls) == 2
+    assert all(call["tools"] is None for call in provider.calls)
+
+
 def test_run_agent_loop_separates_kb_draft_from_final_user_reply() -> None:
     config = Config()
 
@@ -402,7 +492,7 @@ Q 问询状态
         )
 
         final_content, tools_used, _token_usage, _iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[{"role": "user", "content": "宾客有哪些状态"}],
                 session_key=SessionKey(type="cli", channel_id="default", chat_id="kb-final"),
                 publish_events=False,
@@ -474,7 +564,7 @@ def test_run_agent_loop_can_answer_after_semantic_evidence_while_tools_remain_av
         loop.tools.execute = AsyncMock(return_value="Status C means the component is queued.")
 
         final_content, tools_used, _token_usage, _iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[{"role": "user", "content": "What does status C mean?"}],
                 session_key=SessionKey(type="cli", channel_id="default", chat_id="answer-only"),
                 publish_events=False,
@@ -515,9 +605,9 @@ def test_run_agent_loop_respects_structured_image_request() -> None:
             LLMResponse(content='{"sections":[1],"coverage":"full","missing":"","next_query":""}'),
             LLMResponse(content="打开宾客主单，核对信息后点击【入住】按钮。"),
             LLMResponse(content="1"),
-            LLMResponse(content=f"打开宾客主单，核对信息后点击【入住】按钮。\n\n{image_line}"),
         ]
     )
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="image-auto")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         workspace = Path(tmpdir)
@@ -549,19 +639,20 @@ def test_run_agent_loop_respects_structured_image_request() -> None:
         )
 
         final_content, tools_used, _token_usage, _iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[{"role": "user", "content": "如何办理入住？"}],
-                session_key=SessionKey(type="cli", channel_id="default", chat_id="image-auto"),
+                session_key=session_key,
                 publish_events=False,
             )
         )
 
     executed_arguments = loop.tools.execute.await_args.args[1]
     assert executed_arguments["include_images"] is True
+    assert "相关图文说明" in final_content
+    assert "打开宾客主单，核对信息后点击【入住】按钮。" in final_content
     assert image_line in final_content
     assert [tool["tool_name"] for tool in tools_used] == ["openviking_read"]
-    assert provider.calls[-2]["session_id"].endswith(":kb-image-select")
-    assert provider.calls[-1]["session_id"].endswith(":kb-final")
+    assert provider.calls[-1]["session_id"].endswith(":kb-image-select")
 
 
 def test_iteration_limit_answers_from_selected_evidence() -> None:
@@ -614,7 +705,7 @@ def test_iteration_limit_answers_from_selected_evidence() -> None:
         loop.tools.execute = AsyncMock(return_value="Status C means the component is queued.")
 
         final_content, tools_used, _token_usage, iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[{"role": "user", "content": "Explain status C"}],
                 session_key=SessionKey(
                     type="cli",
@@ -726,7 +817,7 @@ def test_run_agent_loop_executes_more_retrieval_after_partial_semantic_evidence(
         )
 
         final_content, tools_used, _token_usage, iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[{"role": "user", "content": "Explain status C"}],
                 session_key=SessionKey(
                     type="cli",
@@ -840,7 +931,7 @@ Q 问询状态
         )
 
         final_content, tools_used, _token_usage, _iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[{"role": "user", "content": "宾客有哪些状态"}],
                 session_key=SessionKey(type="cli", channel_id="default", chat_id="kb-continue"),
                 publish_events=False,
@@ -958,7 +1049,7 @@ Q 问询状态
         )
 
         final_content, tools_used, _token_usage, _iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[{"role": "user", "content": "宾客有哪些状态"}],
                 session_key=SessionKey(type="cli", channel_id="default", chat_id="kb-relevant"),
                 publish_events=False,
@@ -1000,28 +1091,9 @@ def test_process_message_prefetches_kb_search_and_read_before_first_answer() -> 
                     )
                 ],
             ),
-            LLMResponse(
-                content=None,
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call_1",
-                        name="openviking_search",
-                        arguments={"query": "授权登陆", "target_uri": "viking://resources/"},
-                        tokens=8,
-                    ),
-                    ToolCallRequest(
-                        id="call_2",
-                        name="openviking_read",
-                        arguments={
-                            "uri": "viking://resources/xms-support/01-base.docx/01-base_2.md",
-                            "level": "read",
-                        },
-                        tokens=8,
-                    ),
-                ],
-            ),
             LLMResponse(content='{"sections":[1],"coverage":"full","missing":"","next_query":""}'),
             LLMResponse(content="授权登录时，先输入域名或IP，再填写工号、密码并选择酒店和模块。"),
+            LLMResponse(content="NONE"),
         ]
     )
 
@@ -1092,6 +1164,7 @@ def test_process_message_prefetches_kb_search_and_read_before_first_answer() -> 
                     "3.1授权登录\n"
                     "在浏览器中输入系统的域名或 IP 地址，然后输入工号、密码，选择酒店和模块。"
                 ),
+                "3.2授权登录注意事项\n授权登录失败时检查网络和账号权限。",
             ]
         )
 
@@ -1111,34 +1184,30 @@ def test_process_message_prefetches_kb_search_and_read_before_first_answer() -> 
     )
     assert "参考文档" in response.content
     assert "/bot/v1/resources/preview?uri=" in response.content
-    assert loop.tools.execute.await_count == 2
+    assert loop.tools.execute.await_count == 3
     assert loop.tools.execute.await_args_list[0].args[0] == "openviking_search"
     assert loop.tools.execute.await_args_list[1].args[0] == "openviking_read"
+    assert loop.tools.execute.await_args_list[2].args[0] == "openviking_read"
+    assert loop.tools.execute.await_args_list[0].args[1]["limit"] == AgentLoop.KB_FAST_BATCH_SEARCH_LIMIT
+    assert loop.tools.execute.await_args_list[1].args[1]["include_images"] is True
+    assert loop.tools.execute.await_args_list[2].args[1]["include_images"] is True
 
-    first_agent_messages = next(
-        call["messages"]
+    answer_call = next(
+        call
         for call in provider.calls
-        if call["session_id"] == "dingtalk__bot__user-1"
-        and any(
-            message.get("role") == "tool" and "3.1授权登录" in message.get("content", "")
-            for message in call["messages"]
-        )
+        if str(call["session_id"]).endswith(":kb-selected-evidence-answer")
     )
-    assert any(
-        message.get("role") == "tool" and "3.1授权登录" in message.get("content", "")
-        for message in first_agent_messages
+    answer_prompt = "\n".join(
+        str(message.get("content") or "")
+        for message in answer_call["messages"]
+        if message.get("role") == "user"
     )
-    assert any(
-        message.get("role") == "assistant"
-        and any(
-            tool_call["function"]["name"] == "openviking_search"
-            for tool_call in message.get("tool_calls", [])
-        )
-        for message in first_agent_messages
-    )
+    assert "Relevant document evidence for the current user request" in answer_prompt
+    assert "3.1授权登录" in answer_prompt
+    assert all(call["tools"] is None for call in provider.calls[1:])
 
 
-def test_process_message_reuses_structured_grounded_history_without_retrieval() -> None:
+def test_process_message_uses_fast_batch_instead_of_grounded_history_fallback() -> None:
     config = Config()
     provider = StubProvider(
         [
@@ -1158,17 +1227,9 @@ def test_process_message_reuses_structured_grounded_history_without_retrieval() 
                     )
                 ],
             ),
-            LLMResponse(
-                content=None,
-                tool_calls=[
-                    ToolCallRequest(
-                        id="history_answer_1",
-                        name=AgentLoop.GROUNDED_HISTORY_ANSWER_TOOL,
-                        arguments={"answer": "S 表示临时挂账。"},
-                        tokens=8,
-                    )
-                ],
-            ),
+            LLMResponse(content='{"sections":[1],"coverage":"full","missing":"","next_query":""}'),
+            LLMResponse(content="S 表示临时挂账。"),
+            LLMResponse(content="NONE"),
         ]
     )
 
@@ -1230,9 +1291,30 @@ def test_process_message_reuses_structured_grounded_history_without_retrieval() 
                     "description": "Search docs",
                     "parameters": {"type": "object", "properties": {}},
                 },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_read",
+                    "description": "Read docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
             }
         ]
-        loop.tools.execute = AsyncMock()
+        loop.tools.execute = AsyncMock(
+            side_effect=[
+                (
+                    "OpenViking search query: S是什么状态？\n"
+                    "Target URI: viking://resources/\n"
+                    "Requested limit: 8\n"
+                    "Total matches: 1\n\n"
+                    "Documents:\n"
+                    "1. [document] viking://resources/xms/status.md\n"
+                    "   Content preview omitted. Use openviking_read for evidence.\n"
+                ),
+                "2.1 宾客状态\nS 临时挂账",
+            ]
+        )
 
         response = asyncio.run(
             loop._process_message(
@@ -1242,17 +1324,23 @@ def test_process_message_reuses_structured_grounded_history_without_retrieval() 
                     session_key=session_key,
                 )
             )
-        )
+    )
 
     assert response is not None
-    assert response.content == "S 表示临时挂账。"
+    assert response.content.startswith("S 表示临时挂账。")
+    assert "参考文档" in response.content
     assert response.iteration == 1
-    assert loop.tools.execute.await_count == 0
-    agent_call = provider.calls[1]
-    assert agent_call["tool_choice"] == "required"
-    assert any(
-        tool["function"]["name"] == AgentLoop.GROUNDED_HISTORY_ANSWER_TOOL
-        for tool in agent_call["tools"]
+    assert loop.tools.execute.await_count == 2
+    assert loop.tools.execute.await_args_list[0].args[0] == "openviking_search"
+    assert loop.tools.execute.await_args_list[1].args[0] == "openviking_read"
+    assert all(
+        AgentLoop.GROUNDED_HISTORY_ANSWER_TOOL
+        not in {
+            tool.get("function", {}).get("name")
+            for tool in (call.get("tools") or [])
+            if isinstance(tool, dict)
+        }
+        for call in provider.calls[1:]
     )
 
 
@@ -1337,7 +1425,7 @@ def test_detailed_followup_keeps_retrieving_when_prior_document_only_defines_ter
         )
 
         final_content, tools_used, _token_usage, iteration = asyncio.run(
-            loop._run_agent_loop(
+            loop._run_agent_loop_classic(
                 messages=[
                     {"role": "user", "content": "S 是什么状态"},
                     {"role": "assistant", "content": "S 表示临时挂账。"},

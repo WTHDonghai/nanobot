@@ -110,6 +110,35 @@ async def test_litellm_dashscope_required_tool_choice_disables_thinking(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_litellm_dashscope_plain_chat_disables_thinking(monkeypatch) -> None:
+    provider = LiteLLMProvider(api_key="test-key", default_model="dashscope/qwen3.6-flash")
+    captured: dict = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="ok", tool_calls=[]),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr(litellm_provider, "acompletion", fake_acompletion)
+
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "如何办理入住"}],
+        model="dashscope/qwen3.6-flash",
+        temperature=0,
+    )
+
+    assert response.content == "ok"
+    assert captured["extra_body"] == {"enable_thinking": False}
+
+
+@pytest.mark.asyncio
 async def test_litellm_dashscope_dispatch_retry_also_disables_thinking(monkeypatch) -> None:
     provider = LiteLLMProvider(api_key="test-key", default_model="dashscope/qwen3.6-flash")
     captured: list[dict] = []

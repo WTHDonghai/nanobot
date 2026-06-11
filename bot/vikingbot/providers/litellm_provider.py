@@ -128,11 +128,11 @@ class LiteLLMProvider(LLMProvider):
                     return
 
     @staticmethod
-    def _disable_dashscope_thinking_for_forced_tools(
+    def _disable_dashscope_thinking(
         model: str,
         kwargs: dict[str, Any],
     ) -> None:
-        """Allow DashScope models to honor required or named tool choices."""
+        """Disable DashScope thinking mode for latency-sensitive bot calls."""
         spec = find_by_model(model)
         if not spec or spec.name != "dashscope":
             return
@@ -237,6 +237,7 @@ class LiteLLMProvider(LLMProvider):
 
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(model, kwargs)
+        self._disable_dashscope_thinking(model, kwargs)
 
         # Pass api_key directly — more reliable than env vars alone
         if self.api_key:
@@ -254,7 +255,7 @@ class LiteLLMProvider(LLMProvider):
         if tools:
             effective_tool_choice = tool_choice if tool_choice is not None else "auto"
             if effective_tool_choice == "required":
-                self._disable_dashscope_thinking_for_forced_tools(model, kwargs)
+                self._disable_dashscope_thinking(model, kwargs)
             if (
                 effective_tool_choice == "required"
                 and model in self._required_tool_choice_unsupported_models
@@ -301,7 +302,7 @@ class LiteLLMProvider(LLMProvider):
                         "type": "function",
                         "function": {"name": REQUIRED_TOOL_DISPATCH_NAME},
                     }
-                    self._disable_dashscope_thinking_for_forced_tools(model, kwargs)
+                    self._disable_dashscope_thinking(model, kwargs)
                     response = await acompletion(**kwargs)
                 else:
                     raise

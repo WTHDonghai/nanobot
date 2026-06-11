@@ -448,9 +448,16 @@ Always be helpful, accurate, and concise. When using tools, think step by step: 
         if not self._eval:
             messages.extend(history)
 
-        # User
-        user_info = await self._build_user_memory(session_key, current_message, self._sender_id)
-        messages.append({"role": "user", "content": user_info})
+        # User memory is intentionally skipped for retrieval-mode KB answers.
+        # The document corpus is the source of truth here, and remote memory
+        # lookup adds latency without improving grounding for random KB tests.
+        if self._is_retrieval_mode():
+            logger.info("[READ_USER_MEMORY]: skipped profile=knowledge-base")
+        else:
+            user_info = await self._build_user_memory(
+                session_key, current_message, self._sender_id
+            )
+            messages.append({"role": "user", "content": user_info})
 
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)

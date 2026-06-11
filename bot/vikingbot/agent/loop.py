@@ -58,6 +58,14 @@ class _SemanticEvidenceSelection:
     next_query: str = ""
 
 
+@dataclass
+class _FastBatchSearchPlan:
+    """Deterministic KB retrieval plan derived from one focused search result."""
+
+    document_uris: list[str]
+    total_matches: int | None = None
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -79,6 +87,9 @@ class AgentLoop:
         r"\d+(?:\.\d+){0,4})\s*[\u4e00-\u9fffA-Za-z][^\n]{0,80}?(?:\*\*)?\s*$"
     )
     GROUNDED_HISTORY_ANSWER_TOOL = "answer_from_grounded_history"
+    KB_FAST_BATCH_SEARCH_LIMIT = 8
+    KB_FAST_BATCH_READ_LIMIT = 4
+    KB_FAST_BATCH_MAX_EVIDENCE_BLOCKS = 8
 
     def __init__(
         self,
@@ -179,6 +190,159 @@ class AgentLoop:
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._openviking_sync_tasks: dict[str, asyncio.Task[None]] = {}
         self._register_default_tools()
+
+    def _should_use_kb_fast_batch_path(self) -> bool:
+        """Use deterministic batch retrieval for KB answers when search/read tools exist."""
+        if not self.context._is_retrieval_mode():
+            return False
+
+        return self._has_kb_fast_batch_tools()
+
+    def _has_kb_fast_batch_tools(self) -> bool:
+        """Whether the configured tool registry can run the KB fast batch path."""
+        tool_names: set[str] = set()
+        for definition in self.tools.get_definitions() or []:
+            if not isinstance(definition, dict):
+                continue
+            function = definition.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name") or "").strip()
+            if name:
+                tool_names.add(name)
+
+        has_fast_tools = {"openviking_search", "openviking_read"}.issubset(tool_names)
+        if not has_fast_tools:
+            logger.info(
+                "[KB_TRACE] retrieval_path=fast_batch_unavailable "
+                "reason=missing_required_tools "
+                f"available_tools={sorted(tool_names)}"
+            )
+        return has_fast_tools
+
+    @classmethod
+    def _build_fast_batch_search_plan(
+        cls,
+        *,
+        search_result: str,
+        max_documents: int,
+    ) -> _FastBatchSearchPlan:
+        """Extract concrete document URIs from formatted openviking_search output."""
+        document_uris: list[str] = []
+        seen: set[str] = set()
+
+        for match in re.finditer(
+            r"(?m)^\s*\d+\.\s+\[document\]\s+(viking://\S+)\s*$",
+            str(search_result or ""),
+        ):
+            uri = match.group(1).strip().rstrip(".,;:")
+            if (
+                not uri
+                or uri in seen
+                or is_summary_uri(uri)
+                or is_generic_scope_summary_uri(uri)
+            ):
+                continue
+            seen.add(uri)
+            document_uris.append(uri)
+            if len(document_uris) >= max_documents:
+                break
+
+        total_matches: int | None = None
+        total_match = re.search(r"(?m)^Total matches:\s*(\d+)\s*$", str(search_result or ""))
+        if total_match:
+            try:
+                total_matches = int(total_match.group(1))
+            except ValueError:
+                total_matches = None
+
+        return _FastBatchSearchPlan(
+            document_uris=document_uris,
+            total_matches=total_matches,
+        )
+
+    @staticmethod
+    def _tool_call_dict(tool_call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": tool_call_id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(arguments, ensure_ascii=False),
+            },
+        }
+
+    async def _publish_tool_call_event(
+        self,
+        *,
+        session_key: SessionKey,
+        tool_name: str,
+        arguments: dict[str, Any],
+        publish_events: bool,
+    ) -> None:
+        if not publish_events:
+            return
+        args_str = json.dumps(arguments, ensure_ascii=False)
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                session_key=session_key,
+                content=f"{tool_name}({args_str})",
+                event_type=OutboundEventType.TOOL_CALL,
+            )
+        )
+
+    async def _publish_tool_result_event(
+        self,
+        *,
+        session_key: SessionKey,
+        result: str,
+        publish_events: bool,
+    ) -> None:
+        if not publish_events:
+            return
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                session_key=session_key,
+                content=str(result),
+                event_type=OutboundEventType.TOOL_RESULT,
+            )
+        )
+
+    async def _execute_fast_batch_tool(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        session_key: SessionKey,
+        sender_id: str | None,
+    ) -> tuple[str, float]:
+        start_time = time.time()
+        result = await self.tools.execute(
+            tool_name,
+            arguments,
+            session_key=session_key,
+            sandbox_manager=self.sandbox_manager,
+            sender_id=sender_id,
+        )
+        return str(result or ""), (time.time() - start_time) * 1000
+
+    @staticmethod
+    def _tool_record(
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: str,
+        duration_ms: float,
+    ) -> dict[str, Any]:
+        return {
+            "tool_name": tool_name,
+            "args": json.dumps(arguments, ensure_ascii=False),
+            "result": result,
+            "duration": duration_ms,
+            "execute_success": bool(result and "Error executing" not in result),
+            "input_token": 0,
+            "output_token": cal_str_tokens(result, text_type="mixed"),
+        }
 
     async def _publish_thinking_event(
         self, session_key: SessionKey, event_type: OutboundEventType, content: str
@@ -531,6 +695,287 @@ class AgentLoop:
         Returns:
             tuple of (final_content, tools_used)
         """
+        if self.context._is_retrieval_mode():
+            if self._should_use_kb_fast_batch_path():
+                return await self._run_kb_fast_batch_loop(
+                    messages=messages,
+                    session_key=session_key,
+                    publish_events=publish_events,
+                    sender_id=sender_id,
+                    allow_grounded_history_reuse=allow_grounded_history_reuse,
+                )
+            final_content = self._build_iteration_limit_terminal_response(
+                messages=messages,
+                has_kb_read_evidence=False,
+            )
+            logger.warning(
+                f"[KB_TRACE] session={session_key.safe_name()} "
+                "retrieval_path=fast_batch_unavailable action=terminal_response "
+                "reason=missing_openviking_search_or_read"
+            )
+            return final_content, [], {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, 0
+
+        return await self._run_agent_loop_classic(
+            messages=messages,
+            session_key=session_key,
+            publish_events=publish_events,
+            sender_id=sender_id,
+            allow_grounded_history_reuse=allow_grounded_history_reuse,
+        )
+
+    async def _run_kb_fast_batch_loop(
+        self,
+        messages: list[dict],
+        session_key: SessionKey,
+        publish_events: bool = True,
+        sender_id: str | None = None,
+        allow_grounded_history_reuse: bool = False,
+    ) -> tuple[str | None, list[dict], dict[str, int], int]:
+        """Run the deterministic no-fallback KB path: search, batch read, answer."""
+        trace_session = session_key.safe_name()
+        token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        tools_used: list[dict] = []
+        user_request = self._extract_user_text(messages)
+        retrieval_query = user_request.strip()
+
+        if publish_events:
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    session_key=session_key,
+                    content="Iteration 1/1",
+                    event_type=OutboundEventType.ITERATION,
+                )
+            )
+
+        logger.info(
+            f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+            f"search_limit={self.KB_FAST_BATCH_SEARCH_LIMIT} "
+            f"read_limit={self.KB_FAST_BATCH_READ_LIMIT} "
+            f"allow_grounded_history_reuse={allow_grounded_history_reuse}"
+        )
+
+        search_args = {
+            "query": retrieval_query,
+            "target_uri": "viking://resources/",
+            "limit": self.KB_FAST_BATCH_SEARCH_LIMIT,
+        }
+        search_tool_id = "kb_fast_search_1"
+        messages = self.context.add_assistant_message(
+            messages,
+            None,
+            [self._tool_call_dict(search_tool_id, "openviking_search", search_args)],
+        )
+        await self._publish_tool_call_event(
+            session_key=session_key,
+            tool_name="openviking_search",
+            arguments=search_args,
+            publish_events=publish_events,
+        )
+        search_result, search_duration_ms = await self._execute_fast_batch_tool(
+            tool_name="openviking_search",
+            arguments=search_args,
+            session_key=session_key,
+            sender_id=sender_id,
+        )
+        messages = self.context.add_tool_result(
+            messages, search_tool_id, "openviking_search", search_result
+        )
+        await self._publish_tool_result_event(
+            session_key=session_key,
+            result=search_result,
+            publish_events=publish_events,
+        )
+        tools_used.append(
+            self._tool_record(
+                tool_name="openviking_search",
+                arguments=search_args,
+                result=search_result,
+                duration_ms=search_duration_ms,
+            )
+        )
+
+        plan = self._build_fast_batch_search_plan(
+            search_result=search_result,
+            max_documents=self.KB_FAST_BATCH_READ_LIMIT,
+        )
+        logger.info(
+            f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+            f"stage=search duration_ms={search_duration_ms:.1f} "
+            f"search_limit={self.KB_FAST_BATCH_SEARCH_LIMIT} "
+            f"total_matches={plan.total_matches if plan.total_matches is not None else 'unknown'} "
+            f"candidate_doc_count={len(plan.document_uris)}"
+        )
+
+        if not plan.document_uris:
+            final_content = self._build_iteration_limit_terminal_response(
+                messages=messages,
+                has_kb_read_evidence=False,
+            )
+            logger.info(
+                f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+                "evidence_status=none reason=no_concrete_documents action=terminal_response"
+            )
+            return final_content, tools_used, token_usage, 1
+
+        async def read_one(index: int, uri: str):
+            read_args = {
+                "uri": uri,
+                "level": "read",
+                "include_images": True,
+                "max_images": 4,
+            }
+            tool_id = f"kb_fast_read_{index}"
+            await self._publish_tool_call_event(
+                session_key=session_key,
+                tool_name="openviking_read",
+                arguments=read_args,
+                publish_events=publish_events,
+            )
+            result, duration_ms = await self._execute_fast_batch_tool(
+                tool_name="openviking_read",
+                arguments=read_args,
+                session_key=session_key,
+                sender_id=sender_id,
+            )
+            return index, tool_id, read_args, result, duration_ms
+
+        batch_read_start = time.time()
+        read_results = await asyncio.gather(
+            *(read_one(index, uri) for index, uri in enumerate(plan.document_uris, start=1))
+        )
+        batch_read_duration_ms = (time.time() - batch_read_start) * 1000
+
+        read_tool_calls: list[dict[str, Any]] = []
+        for _index, tool_id, read_args, _result, _duration_ms in read_results:
+            read_tool_calls.append(self._tool_call_dict(tool_id, "openviking_read", read_args))
+        messages = self.context.add_assistant_message(messages, None, read_tool_calls)
+
+        concrete_read_records: list[dict[str, Any]] = []
+        for index, tool_id, read_args, result, duration_ms in read_results:
+            messages = self.context.add_tool_result(messages, tool_id, "openviking_read", result)
+            await self._publish_tool_result_event(
+                session_key=session_key,
+                result=result,
+                publish_events=publish_events,
+            )
+            record = self._tool_record(
+                tool_name="openviking_read",
+                arguments=read_args,
+                result=result,
+                duration_ms=duration_ms,
+            )
+            tools_used.append(record)
+            evidence_ok, evidence_reason = self._classify_kb_evidence_result(
+                tool_name="openviking_read",
+                arguments=read_args,
+                result=result,
+            )
+            logger.info(
+                f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+                f"stage=read index={index} duration_ms={duration_ms:.1f} "
+                f"uri={read_args['uri']} evidence_ok={evidence_ok} reason={evidence_reason}"
+            )
+            if evidence_ok:
+                concrete_read_records.append(record)
+
+        logger.info(
+            f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+            f"stage=batch_read batch_read_count={len(read_results)} "
+            f"concrete_read_count={len(concrete_read_records)} "
+            f"batch_read_duration_ms={batch_read_duration_ms:.1f}"
+        )
+
+        if not concrete_read_records:
+            final_content = self._build_iteration_limit_terminal_response(
+                messages=messages,
+                has_kb_read_evidence=False,
+            )
+            logger.info(
+                f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+                "evidence_status=none reason=batch_read_no_concrete_evidence "
+                "action=terminal_response"
+            )
+            return final_content, tools_used, token_usage, 1
+
+        evidence_selection_start = time.time()
+        evidence_selection = await self._collect_fast_batch_evidence_selection(
+            user_request,
+            concrete_read_records,
+            session_key,
+            max_blocks=self.KB_FAST_BATCH_MAX_EVIDENCE_BLOCKS,
+        )
+        evidence_selection_duration_ms = (time.time() - evidence_selection_start) * 1000
+        coverage = evidence_selection.coverage
+        if coverage not in {"full", "partial", "none"}:
+            coverage = "partial" if evidence_selection.sections else "none"
+        evidence_status = (
+            "full" if coverage == "full" else "partial" if evidence_selection.sections else "none"
+        )
+        logger.info(
+            f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+            f"stage=evidence_select duration_ms={evidence_selection_duration_ms:.1f} "
+            f"selected_blocks={len(evidence_selection.sections)} "
+            f"evidence_status={evidence_status} coverage={coverage}"
+        )
+
+        if not evidence_selection.sections:
+            final_content = self._build_iteration_limit_terminal_response(
+                messages=messages,
+                has_kb_read_evidence=True,
+            )
+            logger.info(
+                f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+                "evidence_status=none reason=no_relevant_sections action=terminal_response"
+            )
+            return final_content, tools_used, token_usage, 1
+
+        source_uris = self._concrete_read_uris(concrete_read_records)
+        messages.append(
+            {
+                "role": "system",
+                "content": self._build_relevant_evidence_prompt(
+                    user_request,
+                    evidence_selection.sections,
+                    source_uri="\n".join(source_uris),
+                ),
+            }
+        )
+
+        answer_start = time.time()
+        final_content = await self._compose_answer_from_selected_evidence(messages, session_key)
+        answer_duration_ms = (time.time() - answer_start) * 1000
+        logger.info(
+            f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+            f"stage=answer_generation answer_generation_duration_ms={answer_duration_ms:.1f} "
+            f"chars={len(final_content or '')} evidence_status={evidence_status}"
+        )
+
+        if not final_content:
+            final_content = self._build_iteration_limit_terminal_response(
+                messages=messages,
+                has_kb_read_evidence=True,
+            )
+
+        finalize_start_time = time.time()
+        final_content = await self._finalize_kb_response(final_content, session_key, messages)
+        final_content = self._normalize_final_output_text(final_content)
+        logger.info(
+            f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+            f"stage=finalize finalize_response_duration_ms={(time.time() - finalize_start_time) * 1000:.1f} "
+            f"chars={len(final_content or '')} evidence_status={evidence_status}"
+        )
+
+        return final_content, tools_used, token_usage, 1
+
+    async def _run_agent_loop_classic(
+        self,
+        messages: list[dict],
+        session_key: SessionKey,
+        publish_events: bool = True,
+        sender_id: str | None = None,
+        allow_grounded_history_reuse: bool = False,
+    ) -> tuple[str | None, list[dict], dict[str, int], int]:
+        """Run the original model-planned agent loop for non-KB modes."""
         iteration = 0
         final_content = None
         tools_used: list[dict] = []
@@ -1007,11 +1452,6 @@ class AgentLoop:
                 )
 
         return final_content, tools_used, token_usage, iteration
-
-    def _is_concrete_kb_read_result(self, tool_name: str, arguments: dict, result: str) -> bool:
-        """Whether a tool result represents sufficient retrieval evidence."""
-        is_concrete, _reason = self._classify_kb_evidence_result(tool_name, arguments, result)
-        return is_concrete
 
     def _classify_kb_evidence_result(
         self, tool_name: str, arguments: dict | None, result: str
@@ -1971,6 +2411,138 @@ class AgentLoop:
         )
         return selection.sections
 
+    @classmethod
+    def _build_fast_batch_evidence_selection_prompt(
+        cls,
+        user_request: str,
+        candidate_sections: list[dict[str, str]],
+        *,
+        max_blocks: int,
+    ) -> str:
+        """Build one cross-document evidence selector prompt for the fast batch path."""
+        candidates: list[str] = []
+        for index, candidate in enumerate(candidate_sections, start=1):
+            text = cls._prepare_text_block_for_rewrite(candidate.get("text", ""))
+            if len(text) > 800:
+                text = f"{text[:800]}..."
+            candidates.append(f"[{index}] Source URI: {candidate.get('uri', '')}\n{text}")
+
+        return (
+            "Select the minimum document evidence sections needed to answer the user request "
+            "from the candidate sections below, then judge overall coverage.\n"
+            "Return only JSON in this exact shape: "
+            '{"sections":[1,2],"coverage":"full","missing":"","next_query":""}.\n'
+            "coverage must be full, partial, or none. Use full only when every requested aspect is "
+            "explicitly supported by the selected sections. Use partial when some useful evidence "
+            "exists but the requested scope is not fully supported. Use none when no selected text "
+            "answers the request. Do not infer facts. Do not answer the question. "
+            f"Select at most {max_blocks} sections.\n\n"
+            f"User request:\n{user_request.strip()}\n\n"
+            "Candidate sections:\n"
+            + "\n\n".join(candidates)
+        )
+
+    async def _collect_fast_batch_evidence_selection(
+        self,
+        user_request: str,
+        tools_used: list[dict[str, Any]],
+        session_key: SessionKey,
+        *,
+        max_blocks: int,
+    ) -> _SemanticEvidenceSelection:
+        """Select evidence once across all batch-read documents."""
+        candidate_sections: list[dict[str, str]] = []
+        seen_candidates: set[str] = set()
+        max_candidates = max(max_blocks * 4, max_blocks)
+        for tool in tools_used:
+            if not self._is_concrete_read_tool_record(tool):
+                continue
+            args = self._parse_tool_args(tool.get("args"))
+            uri = str(args.get("uri") or "").strip()
+            for section in self._split_markdown_sections(str(tool.get("result") or ""))[:10]:
+                raw_text = str(section.get("text") or "").strip()
+                cleaned = self._prepare_text_block_for_rewrite(raw_text)
+                if not cleaned or cleaned in seen_candidates:
+                    continue
+                seen_candidates.add(cleaned)
+                candidate_sections.append({"uri": uri, "text": raw_text, "cleaned": cleaned})
+                if len(candidate_sections) >= max_candidates:
+                    break
+            if len(candidate_sections) >= max_candidates:
+                break
+
+        if not candidate_sections or not str(user_request or "").strip():
+            return _SemanticEvidenceSelection(sections=[], coverage="none")
+
+        try:
+            response = await self.provider.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a strict cross-document evidence selector and coverage assessor. "
+                            "Select only explicit evidence and return JSON only."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": self._build_fast_batch_evidence_selection_prompt(
+                            user_request,
+                            candidate_sections,
+                            max_blocks=max_blocks,
+                        ),
+                    },
+                ],
+                model=self.fast_model,
+                max_tokens=384,
+                temperature=0,
+                session_id=f"{session_key.safe_name()}:kb-fast-evidence-select",
+            )
+            indexes, _is_valid = self._parse_section_selection_response(
+                response.content or "",
+                len(candidate_sections),
+            )
+            coverage, missing, next_query = self._parse_evidence_coverage_response(
+                response.content or ""
+            )
+        except Exception as exc:
+            logger.debug(f"[KB_TRACE] fast batch evidence selection failed: {exc}")
+            return _SemanticEvidenceSelection(sections=[], coverage="unknown")
+
+        selected: list[str] = []
+        seen_selected: set[str] = set()
+        for index in indexes[:max_blocks]:
+            candidate = candidate_sections[index - 1]
+            cleaned = candidate["cleaned"]
+            if cleaned in seen_selected:
+                continue
+            seen_selected.add(cleaned)
+            selected.append(cleaned)
+
+        if not selected:
+            coverage = "none"
+        return _SemanticEvidenceSelection(
+            sections=selected,
+            coverage=coverage,
+            missing=missing,
+            next_query=next_query,
+        )
+
+    @classmethod
+    def _concrete_read_uris(cls, tools_used: list[dict[str, Any]]) -> list[str]:
+        """Return concrete openviking_read URIs from tool records."""
+        uris: list[str] = []
+        seen: set[str] = set()
+        for tool in tools_used:
+            if not cls._is_concrete_read_tool_record(tool):
+                continue
+            args = cls._parse_tool_args(tool.get("args"))
+            uri = str(args.get("uri") or "").strip()
+            if uri and uri not in seen:
+                seen.add(uri)
+                uris.append(uri)
+        return uris
+
     @staticmethod
     def _parse_tool_args(raw_args: Any) -> dict[str, Any]:
         """Parse tool args stored as JSON text in tests/session history."""
@@ -2143,9 +2715,15 @@ class AgentLoop:
         numbered = "\n\n".join(
             f"[Evidence {index}]\n{block}" for index, block in enumerate(evidence_blocks, start=1)
         )
-        normalized_source_uri = re.sub(r"[\r\n]+", "", source_uri).strip()
+        source_uris = [
+            re.sub(r"[\r\n]+", "", uri).strip()
+            for uri in str(source_uri or "").splitlines()
+            if uri.strip()
+        ]
         source_line = (
-            f"\nEvidence source URI: {normalized_source_uri}" if normalized_source_uri else ""
+            "\n" + "\n".join(f"Evidence source URI: {uri}" for uri in source_uris)
+            if source_uris
+            else ""
         )
         return (
             "Relevant document evidence for the current user request has been extracted below.\n"
@@ -2343,9 +2921,9 @@ class AgentLoop:
     ) -> str:
         """Finalize a KB draft with references and optional image evidence.
 
-        Pure-text drafts are returned without an extra model rewrite. Image
-        drafts still use a rewrite step so relevant send:// lines stay attached
-        to the text they support.
+        The image selector acts as the agent's decision point: if it selects
+        evidence segments, include their nearby explanatory text and images in
+        the same final reply without an extra image-aware rewrite.
         """
         if not self.context._is_retrieval_mode() or not draft_content:
             return draft_content
@@ -2375,11 +2953,11 @@ class AgentLoop:
             f"duration_ms={(time.time() - image_select_start_time) * 1000:.1f} "
             f"candidate_segments={len(image_evidence_segments)} "
             f"selected_segments={len(selected_image_segments)} "
-            f"draft_has_images={bool(self.MARKDOWN_IMAGE_LINE_RE.search(str(draft_content or '')))}"
+            f"draft_has_images={bool(self.MARKDOWN_IMAGE_LINE_RE.search(str(draft_content or '')))} "
+            f"model={self.fast_model}"
         )
         should_include_images = bool(selected_image_segments)
 
-        # Fast path: no images → return draft directly, no rewrite LLM call needed
         if not should_include_images:
             result = self._append_reference_links(draft_content, reference_links)
             logger.info(
@@ -2388,88 +2966,41 @@ class AgentLoop:
             )
             return result
 
-        preserve_block = (
-            "\n\nThe tool evidence below already preserves the association between explanatory "
-            "text and screenshots. When composing the final reply, keep the relevant image "
-            "Markdown lines exactly as written and keep each image near the text it illustrates. "
-            "Do not move all images to the end.\n\n"
-            "Image-aware evidence:\n" + "\n\n---\n\n".join(selected_image_segments)
+        image_content = self._build_inline_image_content(selected_image_segments)
+        body_content = (
+            f"{draft_content.rstrip()}\n\n{image_content}"
+            if image_content.strip()
+            else draft_content
         )
-
-        final_messages = [
-            {
-                "role": "system",
-                "content": self.context.build_retrieval_final_response_system_prompt(),
-            },
-            {
-                "role": "user",
-                "content": (
-                    "Rewrite the following draft into one direct final reply for the user.\n"
-                    "Remove any mention of searching, reading documents, internal progress, or tool usage.\n\n"
-                    f"Draft:\n{draft_content}{preserve_block}"
-                ),
-            },
-        ]
-
-        rewrite_start_time = time.time()
-        response = await self.provider.chat(
-            messages=final_messages,
-            model=self.model,
-            session_id=f"{session_key.safe_name()}:kb-final",
-        )
+        final_content = self._append_reference_links(body_content, reference_links)
         logger.info(
-            f"[KB_TRACE] session={trace_session} finalize_image_rewrite "
-            f"duration_ms={(time.time() - rewrite_start_time) * 1000:.1f}"
+            f"[KB_TRACE] session={trace_session} finalize_image_inline "
+            f"duration_ms={(time.time() - finalize_start_time) * 1000:.1f} "
+            f"selected_segments={len(selected_image_segments)} "
+            f"image_lines={len(self._extract_send_image_lines_from_text(image_content))} "
+            "image_inlined=True"
         )
-        final_content = response.content or draft_content
 
-        allowed_image_lines: list[str] = []
-        for block in selected_image_segments:
-            allowed_image_lines.extend(self._extract_send_image_lines_from_text(block))
-        allowed_image_lines = list(dict.fromkeys(allowed_image_lines))
+        return final_content
 
-        if allowed_image_lines:
-            allowed_set = set(allowed_image_lines)
-            output_image_lines = self._extract_send_image_lines_from_text(final_content)
-            unexpected_lines = [line for line in output_image_lines if line not in allowed_set]
-            missing_lines = [line for line in allowed_image_lines if line not in output_image_lines]
-            if unexpected_lines or missing_lines:
-                correction_messages = [
-                    {
-                        "role": "system",
-                        "content": self.context.build_retrieval_final_response_system_prompt(),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "Rewrite the final reply again.\n"
-                            "Use every required Markdown image line below exactly once, keep each "
-                            "near the text it illustrates, and use no other send:// references.\n\n"
-                            "Required image Markdown lines:\n"
-                            + "\n".join(allowed_image_lines)
-                            + "\n\nReply draft to correct:\n"
-                            + final_content
-                        ),
-                    },
-                ]
-                correction = await self.provider.chat(
-                    messages=correction_messages,
-                    model=self.fast_model,
-                    session_id=f"{session_key.safe_name()}:kb-final-correct",
-                )
-                final_content = correction.content or final_content
-                corrected_image_lines = self._extract_send_image_lines_from_text(final_content)
-                missing_lines = [
-                    line for line in allowed_image_lines if line not in corrected_image_lines
-                ]
-                if missing_lines:
-                    logger.warning(
-                        f"[KB_TRACE] session={trace_session} final_image_correction_missing="
-                        f"{len(missing_lines)} action=append_required_images"
-                    )
-                    final_content = f"{final_content.rstrip()}\n\n" + "\n".join(missing_lines)
-
-        return self._append_reference_links(final_content, reference_links)
+    @classmethod
+    def _build_inline_image_content(cls, selected_image_segments: list[str]) -> str:
+        """Build a compact text-and-image block from selected screenshot evidence."""
+        rendered_segments: list[str] = []
+        seen_images: set[str] = set()
+        for segment in selected_image_segments:
+            segment_images = cls._extract_send_image_lines_from_text(segment)
+            unique_images = [line for line in segment_images if line not in seen_images]
+            if not unique_images:
+                continue
+            seen_images.update(unique_images)
+            text_without_images = cls.SEND_IMAGE_LINE_RE.sub("", segment)
+            text_without_images = re.sub(r"\n{3,}", "\n\n", text_without_images).strip()
+            parts = [part for part in [text_without_images, "\n".join(unique_images)] if part]
+            rendered_segments.append("\n\n".join(parts))
+        if not rendered_segments:
+            return ""
+        return "相关图文说明：\n\n" + "\n\n".join(rendered_segments)
 
     def _build_reference_links(self, messages: list[dict]) -> list[str]:
         """Build Markdown links for concrete read document evidence used in retrieval answers."""

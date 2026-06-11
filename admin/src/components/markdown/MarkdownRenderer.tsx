@@ -57,8 +57,13 @@ export function resolveBotMarkdownImageSrc(
   src?: string | null,
   serverUrl?: string,
 ): string | undefined {
-  const rawSrc = String(src || '').trim();
+  let rawSrc = String(src || '').trim();
   if (!rawSrc) return undefined;
+
+  const nestedMarkdownImage = rawSrc.match(/^!\[[^\]]*]\((.+)\)$/);
+  if (nestedMarkdownImage?.[1]) {
+    rawSrc = nestedMarkdownImage[1].trim();
+  }
 
   const base = serverUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
 
