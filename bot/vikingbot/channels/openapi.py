@@ -290,7 +290,13 @@ class OpenAPIChannel(BaseChannel):
                 )
             except ResourcePreviewTokenError:
                 raise HTTPException(status_code=404, detail="Resource preview is not available")
-            if claims.account_id != channel.bot_config.ov_server.account_id:
+            bot_account_id = channel.bot_config.ov_server.account_id
+            if claims.account_id != bot_account_id:
+                logger.warning(
+                    "Rejected resource preview for account mismatch: "
+                    f"token_account={claims.account_id} bot_account={bot_account_id} "
+                    f"uri={normalized_uri}"
+                )
                 raise HTTPException(status_code=404, detail="Resource preview is not available")
 
             client = await VikingClient.create()
@@ -303,9 +309,10 @@ class OpenAPIChannel(BaseChannel):
                 if not str(content or "").strip():
                     raise HTTPException(status_code=404, detail="Resource content not found")
                 try:
-                    content = await client.materialize_inline_image_refs(
-                        str(content), normalized_uri
-                    )
+                    if hasattr(client, "materialize_preview_image_refs"):
+                        content = await client.materialize_preview_image_refs(str(content), normalized_uri)
+                    else:
+                        content = await client.materialize_inline_image_refs(str(content), normalized_uri)
                 except Exception as e:
                     logger.warning(f"Failed to materialize preview images for {normalized_uri}: {e}")
                 content = channel._replace_bot_resource_links(str(content))

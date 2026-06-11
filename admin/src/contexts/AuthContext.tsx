@@ -12,6 +12,16 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const normalizeServerUrl = (url: string): string => {
+  const trimmed = url.trim();
+  if (!trimmed) return '';
+  try {
+    return new URL(trimmed, typeof window !== 'undefined' ? window.location.origin : undefined).origin;
+  } catch {
+    return trimmed.replace(/\/(?:admin|guest)(?:\/.*)?$/, '').replace(/\/$/, '');
+  }
+};
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [serverUrl, setServerUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -28,7 +38,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const savedAccountId = sessionStorage.getItem('ov_admin_account') || localStorage.getItem('ov_admin_account');
     const savedUserId = sessionStorage.getItem('ov_admin_user') || localStorage.getItem('ov_admin_user');
     if (url) {
-      setServerUrl(url);
+      setServerUrl(normalizeServerUrl(url));
       setApiKey(key || '');
       setRole(savedRole);
       setAccountId(savedAccountId);
@@ -38,8 +48,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const setAuth = (url: string, key: string, newRole: string, newAccountId: string, newUserId: string, remember: boolean = false) => {
-    // Basic formatting
-    const formattedUrl = url.trim().replace(/\/$/, '');
+    const formattedUrl = normalizeServerUrl(url);
     setServerUrl(formattedUrl);
     setApiKey(key);
     setRole(newRole);
@@ -104,4 +113,3 @@ export const useAuth = () => {
   }
   return context;
 };
-

@@ -345,6 +345,48 @@ class VikingClient:
         rendered = self._materialize_word_field_images(rendered)
         return self._strip_word_control_chars(rendered)
 
+    async def materialize_preview_image_refs(self, content: str, source_uri: str) -> str:
+        """Best-effort preview image materialization for rendered reference documents."""
+        rendered = self._materialize_word_field_images(content)
+        image_refs = self._collect_preview_markdown_image_refs(rendered)
+        unique_raw_refs = list(dict.fromkeys(image_ref["ref"] for image_ref in image_refs))
+        send_ref_cache: dict[str, str | None] = {}
+
+        async def resolve_send_ref(raw_ref: str) -> tuple[str, str | None]:
+            try:
+                resolved_uri = await self._resolve_markdown_image_uri(source_uri, raw_ref)
+                if not resolved_uri:
+                    logger.warning(f"Unable to resolve preview image ref {raw_ref} from {source_uri}")
+                    return raw_ref, None
+
+                exported = await self._export_image_uris_for_send([resolved_uri])
+                if not exported:
+                    logger.warning(f"Unable to export preview image {resolved_uri} for send")
+                    return raw_ref, None
+
+                send_match = re.search(r"!\[[^\]]*\]\((send://[^)\s]+)\)", exported[0])
+                if not send_match:
+                    logger.warning(f"Preview image {resolved_uri} did not produce a send:// reference")
+                    return raw_ref, None
+                return raw_ref, send_match.group(1)
+            except Exception as exc:
+                logger.warning(f"Failed to materialize preview image ref {raw_ref}: {exc}")
+                return raw_ref, None
+
+        resolved_refs = await asyncio.gather(*(resolve_send_ref(raw_ref) for raw_ref in unique_raw_refs))
+        send_ref_cache.update(resolved_refs)
+
+        for image_ref in image_refs:
+            markdown_ref = image_ref["markdown"]
+            raw_ref = image_ref["ref"]
+            send_ref = send_ref_cache.get(raw_ref)
+            if not send_ref:
+                continue
+            replacement_alt = image_ref["caption"] or image_ref["alt_text"] or "image"
+            rendered = rendered.replace(markdown_ref, f"![{replacement_alt}]({send_ref})", 1)
+
+        return self._strip_word_control_chars(rendered)
+
     async def materialize_inline_image_refs_to_directory(
         self, content: str, source_uri: str, output_dir: Path
     ) -> str:
@@ -645,6 +687,36 @@ class VikingClient:
             if stat and not stat.get("isDir") and Path(normalized_ref).suffix.lower() in IMAGE_EXTENSIONS:
                 return normalized_ref.rstrip("/")
 
+        if self._is_relative_image_ref(normalized_ref):
+            return await self._resolve_relative_image_uri(source_uri, normalized_ref)
+
+        return None
+
+    async def _resolve_relative_image_uri(self, source_uri: str, ref: str) -> Optional[str]:
+        """Resolve common markdown relative image refs near the source document."""
+        normalized_ref = unquote(ref.split("#", 1)[0].split("?", 1)[0]).strip()
+        if not normalized_ref:
+            return None
+        normalized_ref = re.sub(r"^\./+", "", normalized_ref)
+        if normalized_ref.startswith("../"):
+            return None
+
+        source_dir = await self._resolve_start_directory(source_uri)
+        candidates: list[str] = []
+        if normalized_ref.startswith("_images/"):
+            candidates.append(f"{source_dir.rstrip('/')}/{normalized_ref}")
+        else:
+            candidates.extend(
+                [
+                    f"{source_dir.rstrip('/')}/{normalized_ref}",
+                    f"{source_dir.rstrip('/')}/_images/{Path(normalized_ref).name}",
+                ]
+            )
+
+        for candidate in dict.fromkeys(candidates):
+            stat = await self.stat(candidate)
+            if stat and not stat.get("isDir") and Path(candidate).suffix.lower() in IMAGE_EXTENSIONS:
+                return candidate.rstrip("/")
         return None
 
     async def _resolve_start_directory(self, uri: str) -> str:
@@ -748,6 +820,59 @@ class VikingClient:
                 )
 
         return refs
+
+    @classmethod
+    def _collect_preview_markdown_image_refs(cls, content: str) -> list[dict[str, str]]:
+        """Collect markdown image refs that preview rendering can safely try to materialize."""
+        refs: list[dict[str, str]] = []
+        for image_ref in cls._collect_markdown_image_refs(content):
+            ref = image_ref["ref"]
+            if ref.startswith(("http://", "https://", "data:", "send://", "/bot/v1/images/")):
+                continue
+            if ref.startswith(("ov-asset://", "viking://")) or cls._is_relative_image_ref(ref):
+                refs.append(image_ref)
+        return refs
+
+    @classmethod
+    def _collect_markdown_image_refs(cls, content: str) -> list[dict[str, str]]:
+        refs: list[dict[str, str]] = []
+        lines = (content or "").splitlines()
+
+        for index, line in enumerate(lines):
+            for match in MARKDOWN_IMAGE_REF_RE.finditer(line):
+                ref = match.group(2).strip()
+                alt_text = match.group(1).strip()
+                trailing_text = cls._clean_image_caption_text(line[match.end() :])
+                next_text = ""
+                if not trailing_text:
+                    for candidate in lines[index + 1 : index + 4]:
+                        cleaned = cls._clean_image_caption_text(candidate)
+                        if cleaned and not cleaned.startswith("!["):
+                            next_text = cleaned
+                            break
+
+                refs.append(
+                    {
+                        "markdown": match.group(0),
+                        "ref": ref,
+                        "alt_text": alt_text,
+                        "caption": cls._choose_image_caption(
+                            alt_text=alt_text,
+                            ref=ref,
+                            trailing_text=trailing_text,
+                            nearby_text=next_text,
+                        ),
+                    }
+                )
+
+        return refs
+
+    @staticmethod
+    def _is_relative_image_ref(ref: str) -> bool:
+        normalized_ref = str(ref or "").strip()
+        if not normalized_ref or "://" in normalized_ref or normalized_ref.startswith(("/", "#")):
+            return False
+        return Path(normalized_ref.split("#", 1)[0].split("?", 1)[0]).suffix.lower() in IMAGE_EXTENSIONS
 
     @classmethod
     def _choose_image_caption(

@@ -60,14 +60,21 @@ export function resolveBotMarkdownImageSrc(
   const rawSrc = String(src || '').trim();
   if (!rawSrc) return undefined;
 
+  const base = serverUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
+
   if (rawSrc.startsWith('send://')) {
-    const base = serverUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
     return new URL(`/bot/v1/images/${rawSrc.slice('send://'.length)}`, base).toString();
   }
 
-  if (rawSrc.startsWith('/bot/v1/images/')) {
-    const base = serverUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
-    return new URL(rawSrc, base).toString();
+  try {
+    const url = new URL(rawSrc, base);
+    if (url.pathname.startsWith('/bot/v1/images/')) {
+      return new URL(`${url.pathname}${url.search}${url.hash}`, base).toString();
+    }
+  } catch {
+    if (rawSrc.startsWith('/bot/v1/images/')) {
+      return new URL(rawSrc, base).toString();
+    }
   }
 
   return rawSrc;

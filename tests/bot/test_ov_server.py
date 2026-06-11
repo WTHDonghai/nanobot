@@ -143,6 +143,44 @@ async def test_materialize_inline_image_refs_converts_http_includepicture_and_st
 
 
 @pytest.mark.asyncio
+async def test_materialize_preview_image_refs_resolves_relative_images() -> None:
+    client = object.__new__(VikingClient)
+    client._resolve_start_directory = AsyncMock(return_value="viking://resources/demo/manual")
+    client.stat = AsyncMock(return_value={"isDir": False, "name": "login.png"})
+    client._export_image_uris_for_send = AsyncMock(return_value=["![login](send://login.png)"])
+
+    rendered = await client.materialize_preview_image_refs(
+        "步骤一\n![登录图](./_images/login.png)",
+        "viking://resources/demo/manual/page_1.md",
+    )
+
+    assert rendered == "步骤一\n![登录图](send://login.png)"
+    client.stat.assert_awaited_once_with("viking://resources/demo/manual/_images/login.png")
+    client._export_image_uris_for_send.assert_awaited_once_with(
+        ["viking://resources/demo/manual/_images/login.png"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_materialize_preview_image_refs_keeps_other_images_when_one_fails() -> None:
+    client = object.__new__(VikingClient)
+    client._resolve_start_directory = AsyncMock(return_value="viking://resources/demo/manual")
+    client.stat = AsyncMock(side_effect=[{}, {"isDir": False, "name": "ok.png"}])
+    client._export_image_uris_for_send = AsyncMock(return_value=["![ok](send://ok.png)"])
+
+    rendered = await client.materialize_preview_image_refs(
+        "![缺失](./_images/missing.png)\n![可用](./_images/ok.png)",
+        "viking://resources/demo/manual/page_1.md",
+    )
+
+    assert "![缺失](./_images/missing.png)" in rendered
+    assert "![可用](send://ok.png)" in rendered
+    client._export_image_uris_for_send.assert_awaited_once_with(
+        ["viking://resources/demo/manual/_images/ok.png"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_export_referenced_images_prefers_nearby_human_readable_caption(tmp_path) -> None:
     client = object.__new__(VikingClient)
     client._resolve_image_asset_uri = AsyncMock(

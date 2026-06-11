@@ -67,3 +67,53 @@ def test_load_server_config_preserves_supported_fields(tmp_path):
     assert config.bot_api_url == "http://localhost:19999"
     assert config.telemetry.prometheus.enabled is True
     assert config.encryption_enabled is True
+
+
+def test_load_server_config_inherits_public_bot_account_from_bot_ov_server(tmp_path):
+    config_path = tmp_path / "ov.conf"
+    config_path.write_text(
+        json.dumps(
+            {
+                "server": {
+                    "root_api_key": "root-key",
+                    "public_bot": {"enabled": True},
+                },
+                "bot": {
+                    "ov_server": {
+                        "account_id": "XR-A",
+                        "agent_id": "guest-agent",
+                    }
+                },
+            }
+        )
+    )
+
+    config = load_server_config(str(config_path))
+
+    assert config.public_bot.account_id == "XR-A"
+    assert config.public_bot.agent_id == "guest-agent"
+
+
+def test_load_server_config_rejects_mismatched_public_bot_account(tmp_path):
+    config_path = tmp_path / "ov.conf"
+    config_path.write_text(
+        json.dumps(
+            {
+                "server": {
+                    "root_api_key": "root-key",
+                    "public_bot": {
+                        "enabled": True,
+                        "account_id": "guest-account",
+                    },
+                },
+                "bot": {
+                    "ov_server": {
+                        "account_id": "XR-A",
+                    }
+                },
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="server\\.public_bot\\.account_id must match"):
+        load_server_config(str(config_path))

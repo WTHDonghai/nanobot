@@ -119,8 +119,10 @@ def load_server_config(config_path: Optional[str] = None) -> ServerConfig:
     if not isinstance(bot_ov_server, dict):
         bot_ov_server = {}
 
+    configured_public_bot_data: dict = {}
     public_bot_data = server_data.get("public_bot")
     if isinstance(public_bot_data, dict):
+        configured_public_bot_data = dict(public_bot_data)
         public_bot_data = dict(public_bot_data)
         public_bot_data.setdefault("account_id", bot_ov_server.get("account_id", "default"))
         public_bot_data.setdefault("agent_id", bot_ov_server.get("agent_id", "default"))
@@ -134,6 +136,21 @@ def load_server_config(config_path: Optional[str] = None) -> ServerConfig:
             f"Invalid server config in {path}:\n"
             f"{format_validation_error(root_model=ServerConfig, error=e, path_prefix='server')}"
         ) from e
+
+    bot_account_id = str(bot_ov_server.get("account_id", "") or "").strip()
+    public_account_id = str(config.public_bot.account_id or "").strip()
+    if (
+        config.public_bot.enabled
+        and bot_account_id
+        and "account_id" in configured_public_bot_data
+        and public_account_id != bot_account_id
+    ):
+        raise ValueError(
+            "Invalid server config: server.public_bot.account_id must match "
+            "bot.ov_server.account_id when public bot access is enabled. "
+            f"Got server.public_bot.account_id={public_account_id!r} and "
+            f"bot.ov_server.account_id={bot_account_id!r}."
+        )
 
     return config.model_copy(update={"encryption_enabled": encryption_enabled})
 

@@ -180,6 +180,10 @@ async def proxy_resource_preview(
         if token:
             claims = verify_resource_preview_token(token, secret=preview_secret, expected_uri=uri)
             if claims.account_id != ctx.account_id:
+                logger.warning(
+                    "Rejected resource preview for account mismatch: "
+                    f"token_account={claims.account_id} request_account={ctx.account_id} uri={uri}"
+                )
                 raise HTTPException(
                     status_code=403,
                     detail="Resource preview belongs to another account",

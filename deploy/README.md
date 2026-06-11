@@ -90,7 +90,7 @@ PY_DEPS_IMAGE=openviking-py-deps:uvlock-server-20260401 \
 ADMIN_DEPS_IMAGE=openviking-admin-deps:npmlock-20260401 \
 IMAGE_NAME=openviking-server \
 BUILD_TARGET=server-runtime \
-./scripts/build-docker.sh 1.2.0
+./scripts/build-docker.sh 1.2.2
 ```
 
 ### 构建 `vikingbot`
@@ -101,7 +101,7 @@ BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
 BOT_PY_DEPS_IMAGE=vikingbot-py-deps:uvlock-bot-20260401 \
 IMAGE_NAME=vikingbot \
 BUILD_TARGET=bot-runtime \
-./scripts/build-docker.sh 1.2.0
+./scripts/build-docker.sh 1.2.2
 ```
 
 ### 日常发版

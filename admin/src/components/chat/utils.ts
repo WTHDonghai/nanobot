@@ -115,22 +115,39 @@ export const inferIterationCountFromSteps = (steps?: string[]): number | undefin
 };
 
 export const rewriteBotImageUris = (value: string, serverUrl: string): string => {
-  if (!value || !serverUrl || !value.includes('send://')) return value;
+  if (!value || !serverUrl || (!value.includes('send://') && !value.includes('/bot/v1/images/'))) return value;
 
   const base = serverUrl.replace(/\/+$/, '');
   const toImageUrl = (filename: string) => `${base}/bot/v1/images/${filename}`;
+  const normalizeBotImageUrl = (ref: string) => {
+    try {
+      const url = new URL(ref, base);
+      if (url.pathname.startsWith('/bot/v1/images/')) {
+        return `${base}${url.pathname}${url.search}${url.hash}`;
+      }
+    } catch {
+      return ref;
+    }
+    return ref;
+  };
 
   const markdownRewritten = value.replace(
-    /!\[([^\]]*)\]\((send:\/\/[^)\s]+)\)/g,
+    /!\[([^\]]*)\]\(((?:send:\/\/|https?:\/\/|\/bot\/v1\/images\/)[^)\s]+)\)/g,
     (_match, alt: string, ref: string) => {
-      const filename = ref.slice('send://'.length);
-      return `![${alt}](${toImageUrl(filename)})`;
+      if (ref.startsWith('send://')) {
+        const filename = ref.slice('send://'.length);
+        return `![${alt}](${toImageUrl(filename)})`;
+      }
+      return `![${alt}](${normalizeBotImageUrl(ref)})`;
     },
   );
 
   return markdownRewritten.replace(
-    /send:\/\/[^\s)>"']+/g,
+    /send:\/\/[^\s)>"']+|https?:\/\/[^\s)>"']+\/bot\/v1\/images\/[^\s)>"']+|\/bot\/v1\/images\/[^\s)>"']+/g,
     (ref) => {
+      if (!ref.startsWith('send://')) {
+        return normalizeBotImageUrl(ref);
+      }
       const filename = ref.slice('send://'.length);
       const alt = filename.replace(/\.[^.]+$/, '');
       return `![${alt}](${toImageUrl(filename)})`;
