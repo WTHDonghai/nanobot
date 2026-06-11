@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from vikingbot.config.schema import CapabilityProfile, Config
+from vikingbot.config.schema import Config
 from vikingbot.mcp.bid_material_server import BidMaterialMCPServer
 from vikingbot.mcp.knowledge_server import KnowledgeMCPServer
 from vikingbot.services.bid_material import EvidencePack
@@ -217,9 +217,8 @@ async def test_knowledge_mcp_initialize_and_tools_list_is_domain_neutral() -> No
 
 
 @pytest.mark.asyncio
-async def test_knowledge_mcp_ignores_application_profile_tools() -> None:
+async def test_knowledge_mcp_stays_domain_neutral_without_application_profile() -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.BID_MATERIAL
     server = KnowledgeMCPServer(
         config=config,
         explorer=FakeOpenVikingExplorerService(),
@@ -272,7 +271,7 @@ async def test_bid_material_mcp_alias_keeps_profile_tools() -> None:
         {"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}}
     )
 
-    assert config.agents.capability_profile == CapabilityProfile.KNOWLEDGE_BASE
+    assert not hasattr(config.agents, "capability_profile")
     assert initialize["result"]["serverInfo"]["name"] == "vikingbot-bid-material"
     assert resources["result"]["resources"][0]["name"] == "bid-material-root"
     assert {

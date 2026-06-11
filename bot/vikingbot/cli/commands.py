@@ -460,6 +460,7 @@ def prepare_channel(
             enabled=True,
             port=openapi_port,
             api_key="",  # No auth required by default
+            base_url=channels.public_base_url,
         )
         openapi_channel = OpenAPIChannel(
             openapi_config,

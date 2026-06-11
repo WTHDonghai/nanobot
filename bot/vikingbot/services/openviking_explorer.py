@@ -101,7 +101,7 @@ class OpenVikingExplorerService:
                 for _, resource in sorted(
                     enumerate(resources),
                     key=lambda item: (
-                        self._resource_kind_rank(query, item[1]),
+                        self._resource_kind_rank(item[1]),
                         -self._resource_score(item[1]),
                         item[0],
                     ),
@@ -431,30 +431,13 @@ class OpenVikingExplorerService:
         except (TypeError, ValueError):
             return 0.0
 
-    @staticmethod
-    def _is_image_focused_query(query: str) -> bool:
-        normalized = str(query or "").strip().lower()
-        if not normalized:
-            return False
-        zh_terms = ("图片", "照片", "截图", "图示", "图表", "配图", "示意图")
-        en_terms = ("screenshot", "image", "photo", "figure", "diagram", "chart")
-        return any(term in query for term in zh_terms) or any(term in normalized for term in en_terms)
-
     @classmethod
-    def _resource_kind_rank(cls, query: str, resource: dict[str, Any]) -> int:
+    def _resource_kind_rank(cls, resource: dict[str, Any]) -> int:
+        """Keep resource types explicit without inferring user intent from keywords."""
         uri = str(resource.get("uri") or "")
         is_image = cls._is_image_uri(uri)
         is_summary = is_summary_uri(uri)
         is_generic_summary = is_generic_scope_summary_uri(uri)
-
-        if cls._is_image_focused_query(query):
-            if is_image:
-                return 0
-            if not is_summary:
-                return 1
-            if not is_generic_summary:
-                return 2
-            return 3
 
         if not is_image and not is_summary:
             return 0

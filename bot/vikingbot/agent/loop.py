@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote, unquote
 
 from loguru import logger
 
+from openviking_cli.resource_preview import (
+    RESOURCE_PREVIEW_SECRET_ENV,
+    ResourcePreviewTokenError,
+    create_resource_preview_token,
+)
 from vikingbot.agent.context import ContextBuilder
 from vikingbot.agent.intent_router import (
     IntentRoute,
@@ -25,8 +33,8 @@ from vikingbot.bus.events import InboundMessage, OutboundEventType, OutboundMess
 from vikingbot.bus.queue import MessageBus
 from vikingbot.config import load_config
 from vikingbot.config.schema import BotMode, Config, SessionKey
-from vikingbot.hooks.builtins.openviking_hooks import mirror_messages_to_openviking
 from vikingbot.hooks import HookContext
+from vikingbot.hooks.builtins.openviking_hooks import mirror_messages_to_openviking
 from vikingbot.hooks.manager import hook_manager
 from vikingbot.openviking_mount.uri_utils import is_generic_scope_summary_uri, is_summary_uri
 from vikingbot.providers.base import LLMProvider
@@ -40,6 +48,16 @@ if TYPE_CHECKING:
     from vikingbot.cron.service import CronService
 
 
+@dataclass
+class _SemanticEvidenceSelection:
+    """Relevant sections plus a semantic coverage decision for the request."""
+
+    sections: list[str]
+    coverage: str = "unknown"
+    missing: str = ""
+    next_query: str = ""
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -51,6 +69,16 @@ class AgentLoop:
     4. Executes tool calls
     5. Sends responses back
     """
+
+    SEND_IMAGE_LINE_RE = re.compile(r"!\[[^\]]*\]\((send://[^)\s]+)\)")
+    MARKDOWN_IMAGE_LINE_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+    MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+.+\s*$")
+    NUMBERED_HEADING_RE = re.compile(
+        r"^\s*(?:\*\*)?\s*(?:第[一二三四五六七八九十百千]+[章节节、]|"
+        r"[一二三四五六七八九十]+[、.．]|"
+        r"\d+(?:\.\d+){0,4})\s*[\u4e00-\u9fffA-Za-z][^\n]{0,80}?(?:\*\*)?\s*$"
+    )
+    GROUNDED_HISTORY_ANSWER_TOOL = "answer_from_grounded_history"
 
     def __init__(
         self,
@@ -218,6 +246,7 @@ class AgentLoop:
             send_callback=self.bus.publish_outbound,
             subagent_manager=self.subagents,
             cron_service=self.cron_service,
+            knowledge_base_mode=self.context._is_knowledge_base_mode(),
         )
 
     async def run(self) -> None:
@@ -334,7 +363,9 @@ class AgentLoop:
             if normalized_scope in {"all", "user"}:
                 existing_scope = normalized_scope
             else:
-                raise ValueError(f"Invalid openviking_memory_scope stored on session: {existing_scope}")
+                raise ValueError(
+                    f"Invalid openviking_memory_scope stored on session: {existing_scope}"
+                )
 
         if self._metadata_indicates_shared_session(msg.metadata):
             return "agent"
@@ -403,7 +434,9 @@ class AgentLoop:
         task = asyncio.create_task(_runner())
         self._openviking_sync_tasks[session_name] = task
         task.add_done_callback(
-            lambda finished_task, name=session_name: self._on_openviking_sync_done(name, finished_task)
+            lambda finished_task, name=session_name: self._on_openviking_sync_done(
+                name, finished_task
+            )
         )
 
     async def _sync_pending_messages_to_openviking(self, session_key: SessionKey) -> None:
@@ -412,7 +445,9 @@ class AgentLoop:
         session_lock = self._session_locks.setdefault(session_name, asyncio.Lock())
 
         async with session_lock:
-            session = self.sessions.get_or_create(session_key, skip_heartbeat=session_key.type == "cli")
+            session = self.sessions.get_or_create(
+                session_key, skip_heartbeat=session_key.type == "cli"
+            )
             session_metadata = session.metadata if isinstance(session.metadata, dict) else {}
             openviking_session_id = session_metadata.get("openviking_session_id")
             if not isinstance(openviking_session_id, str) or not openviking_session_id.strip():
@@ -481,6 +516,7 @@ class AgentLoop:
         session_key: SessionKey,
         publish_events: bool = True,
         sender_id: str | None = None,
+        allow_grounded_history_reuse: bool = False,
     ) -> tuple[str | None, list[dict], dict[str, int], int]:
         """
         Run the core agent loop: call LLM, execute tools, repeat until done.
@@ -489,6 +525,8 @@ class AgentLoop:
             messages: Initial message list
             session_key: Session key for tool execution context
             publish_events: Whether to publish ITERATION/REASONING/TOOL_CALL events to the bus
+            allow_grounded_history_reuse: Whether structured reuse of the latest grounded reply
+                is available for this turn.
 
         Returns:
             tuple of (final_content, tools_used)
@@ -496,19 +534,22 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[dict] = []
+        current_turn_evidence_query: str | None = None
         token_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
         }
         has_kb_read_evidence = False
+        has_sufficient_kb_evidence = False
+        selected_evidence_uris: set[str] = set()
+        exhausted_evidence_uris: set[str] = set()
+        coverage_missing = ""
+        coverage_next_query = ""
+        has_grounded_history_candidate = allow_grounded_history_reuse
         trace_enabled = self.context._is_retrieval_mode()
         trace_session = session_key.safe_name()
-        trace_profile = getattr(
-            getattr(getattr(self.context, "config", None), "agents", None),
-            "capability_profile",
-            "unknown",
-        )
+        trace_profile = "knowledge-base" if trace_enabled else "general"
 
         if trace_enabled:
             logger.info(
@@ -530,18 +571,26 @@ class AgentLoop:
                 )
 
             tool_definitions = self.tools.get_definitions()
+            if has_grounded_history_candidate:
+                tool_definitions = [
+                    *tool_definitions,
+                    self._build_grounded_history_answer_tool_definition(),
+                ]
             tool_choice = self._select_tool_choice(
                 iteration=iteration,
                 tools=tool_definitions,
-                has_kb_read_evidence=has_kb_read_evidence,
+                has_sufficient_kb_evidence=has_sufficient_kb_evidence,
             )
             if trace_enabled:
                 logger.info(
                     f"[KB_TRACE] session={trace_session} iteration={iteration}/{self.max_iterations} "
-                    f"tool_choice={tool_choice or 'auto'} "
+                    f"requested_tool_choice={tool_choice or 'auto'} "
                     f"has_concrete_kb_read_evidence={has_kb_read_evidence} "
+                    f"has_sufficient_kb_evidence={has_sufficient_kb_evidence} "
+                    f"has_grounded_history_candidate={has_grounded_history_candidate} "
                     f"available_tools={len(tool_definitions)}"
                 )
+            llm_start_time = time.time()
             response = await self.provider.chat(
                 messages=messages,
                 tools=tool_definitions,
@@ -549,6 +598,7 @@ class AgentLoop:
                 model=self.model,
                 session_id=session_key.safe_name(),
             )
+            llm_duration_ms = (time.time() - llm_start_time) * 1000
             if response.usage:
                 cur_token = response.usage
                 token_usage["prompt_tokens"] += cur_token["prompt_tokens"]
@@ -556,12 +606,27 @@ class AgentLoop:
                 token_usage["total_tokens"] += cur_token["total_tokens"]
 
             if trace_enabled:
+                effective_tool_choice = response.metadata.get("effective_tool_choice")
                 logger.info(
                     f"[KB_TRACE] session={trace_session} iteration={iteration}/{self.max_iterations} "
                     f"llm_response tool_calls={len(response.tool_calls or [])} "
                     f"content_chars={len(response.content or '')} "
-                    f"reasoning_chars={len(response.reasoning_content or '')}"
+                    f"reasoning_chars={len(response.reasoning_content or '')} "
+                    f"duration_ms={llm_duration_ms:.1f} "
+                    f"requested_tool_choice={tool_choice or 'auto'} "
+                    f"effective_tool_choice={effective_tool_choice or 'auto'}"
                 )
+
+            if response.finish_reason == "error":
+                error_message = response.content or "LLM provider returned an error response"
+                logger.error(
+                    f"[LLM_ERROR] session={trace_session} iteration={iteration}/{self.max_iterations} "
+                    f"model={self.model} requested_tool_choice={tool_choice or 'auto'} error={error_message}"
+                )
+                final_content = (
+                    "抱歉，当前模型调用失败，暂时无法完成回答。请检查模型配置或服务端日志后重试。"
+                )
+                break
 
             if publish_events and response.reasoning_content:
                 await self.bus.publish_outbound(
@@ -584,7 +649,7 @@ class AgentLoop:
             elif (
                 publish_events
                 and self.context._is_retrieval_mode()
-                and not has_kb_read_evidence
+                and not has_sufficient_kb_evidence
                 and not response.has_tool_calls
             ):
                 plan_summary = self._summarize_non_tool_kb_response(response.content)
@@ -598,6 +663,49 @@ class AgentLoop:
                     )
 
             if response.has_tool_calls:
+                grounded_history_calls = [
+                    tool_call
+                    for tool_call in response.tool_calls
+                    if tool_call.name == self.GROUNDED_HISTORY_ANSWER_TOOL
+                ]
+                retrieval_calls = [
+                    tool_call
+                    for tool_call in response.tool_calls
+                    if tool_call.name != self.GROUNDED_HISTORY_ANSWER_TOOL
+                ]
+                if (
+                    has_grounded_history_candidate
+                    and grounded_history_calls
+                    and not retrieval_calls
+                ):
+                    answer = grounded_history_calls[0].arguments.get("answer")
+                    if isinstance(answer, str) and answer.strip():
+                        final_content = answer.strip()
+                        if trace_enabled:
+                            logger.info(
+                                f"[KB_TRACE] session={trace_session} "
+                                f"iteration={iteration}/{self.max_iterations} "
+                                "final_answer_from_grounded_history "
+                                f"chars={len(final_content)}"
+                            )
+                        break
+
+                    has_grounded_history_candidate = False
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "The structured grounded-history answer was empty. "
+                                "Retrieve current-turn document evidence now."
+                            ),
+                        }
+                    )
+                    continue
+
+                response.tool_calls = retrieval_calls
+                # Once the model chooses retrieval, require evidence from this turn
+                # instead of falling back to an older grounded reply.
+                has_grounded_history_candidate = False
                 args_list = [tc.arguments for tc in response.tool_calls]
                 tool_call_dicts = [
                     {
@@ -608,7 +716,7 @@ class AgentLoop:
                             "arguments": json.dumps(args),
                         },
                     }
-                    for tc, args in zip(response.tool_calls, args_list)
+                    for tc, args in zip(response.tool_calls, args_list, strict=False)
                 ]
                 messages = self.context.add_assistant_message(
                     messages,
@@ -657,6 +765,8 @@ class AgentLoop:
                     tool_call_index = len(tools_used) + 1
                     logger.info(f"[TOOL_CALL]: {tool_call.name}({args_str[:200]})")
                     logger.info(f"[RESULT]: {str(result)[:600]}")
+                    relevant_evidence_blocks: list[str] = []
+                    evidence_coverage = "none"
 
                     if publish_events:
                         await self.bus.publish_outbound(
@@ -674,12 +784,54 @@ class AgentLoop:
                         arguments=tool_call.arguments,
                         result=result,
                     )
+                    if evidence_ok:
+                        if current_turn_evidence_query is None:
+                            current_turn_evidence_query = await self._build_semantic_evidence_query(
+                                messages, session_key
+                            )
+                        existing_evidence_blocks = (
+                            self._collect_selected_evidence_blocks_from_prompts(
+                                messages[self._current_turn_start_index(messages) :]
+                            )
+                        )
+                        evidence_selection = (
+                            await self._collect_document_evidence_selection_semantic(
+                                current_turn_evidence_query,
+                                [
+                                    {
+                                        "tool_name": tool_call.name,
+                                        "args": args_str,
+                                        "result": result,
+                                        "execute_success": True,
+                                    }
+                                ],
+                                session_key,
+                                existing_evidence_blocks=existing_evidence_blocks,
+                            )
+                        )
+                        evidence_blocks = evidence_selection.sections
+                        if not evidence_blocks:
+                            evidence_ok = False
+                            evidence_reason = "openviking_read_no_relevant_section_for_user_request"
+                        else:
+                            relevant_evidence_blocks = evidence_blocks
+                            coverage = evidence_selection.coverage
+                            if coverage not in {"full", "partial"}:
+                                coverage = "partial"
+                            evidence_coverage = coverage
+                            has_sufficient_kb_evidence = (
+                                has_sufficient_kb_evidence or coverage == "full"
+                            )
+                            if coverage == "partial":
+                                coverage_missing = evidence_selection.missing
+                                coverage_next_query = evidence_selection.next_query
                     if trace_enabled:
                         logger.info(
                             f"[KB_TRACE] session={trace_session} tool_call#{tool_call_index} "
                             f"iteration={iteration}/{self.max_iterations} name={tool_call.name} "
                             f"duration_ms={tool_execute_duration:.1f} "
-                            f"evidence_ok={evidence_ok} evidence_reason={evidence_reason}"
+                            f"evidence_ok={evidence_ok} coverage={evidence_coverage} "
+                            f"evidence_reason={evidence_reason}"
                         )
                         result_summary = self._summarize_tool_result_for_trace(
                             tool_call.name, tool_call.arguments, result
@@ -702,12 +854,81 @@ class AgentLoop:
                     }
                     tools_used.append(tool_used_dict)
                     has_kb_read_evidence = has_kb_read_evidence or evidence_ok
+                    if evidence_ok:
+                        evidence_uri = str(tool_call.arguments.get("uri") or "").strip()
+                        if evidence_uri:
+                            selected_evidence_uris.add(evidence_uri)
+                            if not has_sufficient_kb_evidence:
+                                exhausted_evidence_uris.add(evidence_uri)
+                        if relevant_evidence_blocks:
+                            messages.append(
+                                {
+                                    "role": "system",
+                                    "content": self._build_relevant_evidence_prompt(
+                                        self._extract_user_text(messages),
+                                        relevant_evidence_blocks,
+                                        source_uri=evidence_uri,
+                                    ),
+                                }
+                            )
+                    elif evidence_reason == "openviking_read_no_relevant_section_for_user_request":
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "The last openviking_read result was a concrete document, "
+                                    "but no section relevant to the current user request was found "
+                                    f"({evidence_reason}). Continue retrieval instead of answering "
+                                    "from that unrelated document text."
+                                ),
+                            }
+                        )
 
-                messages.append(
-                    {"role": "system", "content": self.context.build_tool_reflection_prompt()}
-                )
+                if has_sufficient_kb_evidence:
+                    if trace_enabled:
+                        logger.info(
+                            f"[KB_TRACE] session={trace_session} iteration={iteration}/{self.max_iterations} "
+                            "evidence_state=sufficient "
+                            f"selected_source_count={len(selected_evidence_uris)} "
+                            "action=answer"
+                        )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": self._build_answer_or_continue_prompt(
+                                self._extract_user_text(messages),
+                                evidence_source_count=len(selected_evidence_uris),
+                            ),
+                        }
+                    )
+                elif has_kb_read_evidence:
+                    if trace_enabled:
+                        logger.info(
+                            f"[KB_TRACE] session={trace_session} iteration={iteration}/{self.max_iterations} "
+                            "evidence_state=partial action=continue_retrieval "
+                            f"selected_source_count={len(selected_evidence_uris)}"
+                        )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": self._build_partial_coverage_continue_prompt(
+                                user_request=self._extract_user_text(messages),
+                                missing=coverage_missing,
+                                next_query=coverage_next_query,
+                                exhausted_uris=exhausted_evidence_uris,
+                                progress_summary=self._summarize_kb_tool_state(messages),
+                            ),
+                        }
+                    )
+                else:
+                    messages.append(
+                        {"role": "system", "content": self.context.build_tool_reflection_prompt()}
+                    )
             else:
-                if self.context._is_retrieval_mode() and not has_kb_read_evidence:
+                if self.context._is_retrieval_mode() and not has_sufficient_kb_evidence:
+                    # Grounded-history reuse requires the structured answer tool.
+                    # Plain text without current-turn evidence remains insufficient.
+                    has_grounded_history_candidate = False
                     if trace_enabled:
                         logger.info(
                             f"[KB_TRACE] session={trace_session} iteration={iteration}/{self.max_iterations} "
@@ -738,9 +959,24 @@ class AgentLoop:
                     )
                 break
 
-        if final_content is None or (
-            isinstance(final_content, str) and not final_content.strip()
-        ):
+        if final_content is None or (isinstance(final_content, str) and not final_content.strip()):
+            if self.context._is_retrieval_mode() and has_kb_read_evidence:
+                if trace_enabled:
+                    logger.info(
+                        f"[KB_TRACE] session={trace_session} empty_final_with_selected_evidence "
+                        "action=answer_from_selected_evidence"
+                    )
+                final_content = await self._compose_answer_from_selected_evidence(
+                    messages,
+                    session_key,
+                )
+                if final_content and trace_enabled:
+                    logger.info(
+                        f"[KB_TRACE] session={trace_session} selected_evidence_answer "
+                        f"chars={len(final_content)}"
+                    )
+
+        if final_content is None or (isinstance(final_content, str) and not final_content.strip()):
             if iteration >= self.max_iterations:
                 if trace_enabled:
                     trace_reason = (
@@ -749,10 +985,10 @@ class AgentLoop:
                         else "no_concrete_kb_read_evidence"
                     )
                     logger.info(
-                        f"[KB_TRACE] session={trace_session} iteration_limit action=fallback "
+                        f"[KB_TRACE] session={trace_session} iteration_limit action=terminal_response "
                         f"reason={trace_reason} tool_messages={self._count_tool_messages(messages)}"
                     )
-                final_content = self._build_iteration_limit_fallback(
+                final_content = self._build_iteration_limit_terminal_response(
                     messages=messages,
                     has_kb_read_evidence=has_kb_read_evidence,
                 )
@@ -760,8 +996,15 @@ class AgentLoop:
                 final_content = "I've completed processing but have no response to give."
 
         if final_content:
+            finalize_start_time = time.time()
             final_content = await self._finalize_kb_response(final_content, session_key, messages)
             final_content = self._normalize_final_output_text(final_content)
+            if trace_enabled:
+                logger.info(
+                    f"[KB_TRACE] session={trace_session} finalize_response "
+                    f"duration_ms={(time.time() - finalize_start_time) * 1000:.1f} "
+                    f"chars={len(final_content or '')}"
+                )
 
         return final_content, tools_used, token_usage, iteration
 
@@ -781,27 +1024,6 @@ class AgentLoop:
         error_reason = self._classify_tool_error_result(result_text)
         if error_reason:
             return False, error_reason
-
-        if (
-            self.context._is_bid_material_mode()
-            and tool_name
-            in {
-                "search_certificates",
-                "search_solution_materials",
-                "collect_bid_evidence",
-            }
-        ):
-            if not result_text.strip():
-                return False, "bid_material_tool_returned_empty_result"
-            if "Items: none" in result_text:
-                return False, "bid_material_tool_returned_items_none"
-            match = re.search(r"Evidence items:\s*(\d+)", result_text)
-            if not match:
-                return False, "bid_material_tool_missing_evidence_items_count"
-            evidence_items = int(match.group(1))
-            if evidence_items <= 0:
-                return False, "bid_material_tool_evidence_items_zero"
-            return True, f"bid_material_tool_returned_evidence_items={evidence_items}"
 
         if tool_name != "openviking_read":
             if tool_name in {"openviking_search", "openviking_glob", "openviking_list"}:
@@ -900,15 +1122,6 @@ class AgentLoop:
             image_refs = len(re.findall(r"!\[[^\]]*\]\([^)]+\)", result_text))
             lines.append(f"read_uri={uri or '(missing)'} level={level} image_refs={image_refs}")
 
-        if tool_name in {
-            "search_certificates",
-            "search_solution_materials",
-            "collect_bid_evidence",
-        }:
-            evidence_match = re.search(r"Evidence items:\s*(\d+)", result_text)
-            if evidence_match:
-                lines.append(f"evidence_items={evidence_match.group(1)}")
-
         fragments = cls._extract_text_fragments_for_trace(
             result_text,
             max_items=max_items,
@@ -969,9 +1182,7 @@ class AgentLoop:
         """Extract readable fragment previews from a tool result."""
         normalized = text.replace("\r\n", "\n").strip()
         blocks = [
-            block.strip()
-            for block in re.split(r"\n\s*\n+", normalized)
-            if block and block.strip()
+            block.strip() for block in re.split(r"\n\s*\n+", normalized) if block and block.strip()
         ]
         if len(blocks) <= 1:
             blocks = [line.strip() for line in normalized.splitlines() if line.strip()]
@@ -1016,31 +1227,149 @@ class AgentLoop:
         return "\n".join(lines[-6:]) if lines else "No KB tool evidence collected yet."
 
     @staticmethod
-    def _extract_user_text(messages: list[dict]) -> str:
-        """Collect user-authored text for lightweight reply-language detection."""
+    def _extract_message_text(content: Any) -> str:
+        """Extract text from an OpenAI-style message content payload."""
+        if isinstance(content, str):
+            return content.strip()
+
         texts: list[str] = []
-        for message in messages:
-            if message.get("role") != "user":
-                continue
-
-            content = message.get("content")
-            if isinstance(content, str):
-                text = content.strip()
-                if text:
-                    texts.append(text)
-                continue
-
-            if not isinstance(content, list):
-                continue
-
+        if isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict) or block.get("type") != "text":
                     continue
                 text = str(block.get("text") or "").strip()
-                if text:
+                if text and not text.startswith("image saved to "):
                     texts.append(text)
 
-        return "\n".join(texts)
+        return "\n".join(texts).strip()
+
+    @classmethod
+    def _latest_user_message_index(cls, messages: list[dict]) -> int | None:
+        """Return the latest user message index, ignoring empty user-memory payloads."""
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if message.get("role") != "user":
+                continue
+            if cls._extract_message_text(message.get("content")):
+                return index
+        return None
+
+    @classmethod
+    def _current_turn_start_index(cls, messages: list[dict]) -> int:
+        """Return the index immediately after the latest user message."""
+        latest_user_index = cls._latest_user_message_index(messages)
+        return 0 if latest_user_index is None else latest_user_index + 1
+
+    @classmethod
+    def _extract_user_text(cls, messages: list[dict]) -> str:
+        """Extract the latest user-authored text for the current turn."""
+        latest_user_index = cls._latest_user_message_index(messages)
+        if latest_user_index is None:
+            return ""
+        return cls._extract_message_text(messages[latest_user_index].get("content"))
+
+    @classmethod
+    def _is_user_memory_payload(cls, text: str) -> bool:
+        """Detect synthetic user-memory messages inserted before the real user turn."""
+        stripped = str(text or "").lstrip()
+        return stripped.startswith("## Current Time:") or stripped.startswith(
+            "## Long term memory about this conversation."
+        )
+
+    @classmethod
+    def _recent_conversation_text_for_followup(
+        cls, messages: list[dict], latest_user_index: int, *, max_messages: int = 4
+    ) -> str:
+        """Collect recent user/assistant text, excluding tool chatter and synthetic memory."""
+        snippets: list[str] = []
+        for message in reversed(messages[:latest_user_index]):
+            role = message.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            if role == "assistant" and message.get("tool_calls"):
+                continue
+            text = cls._extract_message_text(message.get("content"))
+            if not text or cls._is_user_memory_payload(text):
+                continue
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) > 160:
+                text = f"{text[:157]}..."
+            snippets.append(text)
+            if len(snippets) >= max_messages:
+                break
+        snippets.reverse()
+        return "\n".join(snippets).strip()
+
+    @classmethod
+    def _build_evidence_query_rewrite_prompt(cls, messages: list[dict]) -> str:
+        """Build a compact prompt that asks the model to resolve follow-up ellipsis."""
+        latest_user_index = cls._latest_user_message_index(messages)
+        latest_text = cls._extract_user_text(messages)
+        context_text = ""
+        if latest_user_index is not None:
+            context_text = cls._recent_conversation_text_for_followup(
+                messages,
+                latest_user_index,
+                max_messages=6,
+            )
+        return (
+            "Rewrite the latest user message into one standalone document-retrieval query.\n"
+            "Use recent chat context only to resolve pronouns or omitted nouns. "
+            "If the latest message is already standalone, return it unchanged. "
+            "Do not answer the question. Do not add facts that are not implied by the chat. "
+            "Return only the rewritten query text.\n\n"
+            f"Recent chat context:\n{context_text or '(none)'}\n\n"
+            f"Latest user message:\n{latest_text}"
+        )
+
+    async def _build_semantic_evidence_query(
+        self, messages: list[dict], session_key: SessionKey
+    ) -> str:
+        """Ask the model to resolve contextual turns without local heuristics."""
+        latest_user_text = self._extract_user_text(messages)
+        latest_user_index = self._latest_user_message_index(messages)
+        if latest_user_index is None:
+            return latest_user_text
+
+        recent_context = self._recent_conversation_text_for_followup(
+            messages,
+            latest_user_index,
+            max_messages=6,
+        )
+        if not recent_context:
+            return latest_user_text
+
+        try:
+            response = await self.provider.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You rewrite chat follow-ups into concise search queries for document "
+                            "retrieval. Return only the rewritten query."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": self._build_evidence_query_rewrite_prompt(messages),
+                    },
+                ],
+                model=self.fast_model,
+                max_tokens=128,
+                temperature=0,
+                session_id=f"{session_key.safe_name()}:kb-query-rewrite",
+            )
+        except Exception as exc:
+            logger.debug(f"[KB_TRACE] query rewrite unavailable; using latest user text: {exc}")
+            return latest_user_text
+
+        rewritten = str(response.content or "").strip()
+        rewritten = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", rewritten).strip()
+        if not rewritten:
+            return latest_user_text
+        if len(rewritten) > 240:
+            rewritten = rewritten[:240].strip()
+        return rewritten
 
     @classmethod
     def _detect_reply_language(cls, messages: list[dict]) -> str:
@@ -1052,72 +1381,168 @@ class AgentLoop:
             return "zh-CN"
         return "en"
 
-    def _build_iteration_limit_fallback(
+    def _build_iteration_limit_terminal_response(
         self, messages: list[dict], has_kb_read_evidence: bool
     ) -> str:
-        """Return a user-facing fallback when the loop hits the iteration limit."""
+        """Return the terminal response when retrieval hits the iteration limit."""
         if not self.context._is_retrieval_mode():
             return f"Reached {self.max_iterations} iterations without completion."
 
         language = self._detect_reply_language(messages)
-        if self.context._is_bid_material_mode():
-            if has_kb_read_evidence:
-                fallbacks = {
-                    "zh-CN": "抱歉，我暂时还没能根据现有投标资料整理出明确答复。需要的话，我可以继续帮您缩小范围或补充证据包。",
-                    "ja": "申し訳ありません。現在の入札資料だけでは明確な回答をまとめきれませんでした。必要であれば、対象範囲をさらに絞って証拠を集め直せます。",
-                    "en": "Sorry, I still couldn't produce a clear answer from the current bidding materials. If helpful, I can narrow the scope and collect a tighter evidence pack.",
-                }
-            else:
-                fallbacks = {
-                    "zh-CN": "抱歉，我暂时没有在当前投标知识库中找到足够依据来回答这个问题。需要的话，您可以进一步缩小范围，比如具体资质、方案主题、产品模块或参数点。",
-                    "ja": "申し訳ありません。現在の入札ナレッジベースでは、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば、資格証明、提案テーマ、製品モジュール、または確認したい仕様をもう少し具体的に教えてください。",
-                    "en": "Sorry, I couldn't find enough supporting information in the current bidding knowledge base to answer this clearly. If helpful, you can narrow it down to a specific certificate, solution topic, product module, or parameter.",
-                }
-            return fallbacks.get(language, fallbacks["en"])
-
-        if self.context._is_technical_support_mode():
-            if has_kb_read_evidence:
-                fallbacks = {
-                    "zh-CN": "抱歉，我暂时还没能根据现有XMS文档整理出明确答复。需要的话，您可以告诉我更具体的模块、菜单、报错或操作场景。",
-                    "ja": "申し訳ありません。現在のXMS文書だけでは明確な回答をまとめきれませんでした。必要であれば、対象のモジュール、メニュー、エラー、または操作シナリオをもう少し具体的に教えてください。",
-                    "en": "Sorry, I still couldn't produce a clear answer from the current XMS documentation. If helpful, you can narrow the scope to a module, menu, error, or support scenario.",
-                }
-            else:
-                fallbacks = {
-                    "zh-CN": "抱歉，我暂时没有在当前XMS知识库中找到足够依据来回答这个问题。需要的话，您可以进一步缩小范围，比如具体模块、菜单、报错或操作场景。",
-                    "ja": "申し訳ありません。現在のXMSナレッジベースでは、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば、対象のモジュール、メニュー、エラー、または操作シナリオをもう少し具体的に教えてください。",
-                    "en": "Sorry, I couldn't find enough supporting information in the current XMS knowledge base to answer this clearly. If helpful, you can narrow it down to a specific module, menu, error, or support scenario.",
-                }
-            return fallbacks.get(language, fallbacks["en"])
-
         if has_kb_read_evidence:
-            fallbacks = {
+            responses = {
                 "zh-CN": "抱歉，我暂时还没能根据现有资料整理出明确答复。需要的话，您可以告诉我更具体的文档范围、模块或参数点。",
                 "ja": "申し訳ありません。現在の資料だけでは明確な回答をまとめきれませんでした。必要であれば、対象の文書範囲やモジュール、確認したい項目をもう少し具体的に教えてください。",
                 "en": "Sorry, I still couldn't produce a clear answer from the current materials. If helpful, you can narrow the scope to a document, module, or parameter.",
             }
         else:
-            fallbacks = {
+            responses = {
                 "zh-CN": "抱歉，我暂时没有在当前知识库中找到足够依据来回答这个问题。需要的话，您可以进一步缩小范围，比如具体文档、模块、流程或参数点。",
                 "ja": "申し訳ありません。現在のナレッジベースでは、この質問を明確に裏付ける情報を見つけられませんでした。必要であれば、対象の文書、モジュール、手順、または確認したい仕様をもう少し具体的に教えてください。",
                 "en": "Sorry, I couldn't find enough supporting information in the current knowledge base to answer this clearly. If helpful, you can narrow it down to a specific document, module, process, or parameter.",
             }
-        return fallbacks.get(language, fallbacks["en"])
+        return responses.get(language, responses["en"])
+
+    async def _compose_answer_from_selected_evidence(
+        self,
+        messages: list[dict],
+        session_key: SessionKey,
+    ) -> str | None:
+        """Answer from already selected evidence without running more retrieval tools."""
+        current_turn_messages = messages[self._current_turn_start_index(messages) :]
+        evidence_blocks = self._collect_selected_evidence_blocks_from_prompts(
+            current_turn_messages,
+        )
+        if not evidence_blocks:
+            return None
+
+        final_messages = [
+            {
+                "role": "system",
+                "content": self.context.build_retrieval_final_response_system_prompt(),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Relevant evidence has already been selected. Answer the user directly "
+                    "using only that evidence. "
+                    "If it supports only part of the request, answer that part and briefly say "
+                    "the current documentation does not cover the remaining details.\n\n"
+                    f"{self._build_relevant_evidence_prompt(self._extract_user_text(messages), evidence_blocks)}"
+                ),
+            },
+        ]
+        try:
+            response = await self.provider.chat(
+                messages=final_messages,
+                model=self.model,
+                session_id=f"{session_key.safe_name()}:kb-selected-evidence-answer",
+            )
+        except Exception as exc:
+            logger.debug(f"[KB_TRACE] selected evidence answer failed: {exc}")
+            return None
+        return str(response.content or "").strip() or None
+
+    @staticmethod
+    def _build_answer_or_continue_prompt(user_request: str, *, evidence_source_count: int) -> str:
+        """Prompt the model to answer from semantically sufficient evidence."""
+        return (
+            "A separate semantic coverage assessment found that the selected document evidence fully "
+            "covers the current request. Answer directly using only the selected evidence. Do not add "
+            "facts, explanations, examples, causes, effects, or procedures that the evidence does not "
+            "explicitly state. "
+            f"Selected evidence source count: {evidence_source_count}.\n\n"
+            f"Current user request:\n{user_request.strip()}"
+        )
+
+    def _build_partial_coverage_continue_prompt(
+        self,
+        *,
+        user_request: str,
+        missing: str,
+        next_query: str,
+        exhausted_uris: set[str],
+        progress_summary: str,
+    ) -> str:
+        """Require another retrieval step after semantic coverage is only partial."""
+        exhausted = "\n".join(f"- {uri}" for uri in sorted(exhausted_uris)) or "(none)"
+        return (
+            "A separate semantic coverage assessment found that the selected evidence is relevant but "
+            "does not fully cover the current request. Do not answer yet. Call the next retrieval tool "
+            "directly. Do not reread an exhausted URI unless the tool arguments request materially "
+            "different content such as document images.\n\n"
+            f"Current user request:\n{user_request.strip()}\n\n"
+            f"Unsupported or missing scope:\n{missing or '(not specified)'}\n\n"
+            f"Suggested next search query:\n{next_query or '(derive one semantically)'}\n\n"
+            f"Exhausted URIs for this request:\n{exhausted}\n\n"
+            f"Retrieval progress:\n{progress_summary}"
+        )
 
     def _select_tool_choice(
         self,
         iteration: int,
         tools: list[dict] | None,
-        has_kb_read_evidence: bool,
+        has_sufficient_kb_evidence: bool,
     ) -> str | None:
         """Select tool-choice mode for the current LLM turn."""
-        if (
-            self.context._is_retrieval_mode()
-            and not has_kb_read_evidence
-            and tools
-        ):
+        if self.context._is_retrieval_mode() and not has_sufficient_kb_evidence and tools:
             return "required"
         return None
+
+    @classmethod
+    def _latest_assistant_reply_has_document_evidence(cls, session: Any) -> bool:
+        """Whether the latest visible assistant reply followed a concrete document read."""
+        for message in reversed(getattr(session, "messages", [])):
+            if message.get("skip_history"):
+                continue
+            if message.get("role") != "assistant":
+                return False
+            tools_used = message.get("tools_used")
+            return isinstance(tools_used, list) and any(
+                isinstance(tool, dict) and cls._is_concrete_read_tool_record(tool)
+                for tool in tools_used
+            )
+        return False
+
+    @classmethod
+    def _build_grounded_history_reuse_prompt(cls) -> str:
+        """Authorize a narrow direct-answer path from a verified grounded reply."""
+        return (
+            "Runtime context confirms that the most recent assistant reply was produced after "
+            "reading a concrete document. "
+            "It may be reused as evidence only for the current request.\n"
+            f"- If that reply directly and completely answers the current request, call "
+            f"{cls.GROUNDED_HISTORY_ANSWER_TOOL} with the complete user-facing final answer.\n"
+            "- If the request asks for newer, broader, more detailed, or different information, "
+            "or the prior reply is incomplete or conflicting, call the next retrieval tool now.\n"
+            "- Choose exactly one path. Do not output a prose-only decision or progress note."
+        )
+
+    @classmethod
+    def _build_grounded_history_answer_tool_definition(cls) -> dict[str, Any]:
+        """Build the virtual tool used for structured grounded-history reuse."""
+        return {
+            "type": "function",
+            "function": {
+                "name": cls.GROUNDED_HISTORY_ANSWER_TOOL,
+                "description": (
+                    "Return the complete final answer using only the latest runtime-verified "
+                    "grounded assistant reply. Use this only when it directly and completely "
+                    "answers the current request."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "answer": {
+                            "type": "string",
+                            "description": "The complete user-facing final answer.",
+                        }
+                    },
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            },
+        }
 
     @staticmethod
     def _build_tool_plan_summary(tool_calls: list) -> str | None:
@@ -1143,16 +1568,9 @@ class AgentLoop:
             args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
             name = str(getattr(tool_call, "name", "") or "")
 
-            if name == "search_certificates":
-                query = _clean_text(args.get("query") or "相关证书")
-                plan_steps.append(f"先检索证书材料：{query}")
-            elif name == "search_solution_materials":
-                query = _clean_text(args.get("query") or "相关方案")
-                plan_steps.append(f"先检索方案材料：{query}")
-            elif name == "collect_bid_evidence":
-                target = _clean_text(args.get("section_name") or "当前章节")
-                plan_steps.append(f"先整理章节证据包：{target}")
-            elif name == "openviking_search":
+            if name == AgentLoop.GROUNDED_HISTORY_ANSWER_TOOL:
+                continue
+            if name == "openviking_search":
                 query = _clean_text(
                     args.get("query") or args.get("keyword") or args.get("q") or "当前问题"
                 )
@@ -1240,6 +1658,557 @@ class AgentLoop:
         return "\n".join(result_lines)
 
     @classmethod
+    def _clean_section_title(cls, title: str | None, *, keep_number: bool = False) -> str:
+        """Remove Markdown/bold markup and optional list numbering from a heading."""
+        text = str(title or "").strip()
+        text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text)
+        text = text.replace("**", "")
+        text = re.sub(r"\s+", " ", text).strip()
+        if not keep_number:
+            text = re.sub(
+                r"^(?:第[一二三四五六七八九十百千]+[章节节、]\s*|"
+                r"[一二三四五六七八九十]+[、.．]\s*|"
+                r"\d+(?:\.\d+){0,4}\s*)",
+                "",
+                text,
+            ).strip()
+        return text
+
+    @classmethod
+    def _is_toc_heading_candidate(cls, line: str, previous_lines: list[str]) -> bool:
+        """Detect imported TOC entries such as '2.1宾客状态3'."""
+        stripped = line.strip().replace("**", "")
+        if not re.match(r"^\d+(?:\.\d+){0,4}[\u4e00-\u9fffA-Za-z]+[0-9]+$", stripped):
+            return False
+        recent = [item.strip().replace("**", "") for item in previous_lines[-5:] if item.strip()]
+        return any(item in {"目录", "目 录", "contents", "content"} for item in recent)
+
+    @classmethod
+    def _heading_level(cls, line: str) -> int:
+        """Infer a comparable section level from Markdown or numbered headings."""
+        markdown_match = re.match(r"^\s{0,3}(#{1,6})\s+", line)
+        if markdown_match:
+            return len(markdown_match.group(1))
+
+        cleaned = line.strip().replace("**", "")
+        number_match = re.match(r"^(\d+(?:\.\d+){0,4})", cleaned)
+        if number_match:
+            return len(number_match.group(1).split("."))
+        if re.match(
+            r"^(?:第[一二三四五六七八九十百千]+[章节节、]|[一二三四五六七八九十]+[、.．])", cleaned
+        ):
+            return 1
+        return 1
+
+    @classmethod
+    def _is_section_heading_line(cls, line: str, previous_lines: list[str]) -> bool:
+        """Return True for Markdown and imported numbered headings."""
+        if not line or not line.strip():
+            return False
+        if cls.MARKDOWN_HEADING_RE.match(line):
+            return True
+        stripped = line.strip()
+        if len(stripped) > 120:
+            return False
+        if cls._is_toc_heading_candidate(stripped, previous_lines):
+            return False
+        return bool(cls.NUMBERED_HEADING_RE.match(stripped))
+
+    @classmethod
+    def _split_markdown_sections(cls, content: str | None) -> list[dict[str, Any]]:
+        """Split document text into hierarchical sections with child subsections included."""
+        if not isinstance(content, str) or not content.strip():
+            return []
+
+        lines = content.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        headings: list[dict[str, Any]] = []
+        previous_lines: list[str] = []
+        for index, line in enumerate(lines):
+            if cls._is_section_heading_line(line, previous_lines):
+                headings.append(
+                    {
+                        "index": index,
+                        "line": line.strip(),
+                        "level": cls._heading_level(line),
+                    }
+                )
+            previous_lines.append(line)
+
+        if not headings:
+            block = content.strip()
+            return [
+                {
+                    "title": "",
+                    "level": 1,
+                    "text": block,
+                    "body": block,
+                    "source_index": 0,
+                }
+            ]
+
+        sections: list[dict[str, Any]] = []
+        for heading_index, heading in enumerate(headings):
+            end = len(lines)
+            for next_heading in headings[heading_index + 1 :]:
+                if next_heading["level"] <= heading["level"]:
+                    end = next_heading["index"]
+                    break
+            start = heading["index"]
+            text = "\n".join(lines[start:end]).strip()
+            body = "\n".join(lines[start + 1 : end]).strip()
+            if not text:
+                continue
+            sections.append(
+                {
+                    "title": heading["line"],
+                    "level": heading["level"],
+                    "text": text,
+                    "body": body,
+                    "source_index": start,
+                }
+            )
+        return sections
+
+    @classmethod
+    def _build_section_selection_prompt(
+        cls,
+        user_request: str,
+        sections: list[dict[str, Any]],
+        *,
+        max_sections: int,
+        existing_evidence_blocks: list[str] | None = None,
+    ) -> str:
+        """Build a compact section-selection and coverage prompt."""
+        section_texts: list[str] = []
+        for index, section in enumerate(sections, start=1):
+            text = cls._prepare_text_block_for_rewrite(str(section.get("text") or ""))
+            if len(text) > 900:
+                text = f"{text[:900]}..."
+            section_texts.append(f"[{index}]\n{text}")
+
+        existing_evidence = "\n\n".join(existing_evidence_blocks or [])
+        existing_evidence_prompt = (
+            f"Existing selected evidence from earlier reads:\n{existing_evidence}\n\n"
+            if existing_evidence
+            else ""
+        )
+        return (
+            "Select the document sections that directly support answering the user request, then "
+            "judge the coverage of the existing evidence plus the selected sections.\n"
+            "Return only JSON in this exact shape: "
+            '{"sections":[1,2],"coverage":"full","missing":"","next_query":""}.\n'
+            "coverage must be full, partial, or none. Use full only when every requested aspect is "
+            "explicitly supported. Use partial when the text is relevant but does not support the "
+            "requested depth, explanation, process, causes, effects, examples, or other requested "
+            "scope. Use none when no selected text answers the request.\n"
+            "For partial coverage, describe the unsupported aspect in missing and provide one concise, "
+            "standalone document-search query in next_query. Do not answer the question or infer facts. "
+            f"Select at most {max_sections} sections.\n\n"
+            f"User request:\n{user_request}\n\n"
+            f"{existing_evidence_prompt}"
+            "Candidate sections:\n" + "\n\n".join(section_texts)
+        )
+
+    @staticmethod
+    def _parse_section_selection_indexes(selection_text: str, max_index: int) -> list[int]:
+        """Parse selected section indexes from JSON or plain-number model output."""
+        indexes, _is_valid = AgentLoop._parse_section_selection_response(
+            selection_text,
+            max_index,
+        )
+        return indexes
+
+    @staticmethod
+    def _parse_section_selection_response(
+        selection_text: str,
+        max_index: int,
+    ) -> tuple[list[int], bool]:
+        """Parse selected section indexes and whether the model output was usable."""
+        text = str(selection_text or "").strip()
+        if not text:
+            return [], False
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
+
+        indexes: list[int] = []
+        is_valid = False
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+
+        if isinstance(parsed, dict):
+            raw_indexes = parsed.get("sections")
+            if isinstance(raw_indexes, list):
+                is_valid = True
+                for item in raw_indexes:
+                    try:
+                        indexes.append(int(item))
+                    except (TypeError, ValueError):
+                        continue
+        elif isinstance(parsed, list):
+            is_valid = True
+            for item in parsed:
+                try:
+                    indexes.append(int(item))
+                except (TypeError, ValueError):
+                    continue
+
+        if not indexes and parsed is None:
+            indexes = [int(match.group(0)) for match in re.finditer(r"\d+", text)]
+            is_valid = bool(indexes)
+
+        selected: list[int] = []
+        seen: set[int] = set()
+        for index in indexes:
+            if 1 <= index <= max_index and index not in seen:
+                seen.add(index)
+                selected.append(index)
+        return selected, is_valid
+
+    @staticmethod
+    def _parse_evidence_coverage_response(selection_text: str) -> tuple[str, str, str]:
+        """Parse semantic coverage metadata from a section-selection response."""
+        text = str(selection_text or "").strip()
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return "unknown", "", ""
+        if not isinstance(parsed, dict):
+            return "unknown", "", ""
+
+        coverage = str(parsed.get("coverage") or "").strip().lower()
+        if coverage not in {"full", "partial", "none"}:
+            coverage = "unknown"
+        missing = re.sub(r"\s+", " ", str(parsed.get("missing") or "")).strip()
+        next_query = re.sub(r"\s+", " ", str(parsed.get("next_query") or "")).strip()
+        return coverage, missing[:500], next_query[:240]
+
+    async def _select_relevant_markdown_evidence_semantic(
+        self,
+        user_request: str,
+        content: str,
+        session_key: SessionKey,
+        *,
+        max_sections: int = 3,
+        existing_evidence_blocks: list[str] | None = None,
+    ) -> _SemanticEvidenceSelection:
+        """Select relevant sections and assess whether they fully cover the request."""
+        sections = self._split_markdown_sections(content)
+        if not sections or not str(user_request or "").strip():
+            return _SemanticEvidenceSelection(sections=[], coverage="none")
+
+        try:
+            response = await self.provider.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a strict document-evidence selector and coverage assessor. "
+                            "Select only explicit evidence, distinguish relevance from completeness, "
+                            "and return JSON only."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": self._build_section_selection_prompt(
+                            user_request,
+                            sections,
+                            max_sections=max_sections,
+                            existing_evidence_blocks=existing_evidence_blocks,
+                        ),
+                    },
+                ],
+                model=self.fast_model,
+                max_tokens=256,
+                temperature=0,
+                session_id=f"{session_key.safe_name()}:kb-section-select",
+            )
+            indexes, _ = self._parse_section_selection_response(
+                response.content or "",
+                len(sections),
+            )
+            coverage, missing, next_query = self._parse_evidence_coverage_response(
+                response.content or ""
+            )
+        except Exception as exc:
+            logger.debug(f"[KB_TRACE] semantic evidence selection failed: {exc}")
+            return _SemanticEvidenceSelection(sections=[], coverage="unknown")
+
+        selected: list[str] = []
+        seen: set[str] = set()
+        for index in indexes[:max_sections]:
+            text = str(sections[index - 1].get("text") or "").strip()
+            cleaned = self._prepare_text_block_for_rewrite(text)
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            selected.append(text)
+
+        if not selected:
+            coverage = "none"
+        return _SemanticEvidenceSelection(
+            sections=selected,
+            coverage=coverage,
+            missing=missing,
+            next_query=next_query,
+        )
+
+    async def _select_relevant_markdown_sections_semantic(
+        self,
+        user_request: str,
+        content: str,
+        session_key: SessionKey,
+        *,
+        max_sections: int = 3,
+    ) -> list[str]:
+        """Select relevant document sections with a model."""
+        selection = await self._select_relevant_markdown_evidence_semantic(
+            user_request,
+            content,
+            session_key,
+            max_sections=max_sections,
+        )
+        return selection.sections
+
+    @staticmethod
+    def _parse_tool_args(raw_args: Any) -> dict[str, Any]:
+        """Parse tool args stored as JSON text in tests/session history."""
+        if isinstance(raw_args, dict):
+            return raw_args
+        if not isinstance(raw_args, str) or not raw_args.strip():
+            return {}
+        try:
+            parsed = json.loads(raw_args)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @classmethod
+    def _is_concrete_read_tool_record(cls, tool_record: dict[str, Any]) -> bool:
+        """Whether a stored tool record is a successful concrete openviking_read."""
+        if tool_record.get("tool_name") != "openviking_read":
+            return False
+        result = tool_record.get("result")
+        if (
+            not isinstance(result, str)
+            or not result.strip()
+            or cls._classify_tool_error_result(result)
+        ):
+            return False
+        args = cls._parse_tool_args(tool_record.get("args"))
+        uri = str(args.get("uri") or "").strip()
+        level = str(args.get("level", "abstract") or "abstract")
+        return bool(
+            uri
+            and level == "read"
+            and not is_summary_uri(uri)
+            and not is_generic_scope_summary_uri(uri)
+        )
+
+    async def _collect_document_evidence_blocks_semantic(
+        self,
+        user_request: str,
+        tools_used: list[dict[str, Any]],
+        session_key: SessionKey,
+        *,
+        max_blocks: int = 3,
+    ) -> list[str]:
+        """Collect section-scoped evidence using semantic section selection first."""
+        selection = await self._collect_document_evidence_selection_semantic(
+            user_request,
+            tools_used,
+            session_key,
+            max_blocks=max_blocks,
+        )
+        return selection.sections
+
+    async def _collect_document_evidence_selection_semantic(
+        self,
+        user_request: str,
+        tools_used: list[dict[str, Any]],
+        session_key: SessionKey,
+        *,
+        max_blocks: int = 3,
+        existing_evidence_blocks: list[str] | None = None,
+    ) -> _SemanticEvidenceSelection:
+        """Collect relevant sections and assess cumulative evidence coverage."""
+        blocks: list[str] = []
+        seen: set[str] = set()
+        coverage = "unknown"
+        missing = ""
+        next_query = ""
+        for tool in tools_used:
+            if not self._is_concrete_read_tool_record(tool):
+                continue
+            result = str(tool.get("result") or "")
+            selection = await self._select_relevant_markdown_evidence_semantic(
+                user_request,
+                result,
+                session_key,
+                max_sections=max_blocks,
+                existing_evidence_blocks=[*(existing_evidence_blocks or []), *blocks],
+            )
+            if not selection.sections:
+                continue
+            coverage = selection.coverage
+            missing = selection.missing
+            next_query = selection.next_query
+            for section in selection.sections:
+                cleaned = self._prepare_text_block_for_rewrite(section)
+                if not cleaned or cleaned in seen:
+                    continue
+                seen.add(cleaned)
+                blocks.append(cleaned)
+                if len(blocks) >= max_blocks:
+                    return _SemanticEvidenceSelection(
+                        sections=blocks,
+                        coverage=coverage,
+                        missing=missing,
+                        next_query=next_query,
+                    )
+        return _SemanticEvidenceSelection(
+            sections=blocks,
+            coverage=coverage,
+            missing=missing,
+            next_query=next_query,
+        )
+
+    async def _collect_document_evidence_blocks_from_messages_semantic(
+        self,
+        user_request: str,
+        messages: list[dict],
+        session_key: SessionKey,
+        *,
+        max_blocks: int = 3,
+    ) -> list[str]:
+        """Collect relevant evidence blocks from message history with semantic selection."""
+        tools_used: list[dict[str, Any]] = []
+        for message_index, message in enumerate(messages):
+            if message.get("role") != "tool" or message.get("name") != "openviking_read":
+                continue
+            tool_call_id = message.get("tool_call_id")
+            args = self._find_tool_call_arguments(messages[:message_index], tool_call_id)
+            tools_used.append(
+                {
+                    "tool_name": "openviking_read",
+                    "args": json.dumps(args, ensure_ascii=False),
+                    "result": message.get("content") or "",
+                    "execute_success": True,
+                }
+            )
+        return await self._collect_document_evidence_blocks_semantic(
+            user_request,
+            tools_used,
+            session_key,
+            max_blocks=max_blocks,
+        )
+
+    @classmethod
+    def _collect_selected_evidence_blocks_from_prompts(
+        cls, messages: list[dict], *, max_blocks: int = 3
+    ) -> list[str]:
+        """Reuse evidence blocks already selected during the current retrieval turn."""
+        blocks: list[str] = []
+        seen: set[str] = set()
+        for message in messages:
+            if message.get("role") != "system":
+                continue
+            content = message.get("content")
+            if (
+                not isinstance(content, str)
+                or "Relevant document evidence for the current user request" not in content
+            ):
+                continue
+            parts = re.split(r"(?m)^\[Evidence\s+\d+\]\s*$", content)
+            for part in parts[1:]:
+                cleaned = cls._prepare_text_block_for_rewrite(part)
+                if not cleaned or cleaned in seen:
+                    continue
+                seen.add(cleaned)
+                blocks.append(cleaned)
+                if len(blocks) >= max_blocks:
+                    return blocks
+        return blocks
+
+    @classmethod
+    def _build_relevant_evidence_prompt(
+        cls,
+        user_request: str,
+        evidence_blocks: list[str],
+        *,
+        source_uri: str = "",
+    ) -> str:
+        """Build a short system prompt that focuses the next answer on selected evidence."""
+        numbered = "\n\n".join(
+            f"[Evidence {index}]\n{block}" for index, block in enumerate(evidence_blocks, start=1)
+        )
+        normalized_source_uri = re.sub(r"[\r\n]+", "", source_uri).strip()
+        source_line = (
+            f"\nEvidence source URI: {normalized_source_uri}" if normalized_source_uri else ""
+        )
+        return (
+            "Relevant document evidence for the current user request has been extracted below.\n"
+            "Use only these evidence blocks for the final answer. If they do not answer the "
+            "request, say the current documentation is insufficient instead of using unrelated "
+            f"document text.{source_line}\n\n"
+            f"User request:\n{user_request.strip()}\n\n"
+            f"{numbered}"
+        )
+
+    @classmethod
+    def _extract_selected_evidence_uris_from_prompts(cls, messages: list[dict]) -> list[str]:
+        """Collect source URIs attached to semantically selected evidence prompts."""
+        seen: set[str] = set()
+        uris: list[str] = []
+        for message in messages:
+            if message.get("role") != "system":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            for match in re.finditer(r"(?m)^Evidence source URI:\s*(viking://.*\S)\s*$", content):
+                uri = match.group(1).strip()
+                if uri and uri not in seen:
+                    seen.add(uri)
+                    uris.append(uri)
+        return uris
+
+    @classmethod
+    def _prepare_text_block_for_rewrite(cls, text: str) -> str:
+        """Clean imported Markdown noise while preserving answerable content."""
+        cleaned_lines: list[str] = []
+        for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+            line = raw_line.strip()
+            if not line:
+                cleaned_lines.append("")
+                continue
+            if cls.MARKDOWN_IMAGE_LINE_RE.fullmatch(line):
+                cleaned_lines.append(line)
+                continue
+            line = line.replace("**", "")
+            line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
+            line = re.sub(r"\s+", " ", line).strip()
+            line = re.sub(r"^(\d+)\s*[）)]\s*", r"\1. ", line)
+            line = re.sub(r"^(\d+(?:\.\d+)*)\s+", r"\1 ", line)
+            line = re.sub(r"^(\d+(?:\.\d+)*)([\u4e00-\u9fffA-Za-z])", r"\1\2", line)
+            cleaned_lines.append(line)
+
+        compact_lines: list[str] = []
+        blank_seen = False
+        for line in cleaned_lines:
+            if not line:
+                if compact_lines and not blank_seen:
+                    compact_lines.append("")
+                blank_seen = True
+                continue
+            compact_lines.append(line)
+            blank_seen = False
+        while compact_lines and compact_lines[-1] == "":
+            compact_lines.pop()
+        return "\n".join(compact_lines)
+
+    @classmethod
     def _extract_image_evidence_blocks(cls, messages: list[dict]) -> list[str]:
         """Collect tool evidence blocks that already preserve text-image association."""
         seen: set[str] = set()
@@ -1315,10 +2284,16 @@ class AgentLoop:
         return segments
 
     async def _select_relevant_image_segments(
-        self, draft_content: str, image_segments: list[str], session_key: SessionKey
+        self,
+        draft_content: str,
+        image_segments: list[str],
+        session_key: SessionKey,
+        *,
+        user_request: str = "",
+        max_segments: int = 4,
     ) -> list[str]:
         """Ask the model to choose the minimum image segments needed for the answer."""
-        if not image_segments:
+        if not image_segments or max_segments <= 0:
             return []
 
         numbered_segments = "\n\n".join(
@@ -1328,14 +2303,20 @@ class AgentLoop:
             {
                 "role": "system",
                 "content": (
-                    "Select the minimum image evidence segments needed to support the answer. "
-                    "Return only segment numbers separated by commas. "
+                    "Decide whether screenshots or images materially improve the answer. "
+                    "Select the minimum image evidence segments needed when they clarify UI "
+                    "locations, visual states, or procedural steps. Do not select images for "
+                    "simple definitions or when they add no useful information. "
+                    f"Select at most {max_segments} segments. "
+                    "Return only segment numbers separated by commas, or NONE. "
                     "Do not include any explanation."
                 ),
             },
             {
                 "role": "user",
                 "content": (
+                    "User request:\n"
+                    f"{user_request}\n\n"
                     "Answer draft:\n"
                     f"{draft_content}\n\n"
                     "Candidate image evidence segments:\n"
@@ -1343,67 +2324,76 @@ class AgentLoop:
                 ),
             },
         ]
-        selection = await self.provider.chat(
-            messages=selection_messages,
-            model=self.fast_model,
-            session_id=f"{session_key.safe_name()}:kb-image-select",
-        )
-        indexes = self._parse_selected_segment_indexes(selection.content or "", len(image_segments))
-        if not indexes:
-            retry_messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "Return only valid segment numbers separated by commas. "
-                        "Do not include any words or explanation."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "You must choose one or more segment numbers from the list below.\n\n"
-                        f"{numbered_segments}"
-                    ),
-                },
-            ]
-            retry = await self.provider.chat(
-                messages=retry_messages,
+        try:
+            selection = await self.provider.chat(
+                messages=selection_messages,
                 model=self.fast_model,
-                session_id=f"{session_key.safe_name()}:kb-image-select-retry",
+                max_tokens=64,
+                temperature=0,
+                session_id=f"{session_key.safe_name()}:kb-image-select",
             )
-            indexes = self._parse_selected_segment_indexes(retry.content or "", len(image_segments))
-        return [image_segments[index - 1] for index in indexes]
+        except Exception as exc:
+            logger.debug(f"[KB_TRACE] image selection unavailable; omitting images: {exc}")
+            return []
+        indexes = self._parse_selected_segment_indexes(selection.content or "", len(image_segments))
+        return [image_segments[index - 1] for index in indexes[:max_segments]]
 
     async def _finalize_kb_response(
         self, draft_content: str, session_key: SessionKey, messages: list[dict]
     ) -> str:
-        """Rewrite a KB draft into one direct user-facing answer.
+        """Finalize a KB draft with references and optional image evidence.
 
-        Optimization: if the draft contains no image evidence, skip the final
-        LLM rewrite entirely and return the draft as-is.  This removes one
-        expensive LLM round-trip from the critical path.
+        Pure-text drafts are returned without an extra model rewrite. Image
+        drafts still use a rewrite step so relevant send:// lines stay attached
+        to the text they support.
         """
         if not self.context._is_retrieval_mode() or not draft_content:
             return draft_content
 
-        image_evidence_blocks = self._extract_image_evidence_blocks(messages)
+        finalize_start_time = time.time()
+        trace_session = session_key.safe_name()
+        current_turn_messages = messages[self._current_turn_start_index(messages) :]
+        reference_links = self._build_reference_links(current_turn_messages)
+        selected_evidence_blocks = self._collect_selected_evidence_blocks_from_prompts(
+            current_turn_messages,
+        )
+        image_evidence_blocks = [
+            block for block in selected_evidence_blocks if self.SEND_IMAGE_LINE_RE.search(block)
+        ]
+        if not selected_evidence_blocks:
+            image_evidence_blocks = self._extract_image_evidence_blocks(current_turn_messages)
         image_evidence_segments = self._build_image_evidence_segments(image_evidence_blocks)
+        image_select_start_time = time.time()
         selected_image_segments = await self._select_relevant_image_segments(
-            draft_content, image_evidence_segments, session_key
+            draft_content,
+            image_evidence_segments,
+            session_key,
+            user_request=self._extract_user_text(messages),
+        )
+        logger.info(
+            f"[KB_TRACE] session={trace_session} finalize_image_selection "
+            f"duration_ms={(time.time() - image_select_start_time) * 1000:.1f} "
+            f"candidate_segments={len(image_evidence_segments)} "
+            f"selected_segments={len(selected_image_segments)} "
+            f"draft_has_images={bool(self.MARKDOWN_IMAGE_LINE_RE.search(str(draft_content or '')))}"
         )
         should_include_images = bool(selected_image_segments)
 
         # Fast path: no images → return draft directly, no rewrite LLM call needed
         if not should_include_images:
-            return draft_content
+            result = self._append_reference_links(draft_content, reference_links)
+            logger.info(
+                f"[KB_TRACE] session={trace_session} finalize_fast_path "
+                f"duration_ms={(time.time() - finalize_start_time) * 1000:.1f}"
+            )
+            return result
 
         preserve_block = (
             "\n\nThe tool evidence below already preserves the association between explanatory "
             "text and screenshots. When composing the final reply, keep the relevant image "
             "Markdown lines exactly as written and keep each image near the text it illustrates. "
             "Do not move all images to the end.\n\n"
-            "Image-aware evidence:\n"
-            + "\n\n---\n\n".join(selected_image_segments)
+            "Image-aware evidence:\n" + "\n\n---\n\n".join(selected_image_segments)
         )
 
         final_messages = [
@@ -1421,10 +2411,15 @@ class AgentLoop:
             },
         ]
 
+        rewrite_start_time = time.time()
         response = await self.provider.chat(
             messages=final_messages,
             model=self.model,
             session_id=f"{session_key.safe_name()}:kb-final",
+        )
+        logger.info(
+            f"[KB_TRACE] session={trace_session} finalize_image_rewrite "
+            f"duration_ms={(time.time() - rewrite_start_time) * 1000:.1f}"
         )
         final_content = response.content or draft_content
 
@@ -1437,7 +2432,8 @@ class AgentLoop:
             allowed_set = set(allowed_image_lines)
             output_image_lines = self._extract_send_image_lines_from_text(final_content)
             unexpected_lines = [line for line in output_image_lines if line not in allowed_set]
-            if unexpected_lines:
+            missing_lines = [line for line in allowed_image_lines if line not in output_image_lines]
+            if unexpected_lines or missing_lines:
                 correction_messages = [
                     {
                         "role": "system",
@@ -1447,9 +2443,9 @@ class AgentLoop:
                         "role": "user",
                         "content": (
                             "Rewrite the final reply again.\n"
-                            "You used Markdown image lines that were not present in the evidence.\n"
-                            "You may use only the exact image Markdown lines listed below, and no other send:// references.\n\n"
-                            "Allowed image Markdown lines:\n"
+                            "Use every required Markdown image line below exactly once, keep each "
+                            "near the text it illustrates, and use no other send:// references.\n\n"
+                            "Required image Markdown lines:\n"
                             + "\n".join(allowed_image_lines)
                             + "\n\nReply draft to correct:\n"
                             + final_content
@@ -1462,8 +2458,138 @@ class AgentLoop:
                     session_id=f"{session_key.safe_name()}:kb-final-correct",
                 )
                 final_content = correction.content or final_content
+                corrected_image_lines = self._extract_send_image_lines_from_text(final_content)
+                missing_lines = [
+                    line for line in allowed_image_lines if line not in corrected_image_lines
+                ]
+                if missing_lines:
+                    logger.warning(
+                        f"[KB_TRACE] session={trace_session} final_image_correction_missing="
+                        f"{len(missing_lines)} action=append_required_images"
+                    )
+                    final_content = f"{final_content.rstrip()}\n\n" + "\n".join(missing_lines)
 
-        return final_content
+        return self._append_reference_links(final_content, reference_links)
+
+    def _build_reference_links(self, messages: list[dict]) -> list[str]:
+        """Build Markdown links for concrete read document evidence used in retrieval answers."""
+        if not self.context._is_retrieval_mode():
+            return []
+
+        read_uris = self._extract_selected_evidence_uris_from_prompts(messages)
+        if not read_uris:
+            read_uris = self._extract_read_evidence_uris(messages)
+        links: list[str] = []
+        preview_secret = (
+            os.environ.get(RESOURCE_PREVIEW_SECRET_ENV, "").strip()
+            or str(self.config.ov_server.root_api_key or "").strip()
+        )
+        if not preview_secret:
+            logger.warning(
+                "Resource preview links disabled because no preview secret is configured"
+            )
+            return []
+        for uri in read_uris[:3]:
+            title = self._reference_title_from_uri(uri)
+            try:
+                token = create_resource_preview_token(
+                    uri=uri,
+                    account_id=self.config.ov_server.account_id,
+                    secret=preview_secret,
+                )
+            except ResourcePreviewTokenError as exc:
+                logger.warning(f"Failed to sign resource preview URI {uri}: {exc}")
+                continue
+            href = (
+                f"/bot/v1/resources/preview?uri={quote(uri, safe='')}&token={quote(token, safe='')}"
+            )
+            links.append(f"- [{title}]({href})")
+        return links
+
+    @staticmethod
+    def _extract_read_evidence_uris(messages: list[dict]) -> list[str]:
+        """Collect concrete openviking_read URIs from tool-result messages."""
+        seen: set[str] = set()
+        uris: list[str] = []
+
+        for message_index, message in enumerate(messages):
+            if message.get("role") != "tool" or message.get("name") != "openviking_read":
+                continue
+            content = message.get("content")
+            if (
+                not isinstance(content, str)
+                or not content.strip()
+                or AgentLoop._classify_tool_error_result(content)
+            ):
+                continue
+
+            tool_call_id = message.get("tool_call_id")
+            if not tool_call_id:
+                continue
+
+            args = AgentLoop._find_tool_call_arguments(messages[:message_index], tool_call_id)
+            uri = str(args.get("uri") or "").strip()
+            level = str(args.get("level", "abstract") or "abstract")
+            if (
+                not uri
+                or level != "read"
+                or is_summary_uri(uri)
+                or is_generic_scope_summary_uri(uri)
+                or uri in seen
+            ):
+                continue
+            seen.add(uri)
+            uris.append(uri)
+
+        return uris
+
+    @staticmethod
+    def _find_tool_call_arguments(messages: list[dict], tool_call_id: str) -> dict[str, Any]:
+        """Find parsed function-call arguments by tool-call id."""
+        for prior in reversed(messages):
+            if prior.get("role") != "assistant":
+                continue
+            tool_calls = prior.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict) or tool_call.get("id") != tool_call_id:
+                    continue
+                fn = tool_call.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    return {}
+                return args if isinstance(args, dict) else {}
+        return {}
+
+    @staticmethod
+    def _reference_title_from_uri(uri: str) -> str:
+        """Create a compact user-facing label from a Viking URI."""
+        normalized = uri.rstrip("/")
+        path = (
+            normalized.split("viking://resources/", 1)[1]
+            if normalized.startswith("viking://resources/")
+            else normalized
+        )
+        parts = [unquote(part).strip() for part in path.split("/") if part.strip()]
+        name = parts[-1] if parts else uri
+        if "." in name:
+            name = name.rsplit(".", 1)[0]
+        name = re.sub(r"[_-]+", " ", name).strip()
+        parent = parts[-2] if len(parts) > 1 else ""
+        if parent and name:
+            return f"{parent} / {name}"
+        return name or normalized or "参考文档"
+
+    @staticmethod
+    def _append_reference_links(content: str, links: list[str]) -> str:
+        """Append a reference section once, preserving the answer body."""
+        if not links:
+            return content
+        if re.search(r"(?m)^#{0,6}\s*参考文档\s*$", content or ""):
+            return content
+        return f"{content.rstrip()}\n\n参考文档\n" + "\n".join(links)
 
     async def _persist_session_turn(
         self,
@@ -1503,7 +2629,9 @@ class AgentLoop:
             assistant_kwargs["tools_used"] = tools_used
         if token_usage is not None:
             assistant_kwargs["token_usage"] = token_usage
-        session.add_message("assistant", assistant_content, sender_id=msg.sender_id, **assistant_kwargs)
+        session.add_message(
+            "assistant", assistant_content, sender_id=msg.sender_id, **assistant_kwargs
+        )
 
         await self.sessions.save(session)
         if openviking_session_id and memory_scope == "all":
@@ -1586,8 +2714,9 @@ class AgentLoop:
                 # Clone session for async consolidation, then immediately clear original
                 if not self._check_cmd_auth(msg):
                     return OutboundMessage(
-                        session_key=msg.session_key, content="🐈 Sorry, you are not authorized to use this command.",
-                        metadata=msg.metadata
+                        session_key=msg.session_key,
+                        content="🐈 Sorry, you are not authorized to use this command.",
+                        metadata=msg.metadata,
                     )
                 session_clone = session.clone()
                 session.clear()
@@ -1595,24 +2724,29 @@ class AgentLoop:
                 # Run consolidation in background
                 await self._safe_consolidate_memory(session_clone, archive_all=True)
                 return OutboundMessage(
-                    session_key=msg.session_key, content="🐈 New session started. Memory consolidated.", metadata=msg.metadata
+                    session_key=msg.session_key,
+                    content="🐈 New session started. Memory consolidated.",
+                    metadata=msg.metadata,
                 )
             if cmd == "/remember":
                 if not self._check_cmd_auth(msg):
                     return OutboundMessage(
-                        session_key=msg.session_key, content="🐈 Sorry, you are not authorized to use this command.",
-                        metadata=msg.metadata
+                        session_key=msg.session_key,
+                        content="🐈 Sorry, you are not authorized to use this command.",
+                        metadata=msg.metadata,
                     )
                 session_clone = session.clone()
                 await self._consolidate_viking_memory(session_clone)
                 return OutboundMessage(
-                    session_key=msg.session_key, content="This conversation has been submitted to memory storage.", metadata=msg.metadata
+                    session_key=msg.session_key,
+                    content="This conversation has been submitted to memory storage.",
+                    metadata=msg.metadata,
                 )
             if cmd == "/help":
                 return OutboundMessage(
                     session_key=msg.session_key,
                     content="🐈 vikingbot commands:\n/new — Start a new conversation\n/remember — Submit current session to memories and start new session\n/help — Show available commands",
-                    metadata=msg.metadata
+                    metadata=msg.metadata,
                 )
 
             # Debug mode handling
@@ -1658,7 +2792,6 @@ class AgentLoop:
                         user_message=msg.content,
                         history=session.get_history(),
                         session_id=session_key.safe_name(),
-                        capability_profile=self.config.agents.capability_profile,
                     )
                     logger.info(
                         f"[IntentRouter] label={decision.label} route={decision.route} "
@@ -1674,7 +2807,6 @@ class AgentLoop:
                             user_message=msg.content,
                             history=session.get_history(),
                             session_id=session_key.safe_name(),
-                            capability_profile=self.config.agents.capability_profile,
                         )
                         response_text = self._normalize_final_output_text(response_text)
                         await self._persist_session_turn(session, msg, response_text)
@@ -1699,6 +2831,16 @@ class AgentLoop:
                 media=msg.media if msg.media else None,
                 session_key=msg.session_key,
             )
+            allow_grounded_history_reuse = self._latest_assistant_reply_has_document_evidence(
+                session
+            )
+            if allow_grounded_history_reuse:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": self._build_grounded_history_reuse_prompt(),
+                    }
+                )
             # logger.info(f"New messages: {messages}")
 
             # Run agent loop
@@ -1707,6 +2849,7 @@ class AgentLoop:
                 session_key=session_key,
                 publish_events=True,
                 sender_id=msg.sender_id,
+                allow_grounded_history_reuse=allow_grounded_history_reuse,
             )
 
             # Log response preview
@@ -1734,7 +2877,7 @@ class AgentLoop:
                 token_usage=token_usage,
                 time_cost=time_cost,
                 iteration=iteration,
-                tools_used_names=tools_used_names
+                tools_used_names=tools_used_names,
             )
         finally:
             long_running_notified = True
@@ -1767,9 +2910,7 @@ class AgentLoop:
             publish_events=False,
         )
 
-        if final_content is None or (
-            isinstance(final_content, str) and not final_content.strip()
-        ):
+        if final_content is None or (isinstance(final_content, str) and not final_content.strip()):
             final_content = "Background task completed."
 
         # Save to session (mark as system message in history)
@@ -1884,7 +3025,9 @@ Respond with ONLY valid JSON, no markdown fences."""
         """Consolidate old messages into MEMORY.md + HISTORY.md. Works on a cloned session."""
         try:
             if not session.messages:
-                logger.info(f"No messages to commit openviking for session {session.key.safe_name()} (allow_from filter applied)")
+                logger.info(
+                    f"No messages to commit openviking for session {session.key.safe_name()} (allow_from filter applied)"
+                )
                 return
 
             # use openviking tools to extract memory
@@ -1923,14 +3066,16 @@ Respond with ONLY valid JSON, no markdown fences."""
             allow_from.append(self.config.ov_server.admin_user_id)
         for channel in self.config.channels_config.get_all_channels():
             if channel.channel_key() == msg.session_key.channel_key():
-                allow_cmd = getattr(channel, 'allow_cmd_from', [])
+                allow_cmd = getattr(channel, "allow_cmd_from", [])
                 if allow_cmd:
                     allow_from.extend(allow_cmd)
                 break
 
         # If channel not found or sender not in allow_from list, ignore message
         if msg.sender_id not in allow_from:
-            logger.debug(f"Sender {msg.sender_id} not allowed in channel {msg.session_key.channel_key()}")
+            logger.debug(
+                f"Sender {msg.sender_id} not allowed in channel {msg.session_key.channel_key()}"
+            )
             return False
         return True
 
@@ -1953,4 +3098,3 @@ Respond with ONLY valid JSON, no markdown fences."""
 
         response = await self._process_message(msg)
         return response.content if response else ""
-    SEND_IMAGE_LINE_RE = re.compile(r"!\[[^\]]*\]\((send://[^)\s]+)\)")

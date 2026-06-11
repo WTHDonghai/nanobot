@@ -19,6 +19,7 @@ services:
       - openviking-data:/app/data
     environment:
       - OPENVIKING_CONFIG_FILE=/app/ov.conf
+      - OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN=${OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN:?set OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1933/health"]
       interval: 30s
@@ -46,6 +47,7 @@ services:
       - openviking-data:/app/data
     environment:
       - OPENVIKING_CONFIG_FILE=/app/ov.conf
+      - OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN=${OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN:?set OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18790/bot/v1/health"]
       interval: 30s

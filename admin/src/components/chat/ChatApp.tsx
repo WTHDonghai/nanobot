@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  BookOpen,
   Bot,
   ChevronRight,
   FileDown,
+  GripVertical,
   Loader2,
   MoreHorizontal,
   Pencil,
@@ -13,9 +15,8 @@ import {
   Zap,
   Headphones,
   Menu,
+  X,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { fetchApi, requestHumanHandoff } from '../../services/api';
 import {
   ApiEnvelope,
@@ -39,7 +40,6 @@ import {
   makeWelcomeMessages,
   mapSessionMessages,
   mergeCachedMessageMetadata,
-  normalizeMarkdownForDisplay,
   readStoredSessionMessages,
   readStoredSessionTitles,
   unwrapResult,
@@ -50,7 +50,276 @@ import {
 } from './utils';
 import { exportChatSubsetToPdf } from './pdfExport';
 import SessionSidebar from './SessionSidebar';
+import MarkdownRenderer, { getMarkdownReferenceTarget, MarkdownReferenceTarget } from '../markdown/MarkdownRenderer';
 import './ChatApp.css';
+
+const REFERENCE_DRAWER_MIN_WIDTH = 360;
+const REFERENCE_DRAWER_MAX_WIDTH = 860;
+const REFERENCE_DRAWER_PAGE_GUTTER = 420;
+const REFERENCE_EXPORT_CHUNK_MAX_HEIGHT = 1200;
+
+type ReferencePreviewState = {
+  href: string;
+  uri: string;
+  title: string;
+  markdown: string;
+  loading: boolean;
+  error?: string;
+};
+
+type ReferencePreviewPayload = {
+  title?: string;
+  uri?: string;
+  markdown?: string;
+};
+
+type MessageReferenceItem = {
+  id: string;
+  label: string;
+  subtitle: string;
+  target: MarkdownReferenceTarget;
+};
+
+type MessageContentSections = {
+  body: string;
+  references: MessageReferenceItem[];
+};
+
+function clampReferenceDrawerWidth(width: number): number {
+  const viewportMax = typeof window === 'undefined'
+    ? REFERENCE_DRAWER_MAX_WIDTH
+    : Math.max(REFERENCE_DRAWER_MIN_WIDTH, window.innerWidth - REFERENCE_DRAWER_PAGE_GUTTER);
+  const maxWidth = Math.min(REFERENCE_DRAWER_MAX_WIDTH, viewportMax);
+  return Math.min(Math.max(width, REFERENCE_DRAWER_MIN_WIDTH), maxWidth);
+}
+
+function decodeReferenceText(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function getReferenceFallbackTitle(uri: string): string {
+  const filename = decodeReferenceText(uri.split('/').filter(Boolean).pop() || '');
+  return filename.replace(/\.md$/i, '') || '参考文档';
+}
+
+function formatReferenceSubtitle(uri: string): string {
+  const readablePath = decodeReferenceText(uri.replace(/^viking:\/\/resources\//, ''));
+  return readablePath || uri;
+}
+
+function cleanReferenceLabel(value: string): string {
+  return decodeReferenceText(value)
+    .replace(/\\([[\]()])/g, '$1')
+    .replace(/[`*_]/g, '')
+    .trim();
+}
+
+function extractReferenceItems(section: string, serverUrl: string): MessageReferenceItem[] {
+  const references: MessageReferenceItem[] = [];
+  const seen = new Set<string>();
+  const linkPattern = /\[([^\]]+)]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
+
+  for (const match of section.matchAll(linkPattern)) {
+    const href = match[2]?.trim() || '';
+    const target = getMarkdownReferenceTarget(href, serverUrl);
+    if (!target) continue;
+
+    const id = target.uri || href;
+    if (seen.has(id)) continue;
+    seen.add(id);
+
+    const label = cleanReferenceLabel(match[1] || '') || getReferenceFallbackTitle(target.uri);
+    references.push({
+      id,
+      label,
+      subtitle: formatReferenceSubtitle(target.uri),
+      target,
+    });
+  }
+
+  return references;
+}
+
+function splitMessageReferenceSection(content: string, serverUrl: string): MessageContentSections {
+  if (!content.trim()) return { body: content, references: [] };
+
+  const normalized = content.replace(/\r\n?/g, '\n').trimEnd();
+  const headingPattern = /^[ \t]*(?:#{1,6}[ \t]*)?参考文档[ \t]*$/gm;
+  const headings = Array.from(normalized.matchAll(headingPattern));
+
+  for (let index = headings.length - 1; index >= 0; index -= 1) {
+    const heading = headings[index];
+    const headingStart = heading.index ?? 0;
+    const headingEnd = headingStart + heading[0].length;
+    const section = normalized.slice(headingEnd).replace(/^\n+/, '').trim();
+    const references = extractReferenceItems(section, serverUrl);
+
+    if (references.length > 0) {
+      return {
+        body: normalized.slice(0, headingStart).trimEnd(),
+        references,
+      };
+    }
+  }
+
+  return { body: content, references: [] };
+}
+
+function buildMarkdownExportChunks(root: HTMLElement, chunkClassName: string): HTMLElement[] {
+  const markdownRoot = root.querySelector<HTMLElement>('.markdown-body') || root;
+  const children = Array.from(markdownRoot.children) as HTMLElement[];
+
+  if (children.length === 0) {
+    return [markdownRoot];
+  }
+
+  const chunks: HTMLElement[] = [];
+  const createChunk = () => {
+    const chunk = document.createElement('div');
+    chunk.className = chunkClassName;
+    return chunk;
+  };
+  let currentChunk = createChunk();
+  let currentHeight = 0;
+
+  const pushChunk = () => {
+    if (currentChunk.children.length > 0) {
+      chunks.push(currentChunk);
+    }
+    currentChunk = createChunk();
+    currentHeight = 0;
+  };
+
+  children.forEach((child) => {
+    const bounds = child.getBoundingClientRect();
+    const estimatedHeight = Math.max(bounds.height, child.scrollHeight, child.offsetHeight, 24);
+    const containsMedia = Boolean(child.querySelector('img, table, pre'));
+
+    if (
+      currentChunk.children.length > 0
+      && (containsMedia || currentHeight + estimatedHeight > REFERENCE_EXPORT_CHUNK_MAX_HEIGHT)
+    ) {
+      pushChunk();
+    }
+
+    currentChunk.appendChild(child.cloneNode(true));
+    currentHeight += estimatedHeight;
+
+    if (containsMedia) {
+      pushChunk();
+    }
+  });
+
+  if (currentChunk.children.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks.length > 0 ? chunks : [markdownRoot];
+}
+
+function buildReferenceExportNodes(root: HTMLElement): HTMLElement[] {
+  return buildMarkdownExportChunks(root, 'chat-reference-markdown markdown-body chat-reference-export-chunk');
+}
+
+function cloneChatRowShell(row: HTMLElement): HTMLElement {
+  const clone = row.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll('[data-export-ignore="true"]').forEach((element) => element.remove());
+
+  const bubble = clone.querySelector<HTMLElement>('.chat-bubble');
+  if (bubble) {
+    bubble.innerHTML = '';
+  }
+
+  return clone;
+}
+
+function setChatRowBubbleContent(row: HTMLElement, content: Node): HTMLElement {
+  const bubble = row.querySelector<HTMLElement>('.chat-bubble');
+  if (bubble) {
+    bubble.innerHTML = '';
+    bubble.appendChild(content);
+  }
+  return row;
+}
+
+function buildChatMessageExportNodes(row: HTMLElement): HTMLElement[] {
+  const bubble = row.querySelector<HTMLElement>('.chat-bubble');
+  const markdownRoot = bubble?.querySelector<HTMLElement>('.markdown-body') || null;
+
+  if (!bubble || !markdownRoot) {
+    return [row];
+  }
+
+  const chunks = buildMarkdownExportChunks(markdownRoot, 'markdown-body chat-message-export-chunk');
+  if (chunks.length <= 1) {
+    return [row];
+  }
+
+  const exportRows: HTMLElement[] = [];
+
+  chunks.forEach((chunk) => {
+    exportRows.push(setChatRowBubbleContent(cloneChatRowShell(row), chunk));
+  });
+
+  const suffix = cloneChatRowShell(row);
+  const suffixBubble = suffix.querySelector<HTMLElement>('.chat-bubble');
+  const suffixChildren = Array.from(bubble.childNodes).filter((child) => child !== markdownRoot);
+  if (suffixBubble && suffixChildren.length > 0) {
+    suffixChildren.forEach((child) => suffixBubble.appendChild(child.cloneNode(true)));
+    if (suffixBubble.childNodes.length > 0) {
+      exportRows.push(suffix);
+    }
+  }
+
+  return exportRows.length > 0 ? exportRows : [row];
+}
+
+const ChatBubbleReferences = ({
+  references,
+  onOpenReference,
+}: {
+  references: MessageReferenceItem[];
+  onOpenReference: (target: MarkdownReferenceTarget, label: string) => void;
+}) => {
+  const [open, setOpen] = useState(true);
+
+  if (references.length === 0) return null;
+
+  return (
+    <details
+      className="chat-bubble-references"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="chat-bubble-references-summary">
+        <span>参考文档</span>
+        <span className="chat-bubble-reference-count">{references.length} 项</span>
+        <ChevronRight size={15} className="chat-bubble-references-chevron" />
+      </summary>
+      <div className="chat-bubble-reference-list">
+        {references.map((reference, index) => (
+          <button
+            key={reference.id}
+            type="button"
+            className="chat-bubble-reference-item"
+            onClick={() => onOpenReference(reference.target, reference.label)}
+            title="在右侧预览参考文档"
+          >
+            <span className="chat-bubble-reference-index">{index + 1}</span>
+            <span className="chat-bubble-reference-text">
+              <span className="chat-bubble-reference-title">{reference.label}</span>
+              <span className="chat-bubble-reference-subtitle">{reference.subtitle}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </details>
+  );
+};
 
 const ConfirmModal = ({
   message,
@@ -170,6 +439,24 @@ function summarizeIterationEvent(data: unknown): string {
   return '正在进入下一轮分析...';
 }
 
+function extractReferencePreviewMarkdown(raw: string, fallbackTitle: string): { title: string; markdown: string } {
+  const content = String(raw || '');
+  const looksLikeHtml = /<!doctype html|<html[\s>]/i.test(content);
+  if (!looksLikeHtml || typeof DOMParser === 'undefined') {
+    return { title: fallbackTitle, markdown: content.trim() };
+  }
+
+  const doc = new DOMParser().parseFromString(content, 'text/html');
+  const title = doc.querySelector('h1')?.textContent?.trim()
+    || doc.title?.trim()
+    || fallbackTitle;
+  const markdown = doc.querySelector('pre')?.textContent?.trim()
+    || doc.body?.textContent?.trim()
+    || '';
+
+  return { title, markdown };
+}
+
 const ChatApp: React.FC<ChatAppProps> = ({
   serverUrl,
   apiKey,
@@ -211,13 +498,19 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [referencePreview, setReferencePreview] = useState<ReferencePreviewState | null>(null);
+  const [referenceDrawerWidth, setReferenceDrawerWidth] = useState(() => clampReferenceDrawerWidth(440));
+  const [referenceExporting, setReferenceExporting] = useState(false);
   const actionMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const referencePreviewContentRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const sessionMessageCacheRef = useRef<Record<string, ChatMessage[]>>({});
   const sessionListRequestRef = useRef(0);
   const replayRequestRef = useRef(0);
+  const referencePreviewRequestRef = useRef(0);
+  const referenceResizeCleanupRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -241,6 +534,22 @@ const ChatApp: React.FC<ChatAppProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const handleResize = () => {
+      setReferenceDrawerWidth((width) => clampReferenceDrawerWidth(width));
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      referenceResizeCleanupRef.current?.();
+      referenceResizeCleanupRef.current = null;
+      document.body.classList.remove('chat-reference-resizing');
+    };
+  }, []);
+
   function scrollToBottom() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }
@@ -253,6 +562,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
   }
 
   function resetConversation(status = '') {
+    closeReferencePreview();
     persistLastActiveSession(null);
     setSessionId(null);
     setActiveSessionMeta(null);
@@ -261,6 +571,86 @@ const ChatApp: React.FC<ChatAppProps> = ({
     setHandoffNotice('');
     setHandoffLoadingKey(null);
     resetInputHeight();
+  }
+
+  function closeReferencePreview() {
+    referencePreviewRequestRef.current += 1;
+    setReferencePreview(null);
+  }
+
+  function beginReferenceDrawerResize(event: React.PointerEvent<HTMLButtonElement>) {
+    if (typeof window === 'undefined' || window.innerWidth <= 1180) return;
+
+    event.preventDefault();
+    referenceResizeCleanupRef.current?.();
+
+    const startX = event.clientX;
+    const startWidth = referenceDrawerWidth;
+
+    document.body.classList.add('chat-reference-resizing');
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextWidth = startWidth + startX - moveEvent.clientX;
+      setReferenceDrawerWidth(clampReferenceDrawerWidth(nextWidth));
+    };
+    const stopResize = () => {
+      document.body.classList.remove('chat-reference-resizing');
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+      referenceResizeCleanupRef.current = null;
+    };
+    referenceResizeCleanupRef.current = stopResize;
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResize, { once: true });
+    window.addEventListener('pointercancel', stopResize, { once: true });
+  }
+
+  async function openReferencePreview(target: MarkdownReferenceTarget, label = '') {
+    const requestId = ++referencePreviewRequestRef.current;
+    const fallbackTitle = label.trim() || getReferenceFallbackTitle(target.uri);
+    const previewParams = new URLSearchParams({ uri: target.uri });
+    if (target.token) previewParams.set('token', target.token);
+    const previewPath = `/bot/v1/resources/preview?${previewParams}`;
+    setReferencePreview({
+      href: target.href,
+      uri: target.uri,
+      title: fallbackTitle,
+      markdown: '',
+      loading: true,
+    });
+
+    try {
+      const payload = await fetchApi<ReferencePreviewPayload | string>(serverUrl, apiKey, previewPath, {
+        headers: { Accept: 'application/json' },
+      });
+      if (referencePreviewRequestRef.current !== requestId) return;
+
+      const parsed = typeof payload === 'string'
+        ? extractReferencePreviewMarkdown(payload, fallbackTitle)
+        : {
+          title: payload.title || fallbackTitle,
+          markdown: payload.markdown || '',
+        };
+      setReferencePreview({
+        href: target.href,
+        uri: typeof payload === 'string' ? target.uri : (payload.uri || target.uri),
+        title: parsed.title || fallbackTitle,
+        markdown: parsed.markdown,
+        loading: false,
+      });
+    } catch (err: unknown) {
+      if (referencePreviewRequestRef.current !== requestId) return;
+      setReferencePreview({
+        href: target.href,
+        uri: target.uri,
+        title: fallbackTitle,
+        markdown: '',
+        loading: false,
+        error: err instanceof Error ? err.message : '参考文档加载失败',
+      });
+    }
   }
 
   function getSessionRequestOptions(): { account?: string; user?: string } {
@@ -1224,7 +1614,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
       .slice(0, index + 1)
       .filter((item) => item.key !== 'welcome')
       .map((item) => messageRowRefs.current[item.key])
-      .filter((node): node is HTMLDivElement => Boolean(node));
+      .filter((node): node is HTMLDivElement => Boolean(node))
+      .flatMap((node) => buildChatMessageExportNodes(node));
 
     if (exportNodes.length === 0) {
       setSessionError('没有可导出的消息内容');
@@ -1247,11 +1638,45 @@ const ChatApp: React.FC<ChatAppProps> = ({
         filenameBase: `${exportTitle}-${exportStamp}`,
         messageNodes: exportNodes,
         apiKey,
+        captureScale: 1,
+        imageQuality: 0.86,
       });
     } catch (err: unknown) {
       setSessionError(err instanceof Error ? `导出 PDF 失败：${err.message}` : '导出 PDF 失败');
     } finally {
       setExportingMessageKey(null);
+    }
+  };
+
+  const handleExportReferencePdf = async () => {
+    if (!referencePreview || referencePreview.loading || referencePreview.error || referenceExporting) return;
+
+    const exportNode = referencePreviewContentRef.current;
+    if (!exportNode) {
+      setSessionError('没有可导出的参考文档内容');
+      return;
+    }
+
+    const exportTime = formatDateTime(new Date().toISOString());
+    const exportStamp = exportTime.replace(/[^\d]/g, '').slice(0, 14) || `${Date.now()}`;
+    const exportTitle = referencePreview.title || '参考文档';
+
+    setReferenceExporting(true);
+    setSessionError('');
+
+    try {
+      const exportNodes = buildReferenceExportNodes(exportNode);
+      await exportChatSubsetToPdf({
+        title: exportTitle,
+        exportedAtLabel: exportTime,
+        filenameBase: `${exportTitle}-${exportStamp}`,
+        messageNodes: exportNodes,
+        apiKey,
+      });
+    } catch (err: unknown) {
+      setSessionError(err instanceof Error ? `参考文档导出失败：${err.message}` : '参考文档导出失败');
+    } finally {
+      setReferenceExporting(false);
     }
   };
 
@@ -1346,6 +1771,10 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
             {messages.map((message, index) => {
               const iterationCount = message.iterationCount ?? inferIterationCountFromSteps(message.steps);
+              const messageSections = message.role === 'bot'
+                ? splitMessageReferenceSection(message.text, serverUrl)
+                : { body: message.text, references: [] };
+              const shouldRenderMessageBody = messageSections.body.trim().length > 0 || messageSections.references.length === 0;
               
               // 决定是否在界面上展示思考过程折叠面板的条件：
               // 1. 只有 Bot 回复展示思考过程
@@ -1408,24 +1837,21 @@ const ChatApp: React.FC<ChatAppProps> = ({
                         <div className="typing-dots"><span /><span /><span /></div>
                       ) : (
                         <>
-                          <div className="markdown-body">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={{
-                                img(props) {
-                                  return (
-                                    <img
-                                      {...props}
-                                      style={{ maxWidth: '100%', borderRadius: '8px', cursor: 'zoom-in', marginTop: '8px' }}
-                                      onClick={() => setPreviewImage(props.src || null)}
-                                    />
-                                  );
-                                },
-                              }}
-                            >
-                              {normalizeMarkdownForDisplay(message.text)}
-                            </ReactMarkdown>
-                          </div>
+                          {shouldRenderMessageBody && (
+                            <MarkdownRenderer
+                              className="markdown-body"
+                              content={messageSections.body}
+                              serverUrl={serverUrl}
+                              onImageClick={setPreviewImage}
+                              onReferenceClick={(target, label) => { void openReferencePreview(target, label); }}
+                            />
+                          )}
+                          {message.role === 'bot' && (
+                            <ChatBubbleReferences
+                              references={messageSections.references}
+                              onOpenReference={(target, label) => { void openReferencePreview(target, label); }}
+                            />
+                          )}
                           {message.role === 'bot' && message.key !== 'welcome' && (
                             <div className="chat-bubble-actions" data-export-ignore="true">
                               <button
@@ -1507,6 +1933,73 @@ const ChatApp: React.FC<ChatAppProps> = ({
           </div>
         </div>
       </div>
+
+      {referencePreview && (
+        <aside
+          className="chat-reference-drawer"
+          aria-label="参考文档预览"
+          style={{ '--chat-reference-drawer-width': `${referenceDrawerWidth}px` } as React.CSSProperties}
+        >
+          <button
+            type="button"
+            className="chat-reference-resize-handle"
+            onPointerDown={beginReferenceDrawerResize}
+            title="拖拽调整参考文档宽度"
+            aria-label="拖拽调整参考文档宽度"
+          >
+            <GripVertical size={14} />
+          </button>
+          <div className="chat-reference-header">
+            <div className="chat-reference-heading">
+              <span className="chat-reference-kicker">参考文档</span>
+              <h2>{referencePreview.title}</h2>
+            </div>
+            <div className="chat-reference-actions">
+              {referenceExporting && <span className="chat-reference-exporting-label">导出中...</span>}
+              <button
+                type="button"
+                className="chat-reference-icon-btn"
+                onClick={() => { void handleExportReferencePdf(); }}
+                disabled={referencePreview.loading || Boolean(referencePreview.error) || referenceExporting}
+                title={referenceExporting ? '正在导出 PDF' : '导出参考文档 PDF'}
+                aria-label="导出参考文档 PDF"
+              >
+                {referenceExporting ? <Loader2 size={16} className="chat-status-icon" /> : <FileDown size={16} />}
+              </button>
+              <button
+                type="button"
+                className="chat-reference-icon-btn"
+                onClick={closeReferencePreview}
+                title="关闭预览"
+                aria-label="关闭参考文档预览"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+          <div className="chat-reference-uri" title={referencePreview.uri}>{referencePreview.uri}</div>
+          <div className="chat-reference-body">
+            {referencePreview.loading ? (
+              <div className="chat-reference-state">
+                <Loader2 size={16} className="chat-status-icon" />
+                <span>正在加载参考文档...</span>
+              </div>
+            ) : referencePreview.error ? (
+              <div className="chat-reference-error">{referencePreview.error}</div>
+            ) : (
+              <div ref={referencePreviewContentRef} className="chat-reference-export-content">
+                <MarkdownRenderer
+                  className="chat-reference-markdown markdown-body"
+                  content={referencePreview.markdown}
+                  serverUrl={serverUrl}
+                  onImageClick={setPreviewImage}
+                  onReferenceClick={(target, label) => { void openReferencePreview(target, label); }}
+                />
+              </div>
+            )}
+          </div>
+        </aside>
+      )}
 
       {deleteTarget && (
         <ConfirmModal

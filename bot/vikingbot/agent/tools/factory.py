@@ -2,11 +2,6 @@
 
 from typing import TYPE_CHECKING, Callable
 
-from vikingbot.agent.tools.bid_material import (
-    CollectBidEvidenceTool,
-    SearchCertificatesTool,
-    SearchSolutionMaterialsTool,
-)
 from vikingbot.agent.tools.cron import CronTool
 from vikingbot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from vikingbot.agent.tools.human_handoff import HumanHandoffTool
@@ -26,7 +21,6 @@ from vikingbot.agent.tools.registry import ToolRegistry
 from vikingbot.agent.tools.shell import ExecTool
 from vikingbot.agent.tools.web import WebFetchTool
 from vikingbot.agent.tools.websearch import WebSearchTool
-from vikingbot.config.schema import CapabilityProfile
 from vikingbot.services.human_handoff import HumanHandoffService
 
 if TYPE_CHECKING:
@@ -48,6 +42,7 @@ def register_default_tools(
     include_image_tool: bool = True,
     include_viking_tools: bool = True,
     include_human_handoff_tool: bool = True,
+    knowledge_base_mode: bool | None = None,
 ) -> None:
     """
     Register default tools to a tool registry.
@@ -63,33 +58,15 @@ def register_default_tools(
         include_cron_tool: Whether to include cron tool
         include_image_tool: Whether to include image tool
         include_viking_tools: Whether to include Viking tools
+        knowledge_base_mode: Whether explicit configuration enables knowledge-base mode
     """
-    capability_profile = config.agents.capability_profile
-
-    if capability_profile in {
-        CapabilityProfile.KNOWLEDGE_BASE,
-        CapabilityProfile.TECHNICAL_SUPPORT,
-    }:
+    if knowledge_base_mode:
         if include_viking_tools:
             registry.register(VikingReadTool())
             registry.register(VikingListTool())
             registry.register(VikingSearchTool())
             registry.register(VikingGrepTool())
             registry.register(VikingGlobTool())
-        return
-
-    if capability_profile == CapabilityProfile.BID_MATERIAL:
-        if include_viking_tools:
-            registry.register(VikingReadTool())
-            registry.register(VikingListTool())
-            registry.register(VikingSearchTool())
-            registry.register(VikingGrepTool())
-            registry.register(VikingGlobTool())
-        registry.register(SearchCertificatesTool())
-        registry.register(SearchSolutionMaterialsTool())
-        registry.register(CollectBidEvidenceTool())
-        if include_human_handoff_tool:
-            registry.register(HumanHandoffTool(HumanHandoffService(config.tools.human_handoff)))
         return
 
     exec_config = config.tools.exec

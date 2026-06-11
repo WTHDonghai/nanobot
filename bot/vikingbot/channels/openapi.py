@@ -1,7 +1,9 @@
 """OpenAPI channel for HTTP-based chat API."""
 
 import asyncio
+import html
 import mimetypes
+import os
 import re
 import secrets
 import uuid
@@ -9,14 +11,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from loguru import logger
 
+from openviking_cli.resource_preview import (
+    RESOURCE_PREVIEW_SECRET_ENV,
+    ResourcePreviewTokenError,
+    verify_resource_preview_token,
+)
 from vikingbot.bus.events import InboundMessage, OutboundEventType, OutboundMessage
 from vikingbot.bus.queue import MessageBus
 from vikingbot.channels.base import BaseChannel
-from vikingbot.utils import get_images_path
 from vikingbot.channels.openapi_models import (
     ChatRequest,
     ChatResponse,
@@ -32,7 +38,9 @@ from vikingbot.channels.openapi_models import (
     SessionListResponse,
 )
 from vikingbot.config.schema import BaseChannelConfig, Config, SessionKey
+from vikingbot.openviking_mount.ov_server import VikingClient
 from vikingbot.services.human_handoff import HumanHandoffPayload, HumanHandoffService
+from vikingbot.utils import get_images_path
 
 
 class OpenAPIChannelConfig(BaseChannelConfig):
@@ -43,7 +51,7 @@ class OpenAPIChannelConfig(BaseChannelConfig):
     api_key: str = ""  # If empty, no auth required
     allow_from: list[str] = []
     max_concurrent_requests: int = 100
-    base_url: str = ""  # Optional. If set, image URLs will use this as prefix (e.g. "https://api.yoursite.com").
+    base_url: str = ""  # Optional prefix for bot image and resource preview URLs (e.g. "https://api.yoursite.com").
     _channel_id: str = "default"
 
     def channel_id(self) -> str:
@@ -120,20 +128,19 @@ class OpenAPIChannel(BaseChannel):
             pending.set_final("")
         logger.info("OpenAPI channel stopped")
 
-    def _replace_send_uris(self, content: str) -> str:
+    def _replace_bot_resource_links(self, content: str) -> str:
         """
-        Replace send://filename references inside Markdown content with
-        web-accessible image URLs served by this channel.
+        Replace bot-local Markdown references with URLs served by this channel.
 
         Handles two forms:
           - Markdown image:  ![alt](send://foo.png)  →  ![alt](/bot/v1/images/foo.png)
           - Bare reference:  send://foo.png           →  ![foo](/bot/v1/images/foo.png)
+          - Markdown link:   [doc](/bot/v1/resources/preview?uri=...) → absolute URL when base_url is set
         """
-        if not content or "send://" not in content:
+        if not content:
             return content
 
         base = self.config.base_url.rstrip("/") if self.config.base_url else ""
-        images_path = get_images_path()
 
         def _image_url(filename: str) -> str:
             return f"{base}/bot/v1/images/{filename}"
@@ -155,18 +162,27 @@ class OpenAPIChannel(BaseChannel):
             alt = filename.rsplit(".", 1)[0]
             return f"![{alt}]({_image_url(filename)})"
 
-        # First replace Markdown images that point to send://
-        result = re.sub(
-            r"!\[([^\]]*)\]\((send://[^)\s]+)\)",
-            _replace_markdown,
-            content,
-        )
-        # Then replace any remaining bare send:// references
-        result = re.sub(
-            r"send://[^\s)>\"']+",
-            _replace_bare,
-            result,
-        )
+        result = content
+        if "send://" in result:
+            images_path = get_images_path()
+            # First replace Markdown images that point to send://
+            result = re.sub(
+                r"!\[([^\]]*)\]\((send://[^)\s]+)\)",
+                _replace_markdown,
+                result,
+            )
+            # Then replace any remaining bare send:// references
+            result = re.sub(
+                r"send://[^\s)>\"']+",
+                _replace_bare,
+                result,
+            )
+        if base and "/bot/v1/resources/preview?" in result:
+            result = re.sub(
+                r"\]\((/bot/v1/resources/preview\?[^)\s]+)\)",
+                lambda m: f"]({base}{m.group(1)})",
+                result,
+            )
         return result
 
     async def send(self, msg: OutboundMessage) -> None:
@@ -183,7 +199,7 @@ class OpenAPIChannel(BaseChannel):
 
         if msg.event_type == OutboundEventType.RESPONSE:
             # Rewrite send:// image references before delivering to clients
-            content = self._replace_send_uris(msg.content or "")
+            content = self._replace_bot_resource_links(msg.content or "")
             await pending.add_event("response", content)
             pending.set_final(content)
             await pending.close_stream()
@@ -195,7 +211,7 @@ class OpenAPIChannel(BaseChannel):
             await pending.add_event("tool_call", msg.content)
         elif msg.event_type == OutboundEventType.TOOL_RESULT:
             # Also rewrite images inside tool results so streaming clients see valid URLs
-            content = self._replace_send_uris(msg.content or "")
+            content = self._replace_bot_resource_links(msg.content or "")
             await pending.add_event("tool_result", content)
 
     def get_router(self) -> APIRouter:
@@ -251,6 +267,114 @@ class OpenAPIChannel(BaseChannel):
                 media_type=media_type or "application/octet-stream",
                 filename=image_path.name,
             )
+
+        @router.get("/resources/preview")
+        async def preview_resource(
+            request: Request,
+            uri: str = Query(..., description="Viking document URI"),
+            token: str = Query(..., description="Signed resource preview capability"),
+        ):
+            """Render a referenced OpenViking document as a lightweight preview page."""
+            normalized_uri = uri.strip().rstrip("/")
+            if not normalized_uri.startswith("viking://resources/"):
+                raise HTTPException(status_code=400, detail="Invalid resource URI")
+            preview_secret = (
+                os.environ.get(RESOURCE_PREVIEW_SECRET_ENV, "").strip()
+                or str(channel.bot_config.ov_server.root_api_key or "").strip()
+            )
+            try:
+                claims = verify_resource_preview_token(
+                    token,
+                    secret=preview_secret,
+                    expected_uri=normalized_uri,
+                )
+            except ResourcePreviewTokenError:
+                raise HTTPException(status_code=404, detail="Resource preview is not available")
+            if claims.account_id != channel.bot_config.ov_server.account_id:
+                raise HTTPException(status_code=404, detail="Resource preview is not available")
+
+            client = await VikingClient.create()
+            try:
+                stat = await client.stat(normalized_uri)
+                title = str(
+                    stat.get("name") or normalized_uri.rsplit("/", 1)[-1] or normalized_uri
+                )
+                content = await client.read_content(normalized_uri, level="read")
+                if not str(content or "").strip():
+                    raise HTTPException(status_code=404, detail="Resource content not found")
+                try:
+                    content = await client.materialize_inline_image_refs(
+                        str(content), normalized_uri
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to materialize preview images for {normalized_uri}: {e}")
+                content = channel._replace_bot_resource_links(str(content))
+            finally:
+                await client.close()
+
+            if "application/json" in request.headers.get("accept", ""):
+                return JSONResponse(
+                    {
+                        "title": title,
+                        "uri": normalized_uri,
+                        "markdown": str(content),
+                    }
+                )
+
+            escaped_title = html.escape(title)
+            escaped_uri = html.escape(normalized_uri)
+            escaped_content = html.escape(str(content))
+            page = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{escaped_title}</title>
+  <style>
+    body {{
+      margin: 0;
+      background: #f7f7f8;
+      color: #1f2328;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+    }}
+    main {{
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 24px;
+      line-height: 1.25;
+    }}
+    .uri {{
+      margin: 0 0 20px;
+      color: #636c76;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }}
+    pre {{
+      margin: 0;
+      padding: 20px;
+      background: #fff;
+      border: 1px solid #d0d7de;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: inherit;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{escaped_title}</h1>
+    <p class="uri">{escaped_uri}</p>
+    <pre>{escaped_content}</pre>
+  </main>
+</body>
+</html>"""
+            return HTMLResponse(page)
 
         @router.post("/chat", response_model=ChatResponse)
         async def chat(

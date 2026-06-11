@@ -90,7 +90,7 @@ PY_DEPS_IMAGE=openviking-py-deps:uvlock-server-20260401 \
 ADMIN_DEPS_IMAGE=openviking-admin-deps:npmlock-20260401 \
 IMAGE_NAME=openviking-server \
 BUILD_TARGET=server-runtime \
-./scripts/build-docker.sh 1.1.3
+./scripts/build-docker.sh 1.2.0
 ```
 
 ### 构建 `vikingbot`
@@ -101,7 +101,7 @@ BUILD_BASE_IMAGE=openviking-build-base:2026.03 \
 BOT_PY_DEPS_IMAGE=vikingbot-py-deps:uvlock-bot-20260401 \
 IMAGE_NAME=vikingbot \
 BUILD_TARGET=bot-runtime \
-./scripts/build-docker.sh 1.1.3
+./scripts/build-docker.sh 1.2.0
 ```
 
 ### 日常发版
@@ -191,6 +191,7 @@ BUILD_TARGET=server-runtime \
 - `server.with_bot` 要设为 `true`
 - `server.bot_api_url` 要指向 `http://vikingbot:18790`
 - `bot.ov_server.server_url` 不能写 `127.0.0.1`，要写 `http://openviking:1933`
+- `OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN` 要在 `openviking` 和 `vikingbot` 两个容器中保持一致，并使用足够强的随机值；它用于签发和校验带租户、文档 URI 与过期时间的参考文档预览链接
 - “联系人工”入口配置在 `bot.tools.human_handoff.entry_url`。后续只需要改 `deploy/ov.conf` 并重启 `vikingbot` 服务，不需要重新构建镜像。若配置未生效，按钮会打开 `human-handoff-url-not-configured.invalid` 占位地址
 
 如果省略 `bot.ov_server.server_url`，bot 会从根层 `server.host` 自动推导；当 `server.host=0.0.0.0` 时，它会回退到 `127.0.0.1`，这只适合同机单容器，不适合双容器。
@@ -201,7 +202,9 @@ BUILD_TARGET=server-runtime \
 cd deploy
 cp ov.conf.example ov.conf
 
-OPENVIKING_VERSION=1.2.3 docker compose up -d
+OPENVIKING_VERSION=1.2.3 \
+OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN="$(openssl rand -hex 32)" \
+docker compose up -d
 ```
 
 说明：
@@ -233,6 +236,7 @@ docker run -d \
   --network ov-net \
   -p 1933:1933 \
   -e OPENVIKING_CONFIG_FILE=/app/ov.conf \
+  -e OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN="$OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN" \
   -v ./deploy/ov.conf:/app/ov.conf:ro \
   -v openviking-data:/app/data \
   openviking-server:1.2.3 \
@@ -244,6 +248,7 @@ docker run -d \
   --name vikingbot \
   --network ov-net \
   -e OPENVIKING_CONFIG_FILE=/app/ov.conf \
+  -e OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN="$OPENVIKING_BOT_RESOURCE_PREVIEW_TOKEN" \
   -v ./deploy/ov.conf:/app/ov.conf:ro \
   -v openviking-data:/app/data \
   vikingbot:1.2.3

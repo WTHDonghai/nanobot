@@ -28,6 +28,7 @@ class ChannelManager:
         self._dispatch_task: asyncio.Task | None = None
         self._workspace_path: Any | None = None
         self._additional_deps: dict[str, Any] = {}
+        self.public_base_url: str = ""
 
     def add_channel(self, channel: BaseChannel) -> None:
         """Add a channel directly."""
@@ -108,6 +109,10 @@ class ChannelManager:
                     channel_config,
                     self.bus,
                     workspace_path=workspace_path,
+                    public_base_url=(
+                        str(getattr(channel_config, "base_url", "") or "").strip().rstrip("/")
+                        or additional_deps.get("public_base_url", "")
+                    ),
                 )
 
             elif channel_config.type == ChannelType.EMAIL:
@@ -156,15 +161,38 @@ class ChannelManager:
         channels_config = config.channels_config
         all_channel_configs = channels_config.get_all_channels()
         workspace_path = config.workspace_path
+        self.public_base_url = self._resolve_public_base_url(config)
 
         for channel_config in all_channel_configs:
             self.add_channel_from_config(
                 channel_config,
                 workspace_path=workspace_path,
+                public_base_url=self.public_base_url,
                 groq_api_key=config.providers.groq.api_key
                 if hasattr(config.providers, "groq")
                 else None,
             )
+
+    @staticmethod
+    def _resolve_public_base_url(config: Config) -> str:
+        """Resolve the externally reachable bot API base URL for channel links."""
+        for channel_config in config.channels_config.get_all_channels():
+            if channel_config.type == ChannelType.OPENAPI:
+                base_url = str(getattr(channel_config, "base_url", "") or "").strip().rstrip("/")
+                if base_url:
+                    return base_url
+        ov_server = getattr(config, "ov_server", None)
+        if ov_server:
+            server_url = str(getattr(ov_server, "server_url", "") or "").strip().rstrip("/")
+            if server_url:
+                return server_url
+        gateway = getattr(config, "gateway", None)
+        if gateway:
+            host = str(getattr(gateway, "host", "") or "").strip()
+            port = int(getattr(gateway, "port", 0) or 0)
+            if host and port and host not in {"0.0.0.0", "::"}:
+                return f"http://{host}:{port}"
+        return ""
 
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""

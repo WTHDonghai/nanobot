@@ -3,15 +3,74 @@
 
 """Tests for KB prompt optimizations that reduce search drift and token waste."""
 
+import asyncio
+import json
+import tempfile
 from pathlib import Path
 
 from vikingbot.agent.context import ContextBuilder
-from vikingbot.config.schema import CapabilityProfile, Config
+from vikingbot.agent.loop import AgentLoop
+from vikingbot.bus.queue import MessageBus
+from vikingbot.config.schema import AgentMode, Config, SessionKey
+from vikingbot.providers.base import LLMProvider, LLMResponse
+
+
+class StubProvider(LLMProvider):
+    """Minimal provider stub for finalizer tests."""
+
+    async def chat(
+        self,
+        messages,
+        tools=None,
+        tool_choice=None,
+        model=None,
+        max_tokens=4096,
+        temperature=0.7,
+        session_id=None,
+    ):
+        raise AssertionError("finalizer should not call provider on the fast path")
+
+    def get_default_model(self) -> str:
+        return "stub-model"
+
+
+class SequenceProvider(LLMProvider):
+    """Provider stub that returns a fixed sequence and records calls."""
+
+    def __init__(self, responses: list[LLMResponse]):
+        super().__init__()
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    async def chat(
+        self,
+        messages,
+        tools=None,
+        tool_choice=None,
+        model=None,
+        max_tokens=4096,
+        temperature=0.7,
+        session_id=None,
+    ):
+        self.calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "session_id": session_id,
+            }
+        )
+        return self.responses.pop(0)
+
+    def get_default_model(self) -> str:
+        return "stub-model"
 
 
 def test_kb_initial_search_prompt_prefers_focused_resource_scoped_lookup() -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
     builder = ContextBuilder(Path("."), config=config)
     prompt = builder.build_kb_initial_search_prompt()
 
@@ -23,7 +82,6 @@ def test_kb_initial_search_prompt_prefers_focused_resource_scoped_lookup() -> No
 
 def test_kb_continue_search_prompt_reads_concrete_doc_before_new_search() -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
     builder = ContextBuilder(Path("."), config=config)
     prompt = builder.build_kb_continue_search_prompt("Current search state")
 
@@ -35,8 +93,8 @@ def test_kb_continue_search_prompt_reads_concrete_doc_before_new_search() -> Non
 
 def test_kb_tool_reflection_prompt_pushes_shortest_path() -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
-    builder = ContextBuilder(Path("."), config=config)
+    workspace = Path(".")
+    builder = ContextBuilder(workspace, config=config)
 
     prompt = builder.build_tool_reflection_prompt()
 
@@ -46,21 +104,36 @@ def test_kb_tool_reflection_prompt_pushes_shortest_path() -> None:
     assert "Avoid long OR/boolean expansions unless the first focused query fails." in prompt
 
 
-def test_bid_material_initial_search_prompt_uses_high_level_tools() -> None:
+def test_default_tool_reflection_prompt_stays_general_in_full_mode() -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.BID_MATERIAL
+    config.agents.mode = AgentMode.FULL
     builder = ContextBuilder(Path("."), config=config)
 
-    prompt = builder.build_retrieval_initial_search_prompt()
+    prompt = builder.build_tool_reflection_prompt()
 
-    assert "search_certificates" in prompt
-    assert "search_solution_materials" in prompt
-    assert "collect_bid_evidence" in prompt
+    assert prompt == "Reflect on the results and decide next steps."
+    assert "Default search scope" not in prompt
+
+
+def test_explicit_default_controls_knowledge_base_mode_without_legacy_profile(tmp_path: Path) -> None:
+    (tmp_path / "TOOLS.md").write_text(
+        "**IMPORTANT: Use the internal document repository as the only evidence source for user-facing answers.**",
+        encoding="utf-8",
+    )
+    config = Config()
+    builder = ContextBuilder(tmp_path, config=config)
+
+    assert not hasattr(config.agents, "capability_profile")
+    assert builder._is_retrieval_mode() is True
+    assert "For this knowledge-base request" in builder.build_retrieval_initial_search_prompt()
 
 
 def test_retrieval_final_response_prompt_forbids_unsupported_facts(tmp_path: Path) -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.TECHNICAL_SUPPORT
+    (tmp_path / "SOUL.md").write_text(
+        "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+        encoding="utf-8",
+    )
     builder = ContextBuilder(tmp_path, config=config)
 
     prompt = builder.build_retrieval_final_response_system_prompt()
@@ -71,14 +144,292 @@ def test_retrieval_final_response_prompt_forbids_unsupported_facts(tmp_path: Pat
     assert "answer only the supported part" in prompt
 
 
-def test_technical_support_policy_forbids_unstated_xms_details(tmp_path: Path) -> None:
-    config = Config()
-    config.agents.capability_profile = CapabilityProfile.TECHNICAL_SUPPORT
-    builder = ContextBuilder(tmp_path, config=config)
+def test_retrieval_finalizer_appends_reference_document_link_for_knowledge_base_mode() -> None:
+    async def run_case(workspace: Path) -> str:
+        config = Config()
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=StubProvider(),
+            workspace=workspace,
+            config=config,
+        )
+        uri = "viking://resources/XMS/8.3酒店EDP维护手册(XMS)/01-base_2.md"
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-read-1",
+                        "type": "function",
+                        "function": {
+                            "name": "openviking_read",
+                            "arguments": json.dumps(
+                                {"uri": uri, "level": "read"}, ensure_ascii=False
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-read-1",
+                "name": "openviking_read",
+                "content": "宾客状态包含若干代码说明。",
+            },
+        ]
 
-    prompt = builder.build_tool_reflection_prompt()
-    final_prompt = builder.build_retrieval_final_response_system_prompt()
+        return await loop._finalize_kb_response(
+            "XMS 宾客状态包含若干代码说明。",
+            SessionKey(type="cli", channel_id="default", chat_id="reference-test"),
+            messages,
+        )
 
-    assert "do not add unstated XMS details" in prompt
-    assert "only facts explicitly supported by retrieved XMS documentation" in final_prompt
-    assert "Do not invent or embellish XMS module names" in final_prompt
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        reply = asyncio.run(run_case(workspace))
+    assert reply.startswith("XMS 宾客状态包含若干代码说明。")
+    assert "参考文档" in reply
+    assert "8.3酒店EDP维护手册(XMS) / 01 base 2" in reply
+    assert "/bot/v1/resources/preview?uri=" in reply
+    assert "&token=" in reply
+
+
+def test_retrieval_finalizer_references_only_semantically_selected_sources() -> None:
+    async def run_case(workspace: Path) -> str:
+        config = Config()
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=StubProvider(),
+            workspace=workspace,
+            config=config,
+        )
+        selected_uri = "viking://resources/demo/selected.md"
+        unrelated_uri = "viking://resources/demo/unrelated.md"
+        messages = [
+            {"role": "user", "content": "Explain code C"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "selected-read",
+                        "type": "function",
+                        "function": {
+                            "name": "openviking_read",
+                            "arguments": json.dumps(
+                                {"uri": selected_uri, "level": "read"}, ensure_ascii=False
+                            ),
+                        },
+                    },
+                    {
+                        "id": "unrelated-read",
+                        "type": "function",
+                        "function": {
+                            "name": "openviking_read",
+                            "arguments": json.dumps(
+                                {"uri": unrelated_uri, "level": "read"}, ensure_ascii=False
+                            ),
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "selected-read",
+                "name": "openviking_read",
+                "content": "Code C means queued.",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "unrelated-read",
+                "name": "openviking_read",
+                "content": "Unrelated settings.",
+            },
+            {
+                "role": "system",
+                "content": loop._build_relevant_evidence_prompt(
+                    "Explain code C",
+                    ["Code C means queued."],
+                    source_uri=selected_uri,
+                ),
+            },
+        ]
+
+        return await loop._finalize_kb_response(
+            "Code C means queued.",
+            SessionKey(type="cli", channel_id="default", chat_id="selected-reference-test"),
+            messages,
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        reply = asyncio.run(run_case(workspace))
+
+    assert "selected" in reply
+    assert "unrelated" not in reply
+
+
+def test_retrieval_finalizer_can_decline_images_for_plain_text_draft() -> None:
+    async def run_case(workspace: Path) -> tuple[str, SequenceProvider]:
+        config = Config()
+        provider = SequenceProvider([LLMResponse(content="NONE")])
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=config,
+        )
+        uri = "viking://resources/demo/component-codes.md"
+        evidence_block = "Code C means the component is currently queued."
+        image_evidence_block = f"{evidence_block}\n\n![Code C screenshot](send://code-c.png)"
+        messages = [
+            {"role": "user", "content": "What does code C mean?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-read-1",
+                        "type": "function",
+                        "function": {
+                            "name": "openviking_read",
+                            "arguments": json.dumps(
+                                {"uri": uri, "level": "read"}, ensure_ascii=False
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-read-1",
+                "name": "openviking_read",
+                "content": image_evidence_block,
+            },
+            {
+                "role": "system",
+                "content": loop._build_relevant_evidence_prompt(
+                    "What does code C mean?",
+                    [image_evidence_block],
+                    source_uri=uri,
+                ),
+            },
+        ]
+
+        return (
+            await loop._finalize_kb_response(
+                "Code C means the component is currently queued.",
+                SessionKey(type="cli", channel_id="default", chat_id="plain-text-finalizer-test"),
+                messages,
+            ),
+            provider,
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        reply, provider = asyncio.run(run_case(workspace))
+
+    assert reply.startswith("Code C means the component is currently queued.")
+    assert "send://code-c.png" not in reply
+    assert "参考文档" in reply
+    assert provider.calls[0]["session_id"].endswith(":kb-image-select")
+
+
+def test_image_selector_caps_selected_segments() -> None:
+    async def run_case(workspace: Path) -> tuple[list[str], SequenceProvider]:
+        provider = SequenceProvider([LLMResponse(content="1,2,3,4,5,6")])
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=Config(),
+        )
+        segments = [
+            f"Step {index}\n\n![screen {index}](send://screen-{index}.png)"
+            for index in range(1, 7)
+        ]
+        selected = await loop._select_relevant_image_segments(
+            "Follow these steps.",
+            segments,
+            SessionKey(type="cli", channel_id="default", chat_id="image-cap-test"),
+            user_request="How do I complete the workflow?",
+        )
+        return selected, provider
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        selected, provider = asyncio.run(run_case(Path(tmpdir)))
+
+    assert len(selected) == 4
+    assert "send://screen-4.png" in selected[-1]
+    assert "send://screen-5.png" not in "\n".join(selected)
+    assert "Select at most 4 segments." in provider.calls[0]["messages"][0]["content"]
+
+
+def test_retrieval_finalizer_can_add_useful_image_to_plain_text_draft() -> None:
+    async def run_case(workspace: Path) -> tuple[str, SequenceProvider]:
+        config = Config()
+        image_line = "![Report expert screen](send://report-expert.png)"
+        provider = SequenceProvider(
+            [
+                LLMResponse(content="1"),
+                LLMResponse(content="Open Report Expert from the Query menu."),
+                LLMResponse(content="Open Report Expert from the Query menu."),
+            ]
+        )
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=config,
+        )
+        uri = "viking://resources/demo/report-expert.md"
+        evidence_block = (
+            "Open Report Expert from the Query menu. The screen shows the report search area."
+            f"\n\n{image_line}"
+        )
+        messages = [
+            {"role": "user", "content": "How do I find Report Expert in the UI?"},
+            {
+                "role": "system",
+                "content": loop._build_relevant_evidence_prompt(
+                    "How do I find Report Expert in the UI?",
+                    [evidence_block],
+                    source_uri=uri,
+                ),
+            },
+        ]
+
+        return (
+            await loop._finalize_kb_response(
+                "Open Report Expert from the Query menu.",
+                SessionKey(type="cli", channel_id="default", chat_id="image-choice-test"),
+                messages,
+            ),
+            provider,
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        reply, provider = asyncio.run(run_case(workspace))
+
+    assert "send://report-expert.png" in reply
+    assert provider.calls[0]["session_id"].endswith(":kb-image-select")
+    assert provider.calls[1]["session_id"].endswith(":kb-final")
+    assert provider.calls[2]["session_id"].endswith(":kb-final-correct")

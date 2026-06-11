@@ -4,6 +4,7 @@
 
 import argparse
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ import uvicorn
 
 from openviking.server.app import create_app
 from openviking.server.config import load_server_config
+from openviking_cli.resource_preview import RESOURCE_PREVIEW_SECRET_ENV
 from openviking_cli.utils.logger import configure_uvicorn_logging
 
 
@@ -139,6 +141,8 @@ def main():
 
     bot_process: Optional[BotProcess] = None
     if config.with_bot:
+        if not os.environ.get(RESOURCE_PREVIEW_SECRET_ENV):
+            os.environ[RESOURCE_PREVIEW_SECRET_ENV] = secrets.token_urlsafe(32)
         print(f"Bot API proxy enabled, forwarding to {config.bot_api_url}")
         # Determine if bot logging should be enabled
         enable_bot_logging = args.enable_bot_logging

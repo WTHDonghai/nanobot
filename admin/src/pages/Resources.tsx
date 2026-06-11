@@ -1,6 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle,
   CheckCircle,
@@ -22,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { fetchApi } from '../services/api';
+import MarkdownRenderer from '../components/markdown/MarkdownRenderer';
 import './Resources.css';
 
 interface KnowledgeFolder {
@@ -388,8 +387,6 @@ const inferImageMimeType = (filename: string) => {
   return matchedEntry?.[1] || 'image/png';
 };
 
-const passthroughUrlTransform = (url: string) => url;
-
 async function materializeDocxMarkdownImages(
   serverUrl: string,
   apiKey: string,
@@ -665,24 +662,11 @@ const PreviewModal = ({
             ) : error ? (
               <div className="fm-state fm-state-error">{error}</div>
             ) : contentMode === 'markdown' ? (
-              <div className="fm-preview-markdown">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  urlTransform={passthroughUrlTransform}
-                  components={{
-                    img: ({ src, alt }) => (
-                      <img
-                        src={src}
-                        alt={alt || ''}
-                        className="fm-preview-image"
-                        loading="lazy"
-                      />
-                    ),
-                  }}
-                >
-                  {content || '(空)'}
-                </ReactMarkdown>
-              </div>
+              <MarkdownRenderer
+                className="fm-preview-markdown"
+                imageClassName="fm-preview-image"
+                content={content || '(空)'}
+              />
             ) : (
               <pre>{content || '(空)'}</pre>
             )}
@@ -2303,14 +2287,10 @@ const Resources = () => {
                         <span className="fm-prop-note fm-prop-note-error">{selectedDocumentAbstractError}</span>
                       ) : (
                         <div className="fm-prop-markdown-scroll">
-                          <div className="fm-prop-markdown">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              urlTransform={passthroughUrlTransform}
-                            >
-                              {selectedDocumentAbstract || '暂无摘要'}
-                            </ReactMarkdown>
-                          </div>
+                          <MarkdownRenderer
+                            className="fm-prop-markdown"
+                            content={selectedDocumentAbstract || '暂无摘要'}
+                          />
                         </div>
                       )}
                     </div>

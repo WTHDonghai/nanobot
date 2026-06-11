@@ -8,13 +8,36 @@ Supports all LLM providers with OpenAI-compatible API endpoints, including:
 """
 
 import json
+import re
 from typing import Any
-from openai import AsyncOpenAI
+
 from loguru import logger
+from openai import AsyncOpenAI
 
 from vikingbot.integrations.langfuse import LangfuseClient
-from vikingbot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from vikingbot.providers.base import (
+    REQUIRED_TOOL_DISPATCH_NAME,
+    LLMProvider,
+    LLMResponse,
+    ToolCallRequest,
+    build_required_tool_dispatch,
+    translate_required_tool_dispatch,
+)
 from vikingbot.utils.helpers import cal_str_tokens
+
+
+def _is_tool_choice_parameter_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "tool_choice" in message
+        and (
+            "invalid" in message
+            or "badrequest" in message
+            or "bad request" in message
+            or "invalidparameter" in message
+            or re.search(r"\b400\b", message) is not None
+        )
+    )
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -45,6 +68,7 @@ class OpenAICompatibleProvider(LLMProvider):
             base_url=api_base,
             default_headers=extra_headers,
         )
+        self._required_tool_choice_unsupported_models: set[str] = set()
 
     def _handle_system_message(
         self, model: str, messages: list[dict[str, Any]]
@@ -141,9 +165,22 @@ class OpenAICompatibleProvider(LLMProvider):
             "temperature": temperature,
         }
 
+        required_dispatch = False
         if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice if tool_choice is not None else "auto"
+            effective_tool_choice = tool_choice if tool_choice is not None else "auto"
+            if (
+                effective_tool_choice == "required"
+                and model in self._required_tool_choice_unsupported_models
+            ):
+                required_dispatch = True
+                kwargs["tools"] = [build_required_tool_dispatch(tools)]
+                kwargs["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": REQUIRED_TOOL_DISPATCH_NAME},
+                }
+            else:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = effective_tool_choice
 
         # Langfuse integration
         langfuse_observation = None
@@ -161,8 +198,30 @@ class OpenAICompatibleProvider(LLMProvider):
                         metadata=metadata,
                     )
 
-            response = await self.client.chat.completions.create(**kwargs)
+            try:
+                response = await self.client.chat.completions.create(**kwargs)
+            except Exception as e:
+                if kwargs.get("tool_choice") == "required" and _is_tool_choice_parameter_error(e):
+                    logger.warning(
+                        "[LLM_COMPAT] Retrying OpenAI-compatible chat with a named required-tool dispatcher "
+                        f"after required was rejected model={model} session_id={session_id}: {e}"
+                    )
+                    self._required_tool_choice_unsupported_models.add(model)
+                    required_dispatch = True
+                    kwargs["tools"] = [build_required_tool_dispatch(tools or [])]
+                    kwargs["tool_choice"] = {
+                        "type": "function",
+                        "function": {"name": REQUIRED_TOOL_DISPATCH_NAME},
+                    }
+                    response = await self.client.chat.completions.create(**kwargs)
+                else:
+                    raise
             llm_response = self._parse_response(response)
+            if required_dispatch:
+                llm_response = translate_required_tool_dispatch(llm_response, tools or [])
+                llm_response.metadata["effective_tool_choice"] = "required_dispatch"
+            else:
+                llm_response.metadata["effective_tool_choice"] = kwargs.get("tool_choice")
 
             # Update and end Langfuse observation
             if langfuse_observation:
@@ -216,6 +275,11 @@ class OpenAICompatibleProvider(LLMProvider):
 
             return llm_response
         except Exception as e:
+            logger.exception(
+                "[LLM_ERROR] OpenAI-compatible chat failed "
+                f"model={model} tool_choice={kwargs.get('tool_choice')} "
+                f"tools={len(tools or [])} session_id={session_id}: {e}"
+            )
             # End Langfuse observation with error
             if langfuse_observation:
                 try:

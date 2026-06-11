@@ -1,6 +1,8 @@
 """Base class for agent tools."""
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 from vikingbot.config.schema import SessionKey
 from vikingbot.sandbox.manager import SandboxManager
@@ -35,12 +37,6 @@ class ToolContext:
     sandbox_manager: SandboxManager | None = None
     workspace_id: str | None = None
     sender_id: str | None = None
-
-
-"""Base class for agent tools."""
-
-from abc import ABC, abstractmethod
-from typing import Any
 
 
 class Tool(ABC):
@@ -180,6 +176,12 @@ class Tool(ABC):
             not be called directly from outside the class.
         """
         t, label = schema.get("type"), path or "parameter"
+        if "oneOf" in schema:
+            branch_errors = [self._validate(val, branch, path) for branch in schema["oneOf"]]
+            if any(not errors for errors in branch_errors):
+                return []
+            return [f"{label} should match one of the allowed schemas"]
+
         if t in self._TYPE_MAP and not isinstance(val, self._TYPE_MAP[t]):
             return [f"{label} should be {t}"]
 

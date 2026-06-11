@@ -3,6 +3,11 @@ import type { jsPDF } from 'jspdf';
 const EXPORT_STAGE_WIDTH = 860;
 const PDF_MARGIN = 28;
 const PDF_BLOCK_GAP = 18;
+const IMAGE_FETCH_TIMEOUT_MS = 8000;
+const IMAGE_LOAD_TIMEOUT_MS = 5000;
+const FONT_READY_TIMEOUT_MS = 2000;
+const MAX_CANVAS_PIXELS = 16_000_000;
+const DEFAULT_IMAGE_QUALITY = 0.94;
 const LIGHT_THEME_VARS: Record<string, string> = {
   '--bg': '#f1f5f9',
   '--bg2': '#ffffff',
@@ -25,6 +30,8 @@ type ExportChatPdfOptions = {
   filenameBase?: string;
   messageNodes: HTMLElement[];
   apiKey?: string;
+  captureScale?: number;
+  imageQuality?: number;
 };
 
 function sanitizeFilename(value: string): string {
@@ -36,21 +43,60 @@ function sanitizeFilename(value: string): string {
   return (normalized || 'chat-export').slice(0, 80);
 }
 
-function waitForImageLoad(img: HTMLImageElement): Promise<void> {
-  if (img.complete && img.naturalWidth > 0) {
+function waitForImageLoad(img: HTMLImageElement, timeoutMs = IMAGE_LOAD_TIMEOUT_MS): Promise<void> {
+  if (img.complete) {
     return Promise.resolve();
   }
 
   return new Promise((resolve) => {
     const done = () => {
+      window.clearTimeout(timeout);
       img.removeEventListener('load', done);
       img.removeEventListener('error', done);
       resolve();
     };
+    const timeout = window.setTimeout(done, timeoutMs);
 
     img.addEventListener('load', done);
     img.addEventListener('error', done);
   });
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error('timeout')), timeoutMs);
+    promise
+      .then((value) => resolve(value))
+      .catch((error) => reject(error))
+      .finally(() => window.clearTimeout(timeout));
+  });
+}
+
+async function fetchBlobWithTimeout(url: string, init: RequestInit, timeoutMs = IMAGE_FETCH_TIMEOUT_MS): Promise<Blob> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return await withTimeout(response.blob(), timeoutMs);
+  } finally {
+    controller.abort();
+    window.clearTimeout(timeout);
+  }
+}
+
+async function waitForFonts(): Promise<void> {
+  if (!('fonts' in document)) return;
+
+  await Promise.race([
+    document.fonts.ready.then(() => undefined).catch(() => undefined),
+    new Promise<void>((resolve) => {
+      window.setTimeout(resolve, FONT_READY_TIMEOUT_MS);
+    }),
+  ]);
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -77,10 +123,8 @@ async function inlineImage(img: HTMLImageElement, apiKey?: string): Promise<void
 
   for (const requestInit of attempts) {
     try {
-      const response = await fetch(src, requestInit);
-      if (!response.ok) continue;
-      const blob = await response.blob();
-      const dataUrl = await blobToDataUrl(blob);
+      const blob = await fetchBlobWithTimeout(src, requestInit);
+      const dataUrl = await withTimeout(blobToDataUrl(blob), IMAGE_LOAD_TIMEOUT_MS);
       if (!dataUrl) continue;
       img.src = dataUrl;
       break;
@@ -135,10 +179,17 @@ function cloneMessageNode(node: HTMLElement): HTMLElement {
 async function renderBlockCanvas(
   element: HTMLElement,
   captureElement: typeof import('html2canvas').default,
+  preferredScale?: number,
 ): Promise<HTMLCanvasElement> {
+  const elementWidth = Math.max(element.scrollWidth, element.offsetWidth, 1);
+  const elementHeight = Math.max(element.scrollHeight, element.offsetHeight, 1);
+  const baseScale = preferredScale ?? Math.min(window.devicePixelRatio || 1, 2);
+  const maxScale = Math.sqrt(MAX_CANVAS_PIXELS / Math.max(elementWidth * elementHeight, 1));
+  const scale = Math.min(baseScale, maxScale);
+
   return captureElement(element, {
     backgroundColor: '#ffffff',
-    scale: Math.min(window.devicePixelRatio || 1, 2),
+    scale,
     useCORS: true,
     logging: false,
   });
@@ -176,15 +227,22 @@ function addCanvasToPdf(
   margin: number,
   gap: number,
   currentY: number,
+  imageQuality = DEFAULT_IMAGE_QUALITY,
 ): number {
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const targetWidth = pageWidth - margin * 2;
   const maxBlockHeight = pageHeight - margin * 2;
   const sourcePixelsPerPoint = canvas.width / targetWidth;
+  const canvasHeight = canvas.height / sourcePixelsPerPoint;
   let remainingPixels = canvas.height;
   let sourceOffsetY = 0;
   let nextY = currentY;
+
+  if (canvasHeight <= maxBlockHeight && nextY + canvasHeight > pageHeight - margin) {
+    pdf.addPage();
+    nextY = margin;
+  }
 
   while (remainingPixels > 0) {
     const availableHeight = pageHeight - margin - nextY;
@@ -200,7 +258,7 @@ function addCanvasToPdf(
     const sliceHeight = slicePixels / sourcePixelsPerPoint;
 
     pdf.addImage(
-      sliceCanvas.toDataURL('image/jpeg', 0.94),
+      sliceCanvas.toDataURL('image/jpeg', imageQuality),
       'JPEG',
       margin,
       nextY,
@@ -229,6 +287,8 @@ export async function exportChatSubsetToPdf({
   filenameBase,
   messageNodes,
   apiKey,
+  captureScale,
+  imageQuality = DEFAULT_IMAGE_QUALITY,
 }: ExportChatPdfOptions): Promise<void> {
   if (messageNodes.length === 0) {
     throw new Error('没有可导出的消息');
@@ -247,9 +307,7 @@ export async function exportChatSubsetToPdf({
       stage.appendChild(cloneMessageNode(node));
     });
 
-    if ('fonts' in document) {
-      await document.fonts.ready;
-    }
+    await waitForFonts();
     await inlineImages(stage, apiKey);
 
     const blocks = Array.from(stage.children) as HTMLElement[];
@@ -257,8 +315,8 @@ export async function exportChatSubsetToPdf({
     let currentY = PDF_MARGIN;
 
     for (const [index, block] of blocks.entries()) {
-      const canvas = await renderBlockCanvas(block, captureElement);
-      currentY = addCanvasToPdf(pdf, canvas, PDF_MARGIN, PDF_BLOCK_GAP, currentY);
+      const canvas = await renderBlockCanvas(block, captureElement, captureScale);
+      currentY = addCanvasToPdf(pdf, canvas, PDF_MARGIN, PDF_BLOCK_GAP, currentY, imageQuality);
 
       if (index < blocks.length - 1 && currentY >= pdf.internal.pageSize.getHeight() - PDF_MARGIN) {
         pdf.addPage();

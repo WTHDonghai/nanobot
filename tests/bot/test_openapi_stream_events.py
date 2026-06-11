@@ -11,16 +11,22 @@ from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
-
+from fastapi.testclient import TestClient
 from vikingbot.agent.loop import AgentLoop
 from vikingbot.bus.events import InboundMessage, OutboundEventType, OutboundMessage
 from vikingbot.bus.queue import MessageBus
+from vikingbot.channels import openapi as openapi_channel
 from vikingbot.channels.openapi import OpenAPIChannel, OpenAPIChannelConfig, PendingResponse
-from vikingbot.cli.commands import prepare_channel
 from vikingbot.channels.openapi_models import ChatRequest, EventType
-from vikingbot.config.schema import CapabilityProfile, Config, SessionKey
+from vikingbot.cli.commands import prepare_channel
+from vikingbot.config.schema import AgentMode, Config, SessionKey
 from vikingbot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from vikingbot.utils import set_bot_data_path
 
+from openviking_cli.resource_preview import (
+    RESOURCE_PREVIEW_SECRET_ENV,
+    create_resource_preview_token,
+)
 
 KB_FALLBACK_RESPONSE = (
     "抱歉，我暂时没有在当前知识库中找到足够依据来回答这个问题。需要的话，您可以进一步缩小范围，"
@@ -113,6 +119,145 @@ def test_prepare_channel_registers_dynamic_openapi_config_for_agent_loop() -> No
     )
 
 
+def test_openapi_resource_preview_requires_valid_signed_capability(monkeypatch, tmp_path) -> None:
+    class StubVikingClient:
+        closed = False
+
+        async def stat(self, uri: str):
+            return {"name": "01-base_2.md"}
+
+        async def read_content(self, uri: str, level: str = "read"):
+            return "宾客状态包含 A、R、D 等代码。\n\n![状态图](viking://resources/XMS/_images/status.png)"
+
+        async def materialize_inline_image_refs(self, content: str, source_uri: str):
+            assert source_uri == "viking://resources/XMS/01-base_2.md"
+            return content.replace(
+                "![状态图](viking://resources/XMS/_images/status.png)",
+                "![状态图](send://status.png)",
+            )
+
+        async def close(self):
+            self.closed = True
+
+    async def create_client():
+        return StubVikingClient()
+
+    monkeypatch.setenv(RESOURCE_PREVIEW_SECRET_ENV, "preview-secret")
+    monkeypatch.setattr(openapi_channel.VikingClient, "create", create_client)
+    set_bot_data_path(tmp_path)
+    images_dir = tmp_path / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    (images_dir / "status.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    app = FastAPI()
+    channel = OpenAPIChannel(
+        config=OpenAPIChannelConfig(),
+        bus=MessageBus(),
+        workspace_path=Path.cwd(),
+        app=app,
+    )
+    channel._setup_routes()
+
+    client = TestClient(app)
+    uri = "viking://resources/XMS/01-base_2.md"
+    token = create_resource_preview_token(
+        uri=uri,
+        account_id="default",
+        secret="preview-secret",
+    )
+
+    blocked = client.get(
+        "/bot/v1/resources/preview",
+        params={"uri": uri, "token": "invalid"},
+    )
+    assert blocked.status_code == 404
+
+    remote_client = TestClient(app, client=("203.0.113.10", 1234))
+    mismatched_uri_response = remote_client.get(
+        "/bot/v1/resources/preview",
+        params={"uri": "viking://resources/XMS/other.md", "token": token},
+    )
+    assert mismatched_uri_response.status_code == 404
+
+    json_response = client.get(
+        "/bot/v1/resources/preview",
+        params={"uri": uri, "token": token},
+        headers={"Accept": "application/json"},
+    )
+
+    assert json_response.status_code == 200
+    assert json_response.json() == {
+        "title": "01-base_2.md",
+        "uri": uri,
+        "markdown": "宾客状态包含 A、R、D 等代码。\n\n![状态图](/bot/v1/images/status.png)",
+    }
+
+    response = client.get(
+        "/bot/v1/resources/preview",
+        params={"uri": uri, "token": token},
+    )
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "01-base_2.md" in response.text
+    assert "宾客状态包含 A、R、D 等代码。" in response.text
+    assert "![状态图](/bot/v1/images/status.png)" in response.text
+
+    assert "application/json" in json_response.headers["content-type"]
+
+
+def test_openapi_resource_preview_rejects_other_account_capability(monkeypatch, tmp_path) -> None:
+    create_called = False
+
+    async def create_client():
+        nonlocal create_called
+        create_called = True
+        raise AssertionError("client should not be created")
+
+    monkeypatch.setenv(RESOURCE_PREVIEW_SECRET_ENV, "preview-secret")
+    monkeypatch.setattr(openapi_channel.VikingClient, "create", create_client)
+    set_bot_data_path(tmp_path)
+
+    app = FastAPI()
+    channel = OpenAPIChannel(
+        config=OpenAPIChannelConfig(),
+        bus=MessageBus(),
+        workspace_path=Path.cwd(),
+        app=app,
+    )
+    channel._setup_routes()
+
+    uri = "viking://resources/XMS/remote.md"
+    token = create_resource_preview_token(
+        uri=uri,
+        account_id="another-account",
+        secret="preview-secret",
+    )
+    response = TestClient(app).get(
+        "/bot/v1/resources/preview",
+        params={"uri": uri, "token": token},
+    )
+
+    assert response.status_code == 404
+    assert create_called is False
+
+
+def test_openapi_channel_rewrites_reference_preview_links_with_base_url() -> None:
+    channel = OpenAPIChannel(
+        config=OpenAPIChannelConfig(base_url="https://support.example.com"),
+        bus=MessageBus(),
+        workspace_path=Path.cwd(),
+    )
+
+    content = "参考文档\n- [01 base 2](/bot/v1/resources/preview?uri=viking%3A%2F%2Fresources%2Fdoc.md)"
+    rewritten = channel._replace_bot_resource_links(content)
+
+    assert (
+        "[01 base 2](https://support.example.com/bot/v1/resources/preview?uri=viking%3A%2F%2Fresources%2Fdoc.md)"
+        in rewritten
+    )
+
+
 @pytest.mark.asyncio
 async def test_openapi_channel_forwards_iteration_events() -> None:
     bus = MessageBus()
@@ -140,7 +285,7 @@ async def test_openapi_channel_forwards_iteration_events() -> None:
 @pytest.mark.asyncio
 async def test_agent_loop_publishes_tool_call_before_execution_starts() -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.FULL
+    config.agents.mode = AgentMode.FULL
     config.agents.api_key = "test-key"
     config.agents.api_base = "http://provider.example"
 
@@ -171,6 +316,10 @@ async def test_agent_loop_publishes_tool_call_before_execution_starts() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "You are a general assistant. Help with local files and code tasks.",
+            encoding="utf-8",
+        )
         loop = AgentLoop(
             bus=bus,
             provider=provider,
@@ -209,7 +358,6 @@ async def test_agent_loop_publishes_tool_call_before_execution_starts() -> None:
 @pytest.mark.asyncio
 async def test_agent_loop_publishes_kb_text_draft_as_reasoning_before_retry() -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
 
     provider = StubProvider(
         [
@@ -228,6 +376,10 @@ async def test_agent_loop_publishes_kb_text_draft_as_reasoning_before_retry() ->
 
     with tempfile.TemporaryDirectory() as tmpdir:
         workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
         loop = AgentLoop(
             bus=bus,
             provider=provider,
@@ -254,7 +406,6 @@ async def test_agent_loop_publishes_kb_text_draft_as_reasoning_before_retry() ->
 @pytest.mark.asyncio
 async def test_agent_loop_requires_tool_call_until_kb_document_evidence_is_ready() -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
 
     provider = StubProvider(
         [
@@ -265,6 +416,10 @@ async def test_agent_loop_requires_tool_call_until_kb_document_evidence_is_ready
 
     with tempfile.TemporaryDirectory() as tmpdir:
         workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
         loop = AgentLoop(
             bus=MessageBus(),
             provider=provider,
@@ -297,6 +452,47 @@ async def test_agent_loop_requires_tool_call_until_kb_document_evidence_is_ready
     assert len(provider.calls) == 2
     assert provider.calls[0]["tool_choice"] == "required"
     assert provider.calls[1]["tool_choice"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_stops_on_provider_error_response() -> None:
+    config = Config()
+    provider = StubProvider(
+        [
+            LLMResponse(
+                content="Error calling LLM: litellm.BadRequestError: invalid tool_choice",
+                finish_reason="error",
+            )
+        ]
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=config,
+            max_iterations=5,
+        )
+        loop.tools.get_definitions = lambda: []
+
+        final_content, tools_used, token_usage, iteration = await loop._run_agent_loop(
+            messages=[{"role": "user", "content": "如何办理入住"}],
+            session_key=SessionKey(type="cli", channel_id="default", chat_id="provider-error"),
+            publish_events=False,
+            sender_id="user-1",
+        )
+
+    assert final_content == "抱歉，当前模型调用失败，暂时无法完成回答。请检查模型配置或服务端日志后重试。"
+    assert tools_used == []
+    assert token_usage["total_tokens"] == 0
+    assert iteration == 1
+    assert len(provider.calls) == 1
 
 
 def test_agent_loop_classifies_openviking_connection_errors_as_not_evidence() -> None:

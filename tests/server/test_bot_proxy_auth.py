@@ -9,7 +9,14 @@ from fastapi.testclient import TestClient
 
 import openviking.server.routers.bot as bot_router_module
 from openviking.server.auth import get_request_context
+from openviking.server.config import PublicBotConfig
 from openviking.server.identity import RequestContext, Role
+from openviking.server.public_bot import PublicBotIdentityResolver
+from openviking_cli.resource_preview import (
+    RESOURCE_PREVIEW_SECRET_ENV,
+    create_resource_preview_token,
+    verify_resource_preview_token,
+)
 from openviking_cli.session.user_id import UserIdentifier
 
 
@@ -39,6 +46,13 @@ def make_request(headers: dict[str, str]) -> Request:
 def test_extract_auth_token(headers: dict[str, str], expected: str):
     """Accepted auth header formats should both produce a token."""
     assert bot_router_module.extract_auth_token(make_request(headers)) == expected
+
+
+def test_public_bot_identity_allows_signed_resource_preview_path() -> None:
+    resolver = object.__new__(PublicBotIdentityResolver)
+    resolver.config = PublicBotConfig(enabled=True)
+
+    assert resolver.is_enabled_for_path("/bot/v1/resources/preview") is True
 
 
 def test_handoff_proxy_forwards_body_and_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -99,6 +113,153 @@ def test_handoff_proxy_forwards_body_and_api_key(monkeypatch: pytest.MonkeyPatch
         "X-API-Key": "test-key",
     }
     assert captured["timeout"] == 30.0
+
+
+def test_resource_preview_proxy_forwards_accept_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class StubResponse:
+        status_code = 200
+        content = b'{"title":"doc","uri":"viking://resources/doc.md","markdown":"body"}'
+        text = content.decode("utf-8")
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class StubAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, params, headers, timeout):
+            captured["url"] = url
+            captured["params"] = params
+            captured["headers"] = headers
+            captured["timeout"] = timeout
+            return StubResponse()
+
+    monkeypatch.setattr(bot_router_module.httpx, "AsyncClient", StubAsyncClient)
+    monkeypatch.setenv(RESOURCE_PREVIEW_SECRET_ENV, "preview-secret")
+    bot_router_module.set_bot_api_url("http://bot-service")
+
+    async def user_context() -> RequestContext:
+        return RequestContext(
+            user=UserIdentifier("acme", "guest_123", "default"),
+            role=Role.USER,
+        )
+
+    app = FastAPI()
+    app.dependency_overrides[get_request_context] = user_context
+    app.include_router(bot_router_module.router, prefix="/bot/v1")
+
+    client = TestClient(app)
+    uri = "viking://resources/doc.md"
+    token = create_resource_preview_token(
+        uri=uri,
+        account_id="acme",
+        secret="preview-secret",
+    )
+    response = client.get(
+        "/bot/v1/resources/preview",
+        params={"uri": uri, "token": token},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["markdown"] == "body"
+    assert captured["url"] == "http://bot-service/bot/v1/resources/preview"
+    assert captured["params"] == {"uri": uri, "token": token}
+    assert captured["headers"] == {"Accept": "application/json"}
+    assert captured["timeout"] == 30.0
+
+
+def test_resource_preview_proxy_rejects_cross_account_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(RESOURCE_PREVIEW_SECRET_ENV, "preview-secret")
+    bot_router_module.set_bot_api_url("http://bot-service")
+
+    async def user_context() -> RequestContext:
+        return RequestContext(
+            user=UserIdentifier("acme", "guest_123", "default"),
+            role=Role.USER,
+        )
+
+    app = FastAPI()
+    app.dependency_overrides[get_request_context] = user_context
+    app.include_router(bot_router_module.router, prefix="/bot/v1")
+    uri = "viking://resources/doc.md"
+    token = create_resource_preview_token(
+        uri=uri,
+        account_id="other-account",
+        secret="preview-secret",
+    )
+
+    response = TestClient(app).get(
+        "/bot/v1/resources/preview",
+        params={"uri": uri, "token": token},
+    )
+
+    assert response.status_code == 403
+
+
+def test_resource_preview_proxy_upgrades_legacy_unsigned_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class StubResponse:
+        status_code = 200
+        content = b'{"title":"doc","markdown":"body"}'
+        text = content.decode("utf-8")
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class StubAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, params, headers, timeout):
+            captured["params"] = params
+            return StubResponse()
+
+    monkeypatch.setattr(bot_router_module.httpx, "AsyncClient", StubAsyncClient)
+    monkeypatch.setenv(RESOURCE_PREVIEW_SECRET_ENV, "preview-secret")
+    bot_router_module.set_bot_api_url("http://bot-service")
+
+    async def user_context() -> RequestContext:
+        return RequestContext(
+            user=UserIdentifier("acme", "guest_123", "default"),
+            role=Role.USER,
+        )
+
+    app = FastAPI()
+    app.dependency_overrides[get_request_context] = user_context
+    app.include_router(bot_router_module.router, prefix="/bot/v1")
+    uri = "viking://resources/doc.md"
+
+    response = TestClient(app).get(
+        "/bot/v1/resources/preview",
+        params={"uri": uri},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    forwarded = captured["params"]
+    assert isinstance(forwarded, dict)
+    claims = verify_resource_preview_token(
+        forwarded["token"],
+        secret="preview-secret",
+        expected_uri=uri,
+    )
+    assert claims.account_id == "acme"
 
 
 def test_chat_stream_proxy_overrides_user_id_for_user_role(monkeypatch: pytest.MonkeyPatch) -> None:

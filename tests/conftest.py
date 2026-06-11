@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 
 from openviking import AsyncOpenViking
+from openviking_cli.resource_preview import RESOURCE_PREVIEW_SECRET_ENV
 
 
 # ── Workaround: local .so may lack AGFS_Grep symbol (new in latest source) ──
@@ -72,6 +73,12 @@ def _patch_agfs_grep_if_missing():
 
 
 _patch_agfs_grep_if_missing()
+
+
+@pytest.fixture(autouse=True)
+def resource_preview_secret(monkeypatch: pytest.MonkeyPatch):
+    """Provide a deterministic signing secret for generated preview links in tests."""
+    monkeypatch.setenv(RESOURCE_PREVIEW_SECRET_ENV, "test-resource-preview-secret")
 
 # Test data root directory
 PROJECT_ROOT = Path(__file__).parent.parent

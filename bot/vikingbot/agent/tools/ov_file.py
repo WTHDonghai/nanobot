@@ -1,17 +1,17 @@
 """OpenViking file system tools: read, write, list, search resources."""
 
 import asyncio
+import re
 from abc import ABC
 from pathlib import Path
-import re
 from typing import Any, Optional, Union
 
 import httpx
 from loguru import logger
 
 from vikingbot.agent.tools.base import Tool, ToolContext
-from vikingbot.openviking_mount.uri_utils import is_generic_scope_summary_uri, is_summary_uri
 from vikingbot.openviking_mount.ov_server import VikingClient
+from vikingbot.openviking_mount.uri_utils import is_generic_scope_summary_uri, is_summary_uri
 
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 WORD_IMAGE_ARTIFACT_RE = re.compile(r"ov-asset://|INCLUDEPICTURE", re.IGNORECASE)
@@ -41,7 +41,10 @@ class VikingReadTool(OVFileTool):
             "full content). When the target is an image file or image directory, return sendable "
             "Markdown image lines instead of raw binary. For imported DOCX/PDF directory resources, "
             "prefer reading the matched child text resource (such as a split .md chapter) instead "
-            "of the directory root when you need full text plus inline images."
+            "of the directory root when you need full text plus inline images. Set "
+            "include_images=true when screenshots would materially improve an answer about UI "
+            "locations, visual states, or procedural steps; leave it false for simple definitions "
+            "or facts."
         )
 
     @property
@@ -62,7 +65,7 @@ class VikingReadTool(OVFileTool):
                 "include_images": {
                     "type": "boolean",
                     "description": "When level='read', include sendable image references extracted from the document when available.",
-                    "default": True,
+                    "default": False,
                 },
                 "max_images": {
                     "type": "integer",
@@ -90,7 +93,7 @@ class VikingReadTool(OVFileTool):
         tool_context: ToolContext,
         uri: str,
         level: str = "abstract",
-        include_images: bool = True,
+        include_images: bool = False,
         max_images: int = 4,
         **kwargs: Any,
     ) -> str:
@@ -150,8 +153,8 @@ class VikingReadTool(OVFileTool):
 
             stat = await client.stat(uri)
             if self._is_image_like_target(uri, stat):
-                if not include_images or max_images <= 0:
-                    return f"图片资源 {uri} 需要在 include_images=true 时读取。"
+                if max_images <= 0:
+                    return f"图片资源 {uri} 需要 max_images 大于 0 时读取。"
                 direct_image_refs = await client.export_uri_for_send(uri, max_images=max_images)
                 if not direct_image_refs:
                     return f"未能导出图片资源 {uri}。"
@@ -181,7 +184,6 @@ class VikingReadTool(OVFileTool):
             if not include_images or max_images <= 0 or not content:
                 return content
 
-            raw_content = content
             materialized_content = await client.materialize_inline_image_refs(content, read_uri)
             if isinstance(materialized_content, str):
                 content = materialized_content
@@ -408,47 +410,13 @@ class VikingSearchTool(OVFileTool):
         except (TypeError, ValueError):
             return 0.0
 
-    @staticmethod
-    def _is_image_focused_query(query: str) -> bool:
-        normalized = (query or "").strip().lower()
-        if not normalized:
-            return False
-
-        zh_terms = (
-            "图片",
-            "照片",
-            "截图",
-            "图示",
-            "图表",
-            "配图",
-            "示意图",
-        )
-        en_terms = (
-            "screenshot",
-            "image",
-            "photo",
-            "figure",
-            "diagram",
-            "chart",
-        )
-
-        return any(term in query for term in zh_terms) or any(term in normalized for term in en_terms)
-
     @classmethod
-    def _resource_kind_rank(cls, query: str, resource: dict[str, Any]) -> int:
+    def _resource_kind_rank(cls, resource: dict[str, Any]) -> int:
+        """Keep resource types explicit without inferring user intent from keywords."""
         uri = resource.get("uri", "")
         is_image = cls._is_image_uri(uri)
         is_summary = cls._is_summary_uri(uri)
         is_generic_summary = cls._is_generic_scope_summary_uri(uri)
-
-        if cls._is_image_focused_query(query):
-            if is_image:
-                return 0
-            if not is_summary:
-                return 1
-            if not is_generic_summary:
-                return 2
-            return 3
 
         if not is_image and not is_summary:
             return 0
@@ -465,13 +433,12 @@ class VikingSearchTool(OVFileTool):
         resources = results.get("resources") or []
         memories = results.get("memories") or []
         skills = results.get("skills") or []
-        image_focused_query = cls._is_image_focused_query(query)
         ordered_resources = [
             resource
             for _, resource in sorted(
                 enumerate(resources),
                 key=lambda item: (
-                    cls._resource_kind_rank(query, item[1]),
+                    cls._resource_kind_rank(item[1]),
                     -cls._resource_score(item[1]),
                     item[0],
                 ),
@@ -532,12 +499,8 @@ class VikingSearchTool(OVFileTool):
                     "on this URI to get sendable Markdown image lines."
                 )
 
-        if image_focused_query:
-            append_image_section()
-            append_document_section()
-        else:
-            append_document_section()
-            append_image_section()
+        append_document_section()
+        append_image_section()
 
         if summary_resources:
             lines.append("")
@@ -670,7 +633,7 @@ class VikingAddResourceTool(OVFileTool):
             else:
                 return "Failed to add resource"
         except httpx.ReadTimeout:
-            return f"Request timed out. The resource addition task may still be processing on the server side."
+            return "Request timed out. The resource addition task may still be processing on the server side."
         except Exception as e:
             logger.warning(f"Error adding resource: {e}")
             return f"Error adding resource to Viking: {str(e)}"
@@ -701,8 +664,10 @@ class VikingGrepTool(OVFileTool):
                     "description": "The whole Viking URI to search within (e.g., viking://resources/)",
                 },
                 "pattern": {
-                    "type": "array",
-                    "items": {"type": "string"},
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
                     "description": "Regex pattern or array of regex patterns to search for",
                 },
                 "case_insensitive": {
@@ -957,7 +922,7 @@ class VikingMultiReadTool(OVFileTool):
             # 构建结果
             result_lines = [f"Multi-read results for {len(uris)} resources (level: {level}):"]
 
-            for i, result in enumerate(results, 1):
+            for result in results:
                 uri = result["uri"]
                 content = result["content"]
                 success = result["success"]

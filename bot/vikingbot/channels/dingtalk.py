@@ -138,8 +138,10 @@ class DingTalkChannel(BaseChannel):
     name = "dingtalk"
 
     def __init__(self, config: DingTalkChannelConfig, bus: MessageBus, **kwargs):
+        public_base_url = str(kwargs.pop("public_base_url", "") or "").strip().rstrip("/")
         super().__init__(config, bus, **kwargs)
         self.config: DingTalkChannelConfig = config
+        self.public_base_url = public_base_url
         self._client: Any = None
         self._http: httpx.AsyncClient | None = None
 
@@ -407,7 +409,7 @@ class DingTalkChannel(BaseChannel):
 
     def _build_interactive_card_data(self, content: str, *, status: str | None = None) -> str:
         """Build the StandardCard payload used for send/update interactive-card calls."""
-        use_markdown = self._contains_inline_image(content)
+        use_markdown = self._contains_inline_image(content) or self._contains_preview_link(content)
         normalized_content = content if use_markdown else self._normalize_text_for_sample_text(content)
         content_chunks = self._split_dingtalk_content(normalized_content) if normalized_content else []
         body_text = "\n\n".join(content_chunks).strip()
@@ -597,6 +599,21 @@ class DingTalkChannel(BaseChannel):
     def _contains_inline_image(self, content: str) -> bool:
         """Return whether the content contains inline images that require markdown rendering."""
         return bool(MARKDOWN_IMAGE_PATTERN.search(content.strip()))
+
+    @staticmethod
+    def _contains_preview_link(content: str) -> bool:
+        """Return whether the content contains generated resource preview links."""
+        return "/bot/v1/resources/preview?" in (content or "")
+
+    def _rewrite_preview_links(self, content: str) -> str:
+        """Rewrite bot-local preview links to absolute URLs for external IM clients."""
+        if not content or "/bot/v1/resources/preview?" not in content or not self.public_base_url:
+            return content
+        return re.sub(
+            r"\]\((/bot/v1/resources/preview\?[^)\s]+)\)",
+            lambda m: f"]({self.public_base_url}{m.group(1)})",
+            content,
+        )
 
     def _display_units(self, text: str) -> int:
         """Approximate how much vertical space a chunk will take in DingTalk."""
@@ -833,7 +850,7 @@ class DingTalkChannel(BaseChannel):
 
     def _build_message_payloads(self, content: str) -> list[dict[str, str]]:
         """Build one or more DingTalk payload fragments for a reply."""
-        use_markdown = self._contains_inline_image(content)
+        use_markdown = self._contains_inline_image(content) or self._contains_preview_link(content)
         normalized_content = content if use_markdown else self._normalize_text_for_sample_text(content)
         chunks = self._split_dingtalk_content(normalized_content)
         if not chunks:
@@ -904,7 +921,9 @@ class DingTalkChannel(BaseChannel):
             return
 
         try:
-            rendered_content = await self._replace_inline_images(msg.content, token)
+            rendered_content = await self._replace_inline_images(
+                self._rewrite_preview_links(msg.content), token
+            )
             final_sent = await self._send_interactive_final_response(
                 token=token,
                 chat_id=msg.session_key.chat_id,

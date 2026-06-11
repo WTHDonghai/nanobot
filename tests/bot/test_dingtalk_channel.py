@@ -16,7 +16,8 @@ from vikingbot.channels.dingtalk import (
     DingTalkCardState,
     DingTalkChannel,
 )
-from vikingbot.config.schema import DingTalkChannelConfig, SessionKey
+from vikingbot.channels.manager import ChannelManager
+from vikingbot.config.schema import Config, DingTalkChannelConfig, SessionKey
 
 
 def _build_live_state(
@@ -199,6 +200,55 @@ def test_dingtalk_normalizes_markdown_table_into_bullets_before_sending() -> Non
     assert "|---" not in joined
     assert "状态码: R；状态含义: 预订状态；类型: 基本状态；说明: 已确认预订，尚未入住" in joined
     assert "状态码: I；状态含义: 当前在住；类型: 基本状态；说明: 已办理入住，正在住店" in joined
+
+
+def test_dingtalk_preserves_reference_preview_links_as_clickable_markdown() -> None:
+    channel = DingTalkChannel(
+        DingTalkChannelConfig(client_id="robot-code", client_secret="secret"),
+        MessageBus(),
+        public_base_url="https://support.example.com",
+    )
+
+    card_data = json.loads(
+        channel._build_interactive_card_data(
+            channel._rewrite_preview_links(
+                "处理建议如下。\n\n参考文档\n- [8.3酒店EDP维护手册(XMS) / 01 base 2]"
+                "(/bot/v1/resources/preview?uri=viking%3A%2F%2Fresources%2FXMS%2Fdoc.md)"
+            )
+        )
+    )
+
+    contents = [
+        block["text"] for block in card_data["contents"] if block.get("id") == "content_markdown"
+    ]
+    joined = "\n\n".join(contents)
+    assert (
+        "[8.3酒店EDP维护手册(XMS) / 01 base 2]"
+        "(https://support.example.com/bot/v1/resources/preview?uri=viking%3A%2F%2Fresources%2FXMS%2Fdoc.md)"
+        in joined
+    )
+
+
+def test_dingtalk_channel_uses_own_base_url_before_ov_server_url() -> None:
+    config = Config()
+    config.ov_server.server_url = "http://127.0.0.1:1933"
+    config.channels = [
+        {
+            "type": "dingtalk",
+            "enabled": True,
+            "clientId": "robot-code",
+            "clientSecret": "secret",
+            "baseUrl": "https://support.example.com",
+        }
+    ]
+
+    manager = ChannelManager(MessageBus())
+    manager.load_channels_from_config(config)
+    channel = next(iter(manager.channels.values()))
+
+    assert isinstance(channel, DingTalkChannel)
+    assert channel.public_base_url == "https://support.example.com"
+    assert manager.public_base_url == "http://127.0.0.1:1933"
 
 
 @pytest.mark.asyncio

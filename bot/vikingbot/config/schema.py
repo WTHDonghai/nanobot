@@ -4,7 +4,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,12 +54,10 @@ class BotMode(str, Enum):
     DEBUG = "debug"
 
 
-class CapabilityProfile(str, Enum):
-    """Agent capability profile."""
+class AgentMode(str, Enum):
+    """Explicit capability boundary for the primary agent."""
 
     KNOWLEDGE_BASE = "knowledge-base"
-    TECHNICAL_SUPPORT = "technical-support"
-    BID_MATERIAL = "bid-material"
     FULL = "full"
 
 
@@ -200,6 +198,7 @@ class DingTalkChannelConfig(BaseChannelConfig):
     type: ChannelType = ChannelType.DINGTALK
     client_id: str = ""
     client_secret: str = ""
+    base_url: str = ""
     allow_from: list[str] = Field(default_factory=list)
 
     def channel_id(self) -> str:
@@ -276,6 +275,7 @@ class OpenAPIChannelConfig(BaseChannelConfig):
     api_key: str = ""  # If empty, no auth required
     allow_from: list[str] = Field(default_factory=list)
     max_concurrent_requests: int = 100
+    base_url: str = ""
     _channel_id: str = "default"
 
     def channel_id(self) -> str:
@@ -308,6 +308,8 @@ class ChannelsConfig(BaseModel):
             config["bridge_url"] = config.pop("bridgeUrl")
         if "bridgeToken" in config and "bridge_token" not in config:
             config["bridge_token"] = config.pop("bridgeToken")
+        if "baseUrl" in config and "base_url" not in config:
+            config["base_url"] = config.pop("baseUrl")
         if "clientId" in config and "client_id" not in config:
             config["client_id"] = config.pop("clientId")
         if "clientSecret" in config and "client_secret" not in config:
@@ -402,12 +404,33 @@ class AgentsConfig(BaseModel):
     fast_model: str = "dashscope/qwen-turbo"
     max_tool_iterations: int = 50
     memory_window: int = 50
-    capability_profile: CapabilityProfile = CapabilityProfile.KNOWLEDGE_BASE
+    mode: AgentMode = AgentMode.KNOWLEDGE_BASE
     gen_image_model: str = "openai/doubao-seedream-4-5-251128"
     provider: str = ""
     api_key: str = ""
     api_base: str = ""
     extra_headers: Optional[dict[str, str]] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_capability_profile(cls, value: Any) -> Any:
+        """Map legacy profiles to the new explicit fail-closed agent mode."""
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        legacy_profile = normalized.pop("capability_profile", None)
+        if "mode" not in normalized and legacy_profile is not None:
+            profile_value = getattr(legacy_profile, "value", legacy_profile)
+            supported_profiles = {
+                "knowledge-base",
+                "technical-support",
+                "bid-material",
+                "full",
+            }
+            if profile_value not in supported_profiles:
+                raise ValueError(f"Unsupported legacy capability profile: {profile_value}")
+            normalized["mode"] = "full" if profile_value == "full" else "knowledge-base"
+        return normalized
 
 
 class ProviderConfig(BaseModel):

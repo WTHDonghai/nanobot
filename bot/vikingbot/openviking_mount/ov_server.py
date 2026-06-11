@@ -304,38 +304,43 @@ class VikingClient:
     async def materialize_inline_image_refs(self, content: str, source_uri: str) -> str:
         """Replace Word inline asset placeholders with sendable image references."""
         rendered = content
-        send_ref_cache: dict[str, str] = {}
+        image_refs = self._collect_supported_markdown_image_refs(content)
+        unique_raw_refs = list(dict.fromkeys(image_ref["ref"] for image_ref in image_refs))
 
-        for image_ref in self._collect_supported_markdown_image_refs(content):
+        async def resolve_send_ref(raw_ref: str) -> str:
+            resolved_uri = await self._resolve_markdown_image_uri(source_uri, raw_ref)
+            if not resolved_uri:
+                if raw_ref.startswith("ov-asset://"):
+                    raise ValueError(
+                        f"Unable to resolve inline image asset '{raw_ref[len('ov-asset://'):]}' from {source_uri}"
+                    )
+                raise ValueError(f"Unable to resolve inline image uri '{raw_ref}' from {source_uri}")
+
+            exported = await self._export_image_uris_for_send([resolved_uri])
+            if not exported:
+                raise ValueError(f"Unable to export inline image asset '{resolved_uri}' for send")
+
+            send_match = re.search(r"!\[[^\]]*\]\((send://[^)\s]+)\)", exported[0])
+            if not send_match:
+                raise ValueError(
+                    f"Inline image asset '{resolved_uri}' did not produce a send:// reference"
+                )
+            return send_match.group(1)
+
+        resolved_refs = await asyncio.gather(
+            *(resolve_send_ref(raw_ref) for raw_ref in unique_raw_refs)
+        )
+        send_ref_cache = dict(zip(unique_raw_refs, resolved_refs, strict=False))
+
+        for image_ref in image_refs:
             markdown_ref = image_ref["markdown"]
             raw_ref = image_ref["ref"]
-
-            send_ref = send_ref_cache.get(raw_ref)
-            if send_ref is None:
-                resolved_uri = await self._resolve_markdown_image_uri(source_uri, raw_ref)
-                if not resolved_uri:
-                    if raw_ref.startswith("ov-asset://"):
-                        raise ValueError(
-                            f"Unable to resolve inline image asset '{raw_ref[len('ov-asset://'):]}' from {source_uri}"
-                        )
-                    raise ValueError(f"Unable to resolve inline image uri '{raw_ref}' from {source_uri}")
-
-                exported = await self._export_image_uris_for_send([resolved_uri])
-                if not exported:
-                    raise ValueError(
-                        f"Unable to export inline image asset '{resolved_uri}' for send"
-                    )
-
-                send_match = re.search(r"!\[[^\]]*\]\((send://[^)\s]+)\)", exported[0])
-                if not send_match:
-                    raise ValueError(
-                        f"Inline image asset '{resolved_uri}' did not produce a send:// reference"
-                    )
-                send_ref = send_match.group(1)
-                send_ref_cache[raw_ref] = send_ref
-
             replacement_alt = image_ref["caption"] or image_ref["alt_text"] or "image"
-            rendered = rendered.replace(markdown_ref, f"![{replacement_alt}]({send_ref})", 1)
+            rendered = rendered.replace(
+                markdown_ref,
+                f"![{replacement_alt}]({send_ref_cache[raw_ref]})",
+                1,
+            )
 
         rendered = self._materialize_word_field_images(rendered)
         return self._strip_word_control_chars(rendered)
@@ -407,9 +412,17 @@ class VikingClient:
 
         images_dir = get_images_path()
         exported_refs: list[str] = []
+        downloaded_images = await asyncio.gather(
+            *(self.download_content(image_uri) for image_uri in image_uris),
+            return_exceptions=True,
+        )
 
-        for idx, image_uri in enumerate(image_uris, start=1):
-            image_bytes = await self.download_content(image_uri)
+        for idx, (image_uri, image_bytes) in enumerate(
+            zip(image_uris, downloaded_images, strict=False), start=1
+        ):
+            if isinstance(image_bytes, BaseException):
+                logger.warning(f"Failed to download image {image_uri}: {image_bytes}")
+                continue
             if not image_bytes:
                 continue
 
@@ -434,9 +447,17 @@ class VikingClient:
 
         output_dir.mkdir(parents=True, exist_ok=True)
         exported_files: list[dict[str, str]] = []
+        downloaded_images = await asyncio.gather(
+            *(self.download_content(image_uri) for image_uri in image_uris),
+            return_exceptions=True,
+        )
 
-        for idx, image_uri in enumerate(image_uris, start=1):
-            image_bytes = await self.download_content(image_uri)
+        for idx, (image_uri, image_bytes) in enumerate(
+            zip(image_uris, downloaded_images, strict=False), start=1
+        ):
+            if isinstance(image_bytes, BaseException):
+                logger.warning(f"Failed to download image {image_uri}: {image_bytes}")
+                continue
             if not image_bytes:
                 continue
 

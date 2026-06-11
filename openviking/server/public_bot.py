@@ -27,6 +27,7 @@ _ALLOWED_EXACT_PATHS = {
     "/bot/v1/chat",
     "/bot/v1/chat/stream",
     "/bot/v1/handoff",
+    "/bot/v1/resources/preview",
 }
 _ALLOWED_PREFIXES = (
     "/api/v1/sessions/",

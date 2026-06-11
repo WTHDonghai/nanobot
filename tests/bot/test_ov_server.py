@@ -3,12 +3,38 @@
 
 """Tests for OpenViking server inline image materialization."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from vikingbot.openviking_mount.ov_server import VikingClient
+
+
+@pytest.mark.asyncio
+async def test_export_image_uris_downloads_in_parallel_and_preserves_order(tmp_path) -> None:
+    client = object.__new__(VikingClient)
+    started: list[str] = []
+    all_started = asyncio.Event()
+    image_uris = [
+        "viking://resources/demo/_images/page_1.png",
+        "viking://resources/demo/_images/page_2.png",
+        "viking://resources/demo/_images/page_3.png",
+    ]
+
+    async def download_content(uri: str) -> bytes:
+        started.append(uri)
+        if len(started) == len(image_uris):
+            all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=0.5)
+        return uri.encode("utf-8")
+
+    client.download_content = AsyncMock(side_effect=download_content)
+
+    exported = await client._export_image_uris_to_directory(image_uris, tmp_path)
+
+    assert started == image_uris
+    assert [item["source_uri"] for item in exported] == image_uris
 
 
 @pytest.mark.asyncio
@@ -53,6 +79,41 @@ async def test_materialize_inline_image_refs_supports_raw_viking_image_refs() ->
     assert rendered == "架构说明\n![部署图](send://image10.png)"
     client._resolve_image_asset_uri.assert_not_called()
     client.stat.assert_awaited_once_with("viking://resources/demo/_images/image10.png")
+
+
+@pytest.mark.asyncio
+async def test_materialize_inline_image_refs_processes_distinct_images_in_parallel() -> None:
+    client = object.__new__(VikingClient)
+    started: list[str] = []
+    all_started = asyncio.Event()
+
+    async def export_image(image_uris: list[str]) -> list[str]:
+        image_uri = image_uris[0]
+        started.append(image_uri)
+        if len(started) == 2:
+            all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=0.5)
+        image_name = image_uri.rsplit("/", 1)[-1]
+        return [f"![{image_name}](send://{image_name})"]
+
+    client._resolve_image_asset_uri = AsyncMock(
+        side_effect=[
+            "viking://resources/demo/_images/image1.png",
+            "viking://resources/demo/_images/image2.png",
+        ]
+    )
+    client._export_image_uris_for_send = AsyncMock(side_effect=export_image)
+
+    rendered = await client.materialize_inline_image_refs(
+        "![一](ov-asset://image1.png)\n![二](ov-asset://image2.png)",
+        "viking://resources/demo/manual.md",
+    )
+
+    assert started == [
+        "viking://resources/demo/_images/image1.png",
+        "viking://resources/demo/_images/image2.png",
+    ]
+    assert rendered == "![一](send://image1.png)\n![二](send://image2.png)"
 
 
 @pytest.mark.asyncio

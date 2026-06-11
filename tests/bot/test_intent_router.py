@@ -1,26 +1,23 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for semantic intent routing in retrieval-focused modes."""
+"""Tests for semantic intent routing in prompt-driven knowledge-base mode."""
 
 import asyncio
 import tempfile
 from pathlib import Path
 
 from vikingbot.agent.intent_router import (
-    BID_MATERIAL_ROUTER_TOOL,
+    ROUTER_TOOL,
     IntentDecision,
     IntentRoute,
-    ROUTER_TOOL,
-    TECHNICAL_SUPPORT_ROUTER_TOOL,
     _parse_router_tool_call,
-    classify_intent,
     classify_knowledge_base_intent,
     generate_route_response,
 )
 from vikingbot.agent.loop import AgentLoop
 from vikingbot.bus.queue import MessageBus
-from vikingbot.config.schema import CapabilityProfile, Config, SessionKey
+from vikingbot.config.schema import Config, SessionKey
 from vikingbot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from vikingbot.session.manager import Session
 
@@ -116,81 +113,6 @@ def test_classify_knowledge_base_intent_uses_router_tool_call() -> None:
     assert "recent_history:" in provider.calls[0]["messages"][1]["content"]
 
 
-def test_classify_bid_material_intent_uses_bid_material_router_tool() -> None:
-    provider = StubProvider(
-        [
-            LLMResponse(
-                content=None,
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call_1",
-                        name="route_request",
-                        arguments={
-                            "label": "certificate_lookup",
-                            "route": "agent",
-                            "confidence": "high",
-                            "reason": "asks for qualification certificate materials",
-                        },
-                        tokens=10,
-                    )
-                ],
-            )
-        ]
-    )
-
-    decision = asyncio.run(
-        classify_intent(
-            provider=provider,
-            model="stub-model",
-            user_message="请帮我找营业执照和资质证书",
-            history=[],
-            session_id="test-session",
-            capability_profile=CapabilityProfile.BID_MATERIAL,
-        )
-    )
-
-    assert decision.label == "certificate_lookup"
-    assert provider.calls[0]["tools"] == [BID_MATERIAL_ROUTER_TOOL]
-
-
-def test_classify_technical_support_intent_uses_xms_router_tool() -> None:
-    provider = StubProvider(
-        [
-            LLMResponse(
-                content=None,
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call_1",
-                        name="route_request",
-                        arguments={
-                            "label": "knowledge_query",
-                            "route": "agent",
-                            "confidence": "high",
-                            "reason": "asks about an XMS report permission issue",
-                        },
-                        tokens=10,
-                    )
-                ],
-            )
-        ]
-    )
-
-    decision = asyncio.run(
-        classify_intent(
-            provider=provider,
-            model="stub-model",
-            user_message="XMS 报表权限在哪里配置？",
-            history=[],
-            session_id="test-session",
-            capability_profile=CapabilityProfile.TECHNICAL_SUPPORT,
-        )
-    )
-
-    assert decision.route == IntentRoute.AGENT
-    assert provider.calls[0]["tools"] == [TECHNICAL_SUPPORT_ROUTER_TOOL]
-    assert "XMS means the hotel management system" in provider.calls[0]["messages"][0]["content"]
-
-
 def test_generate_route_response_returns_model_text() -> None:
     provider = StubProvider([LLMResponse(content="请直接告诉我你要查询的文档主题、模块或参数。")])
 
@@ -260,9 +182,174 @@ def test_session_history_excludes_skip_history_messages() -> None:
     ]
 
 
+def test_latest_assistant_reply_requires_concrete_document_evidence_for_history_reuse() -> None:
+    session = Session(key=SessionKey(type="cli", channel_id="default", chat_id="grounded-history"))
+    session.add_message("user", "S是什么状态？")
+    session.add_message(
+        "assistant",
+        "S表示临时挂账。",
+        tools_used=[
+            {
+                "tool_name": "openviking_read",
+                "args": '{"uri":"viking://resources/xms/status.md","level":"read"}',
+                "result": "S 临时挂账",
+                "execute_success": True,
+            }
+        ],
+    )
+
+    assert AgentLoop._latest_assistant_reply_has_document_evidence(session) is True
+
+    session.add_message("user", "谢谢")
+    session.add_message("assistant", "不客气。")
+
+    assert AgentLoop._latest_assistant_reply_has_document_evidence(session) is False
+
+
+def test_run_agent_loop_can_reuse_latest_grounded_history_answer() -> None:
+    config = Config()
+    provider = StubProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_history_answer",
+                        name=AgentLoop.GROUNDED_HISTORY_ANSWER_TOOL,
+                        arguments={"answer": "S 表示临时挂账。"},
+                        tokens=8,
+                    )
+                ],
+            )
+        ]
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题前必须先从知识库获取文档依据。",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=config,
+            max_iterations=2,
+        )
+        loop.tools.get_definitions = lambda: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_search",
+                    "description": "Search docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        final_content, tools_used, _token_usage, iteration = asyncio.run(
+            loop._run_agent_loop(
+                messages=[
+                    {"role": "user", "content": "S是什么状态？"},
+                    {"role": "assistant", "content": "S 表示临时挂账。"},
+                    {"role": "user", "content": "S是什么状态？"},
+                    {
+                        "role": "system",
+                        "content": loop._build_grounded_history_reuse_prompt(),
+                    },
+                ],
+                session_key=SessionKey(
+                    type="cli", channel_id="default", chat_id="reuse-grounded-history"
+                ),
+                publish_events=False,
+                allow_grounded_history_reuse=True,
+            )
+        )
+
+    assert final_content == "S 表示临时挂账。"
+    assert tools_used == []
+    assert iteration == 1
+    assert provider.calls[0]["tool_choice"] == "required"
+    assert any(
+        tool["function"]["name"] == AgentLoop.GROUNDED_HISTORY_ANSWER_TOOL
+        for tool in provider.calls[0]["tools"]
+    )
+
+
+def test_run_agent_loop_forces_retrieval_after_empty_structured_history_answer() -> None:
+    config = Config()
+    provider = StubProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_empty_history_answer",
+                        name=AgentLoop.GROUNDED_HISTORY_ANSWER_TOOL,
+                        arguments={"answer": ""},
+                        tokens=8,
+                    )
+                ],
+            ),
+            LLMResponse(content="第二轮仍未调用工具。"),
+        ]
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题前必须先从知识库获取文档依据。",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=config,
+            max_iterations=2,
+        )
+        loop.tools.get_definitions = lambda: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_search",
+                    "description": "Search docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        final_content, tools_used, _token_usage, iteration = asyncio.run(
+            loop._run_agent_loop(
+                messages=[
+                    {"role": "user", "content": "S是什么状态？"},
+                    {
+                        "role": "system",
+                        "content": loop._build_grounded_history_reuse_prompt(),
+                    },
+                ],
+                session_key=SessionKey(
+                    type="cli", channel_id="default", chat_id="reject-history-decision-note"
+                ),
+                publish_events=False,
+                allow_grounded_history_reuse=True,
+            )
+        )
+
+    assert tools_used == []
+    assert iteration == 2
+    assert final_content.startswith("抱歉，我暂时没有在当前知识库中找到足够依据")
+    assert provider.calls[0]["tool_choice"] == "required"
+    assert provider.calls[1]["tool_choice"] == "required"
+    assert all(
+        tool["function"]["name"] != AgentLoop.GROUNDED_HISTORY_ANSWER_TOOL
+        for tool in provider.calls[1]["tools"]
+    )
+
+
 def test_run_agent_loop_continues_search_when_kb_answer_has_no_document_evidence() -> None:
     config = Config()
-    config.agents.capability_profile = CapabilityProfile.KNOWLEDGE_BASE
 
     provider = StubProvider(
         [
@@ -272,10 +359,15 @@ def test_run_agent_loop_continues_search_when_kb_answer_has_no_document_evidence
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题前必须先从知识库获取文档依据。",
+            encoding="utf-8",
+        )
         loop = AgentLoop(
             bus=MessageBus(),
             provider=provider,
-            workspace=Path(tmpdir),
+            workspace=workspace,
             config=config,
             max_iterations=2,
         )

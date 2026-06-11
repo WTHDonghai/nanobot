@@ -5,6 +5,7 @@ Vikingbot OpenAPIChannel when the --with-bot option is enabled.
 """
 
 import json
+import os
 from typing import AsyncGenerator, Optional
 
 import httpx
@@ -13,6 +14,12 @@ from fastapi.responses import StreamingResponse
 
 from openviking.server.auth import get_request_context
 from openviking.server.identity import RequestContext, Role
+from openviking_cli.resource_preview import (
+    RESOURCE_PREVIEW_SECRET_ENV,
+    ResourcePreviewTokenError,
+    create_resource_preview_token,
+    verify_resource_preview_token,
+)
 from openviking_cli.utils.logger import get_logger
 
 router = APIRouter(prefix="", tags=["bot"])
@@ -153,6 +160,66 @@ async def proxy_image(image_name: str, request: Request):
         file_stream(),
         media_type=media_type,
     )
+
+
+@router.get("/resources/preview")
+async def proxy_resource_preview(
+    uri: str,
+    request: Request,
+    token: str | None = None,
+    ctx: RequestContext = Depends(get_request_context),
+):
+    """Proxy a document preview, upgrading legacy unsigned history links when needed."""
+    bot_url = get_bot_url()
+    server_config = getattr(request.app.state, "config", None)
+    preview_secret = (
+        os.environ.get(RESOURCE_PREVIEW_SECRET_ENV, "").strip()
+        or str(getattr(server_config, "root_api_key", "") or "").strip()
+    )
+    try:
+        if token:
+            claims = verify_resource_preview_token(token, secret=preview_secret, expected_uri=uri)
+            if claims.account_id != ctx.account_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Resource preview belongs to another account",
+                )
+            preview_token = token
+        else:
+            preview_token = create_resource_preview_token(
+                uri=uri,
+                account_id=ctx.account_id,
+                secret=preview_secret,
+            )
+    except ResourcePreviewTokenError:
+        raise HTTPException(status_code=404, detail="Resource preview is not available")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            headers = {}
+            accept = request.headers.get("accept")
+            if accept:
+                headers["Accept"] = accept
+            response = await client.get(
+                f"{bot_url}/bot/v1/resources/preview",
+                params={"uri": uri, "token": preview_token},
+                headers=headers,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            return StreamingResponse(
+                iter([response.content]),
+                media_type=response.headers.get("content-type", "text/html; charset=utf-8"),
+            )
+    except httpx.RequestError as e:
+        logger.error(f"Failed to connect to bot service for resource preview: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Bot service unavailable: {str(e)}",
+        )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Bot resource preview returned error: {e}")
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
 
 
 @router.post("/chat")

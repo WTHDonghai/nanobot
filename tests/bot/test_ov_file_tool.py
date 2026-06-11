@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from vikingbot.agent.tools.base import ToolContext
 from vikingbot.agent.tools.ov_file import VikingGrepTool, VikingReadTool, VikingSearchTool
 from vikingbot.config.schema import SessionKey
@@ -32,6 +31,7 @@ async def test_viking_read_tool_appends_sendable_images() -> None:
         ),
         uri="viking://resources/demo/manual.md",
         level="read",
+        include_images=True,
     )
 
     assert "文档正文" in result
@@ -82,6 +82,7 @@ async def test_viking_read_tool_keeps_inline_image_positions() -> None:
         ),
         uri="viking://resources/demo/manual.md",
         level="read",
+        include_images=True,
     )
 
     assert result == "先看步骤一。\n![figure_1](send://figure_1.png)\n然后继续步骤二。"
@@ -105,6 +106,7 @@ async def test_viking_read_tool_keeps_http_inline_images_without_probing_for_rel
         ),
         uri="viking://resources/demo/manual.md",
         level="read",
+        include_images=True,
     )
 
     assert result == "步骤一\n![login](https://example.com/assets/login.png)"
@@ -134,6 +136,7 @@ async def test_viking_read_tool_resolves_directory_to_named_text_leaf() -> None:
         ),
         uri="viking://resources/demo/manual",
         level="read",
+        include_images=True,
     )
 
     assert "目录正文" in result
@@ -146,6 +149,30 @@ async def test_viking_read_tool_resolves_directory_to_named_text_leaf() -> None:
         "viking://resources/demo/manual/manual.md",
         max_images=4,
     )
+
+
+@pytest.mark.asyncio
+async def test_viking_read_tool_skips_document_images_by_default() -> None:
+    tool = VikingReadTool()
+    mock_client = AsyncMock()
+    mock_client.stat.return_value = {"isDir": False, "name": "manual.md"}
+    mock_client.read_content.return_value = (
+        "步骤一。\n![figure_1](ov-asset://image1.png)\n步骤二。"
+    )
+    tool._get_client = AsyncMock(return_value=mock_client)
+
+    result = await tool.execute(
+        ToolContext(
+            session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+            workspace_id="workspace-1",
+        ),
+        uri="viking://resources/demo/manual.md",
+        level="read",
+    )
+
+    assert result == "步骤一。\n![figure_1](ov-asset://image1.png)\n步骤二。"
+    mock_client.materialize_inline_image_refs.assert_not_called()
+    mock_client.export_related_images_for_send.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -331,7 +358,7 @@ async def test_viking_search_tool_forwards_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_viking_search_tool_prioritizes_image_assets_for_image_focused_queries() -> None:
+async def test_viking_search_tool_exposes_images_without_keyword_intent_matching() -> None:
     tool = VikingSearchTool()
     mock_client = AsyncMock()
     mock_client.search.return_value = {
@@ -363,10 +390,9 @@ async def test_viking_search_tool_prioritizes_image_assets_for_image_focused_que
         target_uri="viking://resources/demo/",
     )
 
-    assert result.index("Image assets:") < result.index("Documents:")
-    assert result.index("viking://resources/demo/_images/deploy_overview.png") < result.index(
-        "viking://resources/demo/部署说明.md"
-    )
+    assert result.index("Documents:") < result.index("Image assets:")
+    assert "viking://resources/demo/_images/deploy_overview.png" in result
+    assert "viking://resources/demo/部署说明.md" in result
     assert "read a matched image asset URI directly" in result
 
 
@@ -549,6 +575,21 @@ async def test_viking_grep_tool_reports_actual_match_count_when_backend_count_is
 
     assert result.startswith("Found 1 match across 1 pattern:")
     assert "**2.1宾客状态**" in result
+
+
+def test_viking_grep_tool_accepts_single_string_pattern_in_schema() -> None:
+    tool = VikingGrepTool()
+
+    assert (
+        tool.validate_params(
+            {
+                "uri": "viking://resources/",
+                "pattern": "宾客状态",
+                "case_insensitive": True,
+            }
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio
