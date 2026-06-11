@@ -3,13 +3,42 @@
 
 """Tests for OpenViking bot file tools."""
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from vikingbot.agent.tools.base import ToolContext
 from vikingbot.agent.tools.ov_file import VikingGrepTool, VikingReadTool, VikingSearchTool
 from vikingbot.config.schema import SessionKey
+
+
+@pytest.mark.asyncio
+async def test_ov_file_tool_initializes_client_once_for_concurrent_reads() -> None:
+    tool = VikingReadTool()
+    started = 0
+    release = asyncio.Event()
+    mock_client = AsyncMock()
+
+    async def create_client(workspace_id: str | None):
+        nonlocal started
+        started += 1
+        await release.wait()
+        return mock_client
+
+    context = ToolContext(
+        session_key=SessionKey(type="dingtalk", channel_id="bot", chat_id="user"),
+        workspace_id="workspace-1",
+    )
+
+    with patch("vikingbot.agent.tools.ov_file.VikingClient.create", side_effect=create_client):
+        tasks = [asyncio.create_task(tool._get_client(context)) for _ in range(4)]
+        await asyncio.sleep(0)
+        release.set()
+        clients = await asyncio.gather(*tasks)
+
+    assert started == 1
+    assert clients == [mock_client, mock_client, mock_client, mock_client]
 
 
 @pytest.mark.asyncio

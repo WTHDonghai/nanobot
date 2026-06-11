@@ -78,7 +78,11 @@ async def test_materialize_inline_image_refs_supports_raw_viking_image_refs() ->
 
     assert rendered == "架构说明\n![部署图](send://image10.png)"
     client._resolve_image_asset_uri.assert_not_called()
-    client.stat.assert_awaited_once_with("viking://resources/demo/_images/image10.png")
+    client.stat.assert_awaited_once_with(
+        "viking://resources/demo/_images/image10.png",
+        quiet=True,
+        cache_missing=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -155,7 +159,11 @@ async def test_materialize_preview_image_refs_resolves_relative_images() -> None
     )
 
     assert rendered == "步骤一\n![登录图](send://login.png)"
-    client.stat.assert_awaited_once_with("viking://resources/demo/manual/_images/login.png")
+    client.stat.assert_awaited_once_with(
+        "viking://resources/demo/manual/_images/login.png",
+        quiet=True,
+        cache_missing=True,
+    )
     client._export_image_uris_for_send.assert_awaited_once_with(
         ["viking://resources/demo/manual/_images/login.png"]
     )
@@ -221,3 +229,146 @@ async def test_find_related_image_uris_stops_at_parsed_document_root() -> None:
 
     assert result == []
     client.client.stat.assert_awaited_once_with("viking://resources/xms-support/01-base.docx/_images")
+
+
+@pytest.mark.asyncio
+async def test_resolve_image_assets_uses_cached_image_directory_listing() -> None:
+    client = object.__new__(VikingClient)
+    client._resolve_start_directory = AsyncMock(return_value="viking://resources/demo/manual")
+    client.client = SimpleNamespace(
+        stat=AsyncMock(
+            side_effect=[
+                {"isDir": True, "name": "_images"},
+                {},
+                {},
+            ]
+        )
+    )
+    client.list_resources = AsyncMock(
+        return_value=[
+            {
+                "uri": "viking://resources/demo/manual/_images/image2.png",
+                "name": "image2.png",
+                "isDir": False,
+            }
+        ]
+    )
+
+    missing = await client._resolve_image_asset_uri(
+        "viking://resources/demo/manual/page_1.md",
+        "image1.png",
+    )
+    found = await client._resolve_image_asset_uri(
+        "viking://resources/demo/manual/page_1.md",
+        "image2.png",
+    )
+
+    assert missing is None
+    assert found == "viking://resources/demo/manual/_images/image2.png"
+    assert client.client.stat.await_args_list[0].args == (
+        "viking://resources/demo/manual/_images",
+    )
+    assert client.client.stat.await_count == 3
+    client.list_resources.assert_awaited_once_with(
+        path="viking://resources/demo/manual/_images",
+        recursive=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_missing_image_directory_is_cached() -> None:
+    client = object.__new__(VikingClient)
+    client._resolve_start_directory = AsyncMock(return_value="viking://resources/demo/manual")
+    client.client = SimpleNamespace(stat=AsyncMock(return_value={}))
+    client.list_resources = AsyncMock()
+
+    first = await client._resolve_image_asset_uri(
+        "viking://resources/demo/manual/page_1.md",
+        "image1.png",
+    )
+    second = await client._resolve_image_asset_uri(
+        "viking://resources/demo/manual/page_1.md",
+        "image2.png",
+    )
+
+    assert first is None
+    assert second is None
+    assert client.client.stat.await_args_list[0].args == (
+        "viking://resources/demo/manual/_images",
+    )
+    assert client.client.stat.await_count == 3
+    client.list_resources.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_missing_image_directory_cache_expires(monkeypatch) -> None:
+    client = object.__new__(VikingClient)
+    client.client = SimpleNamespace(
+        stat=AsyncMock(
+            side_effect=[
+                {},
+                {"isDir": True, "name": "_images"},
+            ]
+        )
+    )
+    client.list_resources = AsyncMock(return_value=[])
+    current_time = 1000.0
+
+    monkeypatch.setattr(
+        "vikingbot.openviking_mount.ov_server.time.monotonic",
+        lambda: current_time,
+    )
+
+    first = await client._list_image_dir_entries("viking://resources/demo/_images")
+    cached = await client._list_image_dir_entries("viking://resources/demo/_images")
+    current_time += 31.0
+    expired = await client._list_image_dir_entries("viking://resources/demo/_images")
+
+    assert first is None
+    assert cached is None
+    assert expired == []
+    assert client.client.stat.await_count == 2
+    client.list_resources.assert_awaited_once_with(
+        path="viking://resources/demo/_images",
+        recursive=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_missing_image_directory_stat_is_deduplicated() -> None:
+    client = object.__new__(VikingClient)
+    client._resolve_start_directory = AsyncMock(return_value="viking://resources/demo/manual")
+    started = 0
+    release = asyncio.Event()
+
+    async def stat_once(uri: str):
+        nonlocal started
+        started += 1
+        await release.wait()
+        return {}
+
+    client.client = SimpleNamespace(stat=AsyncMock(side_effect=stat_once))
+    client.list_resources = AsyncMock()
+
+    tasks = [
+        asyncio.create_task(
+            client._resolve_image_asset_uri(
+                "viking://resources/demo/manual/page_1.md",
+                f"image{index}.png",
+            )
+        )
+        for index in range(4)
+    ]
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(*tasks)
+
+    assert results == [None, None, None, None]
+    assert started == 3
+    assert client.client.stat.await_count == 3
+    assert [call.args[0] for call in client.client.stat.await_args_list] == [
+        "viking://resources/demo/manual/_images",
+        "viking://resources/demo/_images",
+        "viking://resources/_images",
+    ]
+    client.list_resources.assert_not_called()

@@ -21,10 +21,13 @@ class OVFileTool(Tool, ABC):
     def __init__(self):
         super().__init__()
         self._client = None
+        self._client_init_lock = asyncio.Lock()
 
     async def _get_client(self, tool_context: ToolContext):
         if self._client is None:
-            self._client = await VikingClient.create(tool_context.workspace_id)
+            async with self._client_init_lock:
+                if self._client is None:
+                    self._client = await VikingClient.create(tool_context.workspace_id)
         return self._client
 
 class VikingReadTool(OVFileTool):

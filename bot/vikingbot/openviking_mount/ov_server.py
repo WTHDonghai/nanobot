@@ -16,6 +16,7 @@ from vikingbot.utils.helpers import get_images_path
 
 viking_resource_prefix = "viking://resources/"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff"}
+IMAGE_PROBE_CACHE_TTL_SECONDS = 30.0
 READABLE_TEXT_EXTENSIONS = {".md", ".markdown", ".mdown", ".mkd", ".txt"}
 WORD_IMAGE_PLACEHOLDER_RE = re.compile(r"!\[([^\]]*)\]\(ov-asset://([^)]+)\)")
 MARKDOWN_IMAGE_REF_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
@@ -61,6 +62,14 @@ class VikingClient:
                     account_id=openviking_config.account_id,
                 )
         self.mode = openviking_config.mode
+        self._missing_stat_cache: dict[str, float] = {}
+        self._image_dir_entries_cache: dict[
+            str,
+            tuple[float, list[Dict[str, Any]] | None],
+        ] = {}
+        self._missing_image_lookup_cache: dict[tuple[str, str], float] = {}
+        self._stat_inflight: dict[str, asyncio.Task[Dict[str, Any]]] = {}
+        self._image_dir_entries_inflight: dict[str, asyncio.Task[list[Dict[str, Any]] | None]] = {}
 
     async def _initialize(self):
         """Initialize the client (must be called after construction)"""
@@ -166,12 +175,119 @@ class VikingClient:
             logger.warning(f"Failed to read content from {uri}: {e}")
             return ""
 
-    async def stat(self, uri: str) -> Dict[str, Any]:
+    @staticmethod
+    def _cache_expiry() -> float:
+        return time.monotonic() + IMAGE_PROBE_CACHE_TTL_SECONDS
+
+    @staticmethod
+    def _cache_entry_is_fresh(expires_at: float) -> bool:
+        return expires_at > time.monotonic()
+
+    def _get_missing_stat_cache(self) -> dict[str, float]:
+        cache = getattr(self, "_missing_stat_cache", None)
+        if cache is None:
+            cache = {}
+            self._missing_stat_cache = cache
+        return cache
+
+    def _get_image_dir_entries_cache(
+        self,
+    ) -> dict[str, tuple[float, list[Dict[str, Any]] | None]]:
+        cache = getattr(self, "_image_dir_entries_cache", None)
+        if cache is None:
+            cache = {}
+            self._image_dir_entries_cache = cache
+        return cache
+
+    def _get_missing_image_lookup_cache(self) -> dict[tuple[str, str], float]:
+        cache = getattr(self, "_missing_image_lookup_cache", None)
+        if cache is None:
+            cache = {}
+            self._missing_image_lookup_cache = cache
+        return cache
+
+    def _get_stat_inflight(self) -> dict[str, asyncio.Task[Dict[str, Any]]]:
+        inflight = getattr(self, "_stat_inflight", None)
+        if inflight is None:
+            inflight = {}
+            self._stat_inflight = inflight
+        return inflight
+
+    def _get_image_dir_entries_inflight(
+        self,
+    ) -> dict[str, asyncio.Task[list[Dict[str, Any]] | None]]:
+        inflight = getattr(self, "_image_dir_entries_inflight", None)
+        if inflight is None:
+            inflight = {}
+            self._image_dir_entries_inflight = inflight
+        return inflight
+
+    async def stat(
+        self,
+        uri: str,
+        *,
+        quiet: bool = False,
+        cache_missing: bool = False,
+    ) -> Dict[str, Any]:
         """Return filesystem metadata for a Viking URI."""
+        normalized_uri = uri.rstrip("/")
+        missing_cache = self._get_missing_stat_cache()
+        if cache_missing:
+            expires_at = missing_cache.get(normalized_uri)
+            if expires_at is not None:
+                if self._cache_entry_is_fresh(expires_at):
+                    return {}
+                missing_cache.pop(normalized_uri, None)
+
+        if cache_missing:
+            inflight = self._get_stat_inflight()
+            existing_task = inflight.get(normalized_uri)
+            if existing_task is not None:
+                return await existing_task
+
+            task = asyncio.create_task(
+                self._stat_uncached(
+                    uri,
+                    normalized_uri=normalized_uri,
+                    quiet=quiet,
+                    cache_missing=cache_missing,
+                )
+            )
+            inflight[normalized_uri] = task
+            try:
+                return await task
+            finally:
+                if inflight.get(normalized_uri) is task:
+                    inflight.pop(normalized_uri, None)
+
+        return await self._stat_uncached(
+            uri,
+            normalized_uri=normalized_uri,
+            quiet=quiet,
+            cache_missing=cache_missing,
+        )
+
+    async def _stat_uncached(
+        self,
+        uri: str,
+        *,
+        normalized_uri: str,
+        quiet: bool,
+        cache_missing: bool,
+    ) -> Dict[str, Any]:
+        missing_cache = self._get_missing_stat_cache()
         try:
-            return await self.client.stat(uri)
+            result = await self.client.stat(uri)
+            if cache_missing and result:
+                missing_cache.pop(normalized_uri, None)
+            return result
         except Exception as e:
-            logger.warning(f"Failed to stat {uri}: {e}")
+            if cache_missing:
+                missing_cache[normalized_uri] = self._cache_expiry()
+            if quiet:
+                logger.debug(f"Failed to stat {uri}: {e}")
+            else:
+                logger.warning(f"Failed to stat {uri}: {e}")
             return {}
 
     async def download_content(self, uri: str) -> bytes:
@@ -617,24 +733,9 @@ class VikingClient:
             checked_dirs.add(current_dir)
 
             images_dir = f"{current_dir.rstrip('/')}/_images"
-            try:
-                stat = await self.client.stat(images_dir)
-            except Exception:
-                stat = {}
-
-            if stat.get("isDir"):
-                try:
-                    entries = await self.list_resources(path=images_dir, recursive=False)
-                except Exception as e:
-                    logger.warning(f"Failed to list image directory {images_dir}: {e}")
-                    entries = []
-
-                image_uris = [
-                    entry["uri"]
-                    for entry in entries
-                    if not entry.get("isDir") and Path(entry.get("name", "")).suffix.lower() in IMAGE_EXTENSIONS
-                ]
-                image_uris.sort(key=self._image_sort_key)
+            image_entries = await self._list_image_dir_entries(images_dir)
+            if image_entries is not None:
+                image_uris = [entry["uri"] for entry in image_entries]
                 return self._apply_image_limit(image_uris, max_images)
 
             # Parsed document roots already own their sibling _images directory.
@@ -658,10 +759,10 @@ class VikingClient:
                 break
             checked_dirs.add(current_dir)
 
-            candidate = f"{current_dir.rstrip('/')}/_images/{asset_name}"
-            stat = await self.stat(candidate)
-            if stat and not stat.get("isDir"):
-                return candidate
+            images_dir = f"{current_dir.rstrip('/')}/_images"
+            image_uri = await self._lookup_image_uri_in_dir(images_dir, asset_name)
+            if image_uri:
+                return image_uri
 
             parent_dir = self._parent_uri(current_dir)
             if not parent_dir or parent_dir == current_dir:
@@ -683,7 +784,7 @@ class VikingClient:
             )
 
         if normalized_ref.startswith("viking://"):
-            stat = await self.stat(normalized_ref)
+            stat = await self.stat(normalized_ref, quiet=True, cache_missing=True)
             if stat and not stat.get("isDir") and Path(normalized_ref).suffix.lower() in IMAGE_EXTENSIONS:
                 return normalized_ref.rstrip("/")
 
@@ -714,9 +815,99 @@ class VikingClient:
             )
 
         for candidate in dict.fromkeys(candidates):
-            stat = await self.stat(candidate)
+            stat = await self.stat(candidate, quiet=True, cache_missing=True)
             if stat and not stat.get("isDir") and Path(candidate).suffix.lower() in IMAGE_EXTENSIONS:
                 return candidate.rstrip("/")
+        return None
+
+    async def _list_image_dir_entries(self, images_dir: str) -> list[Dict[str, Any]] | None:
+        """Return sorted image entries for an _images directory, or None when absent."""
+        normalized_dir = images_dir.rstrip("/")
+        cache = self._get_image_dir_entries_cache()
+        cached_entry = cache.get(normalized_dir)
+        if cached_entry is not None:
+            expires_at, entries = cached_entry
+            if self._cache_entry_is_fresh(expires_at):
+                return entries
+            cache.pop(normalized_dir, None)
+
+        inflight = self._get_image_dir_entries_inflight()
+        existing_task = inflight.get(normalized_dir)
+        if existing_task is not None:
+            return await existing_task
+
+        task = asyncio.create_task(self._list_image_dir_entries_uncached(normalized_dir))
+        inflight[normalized_dir] = task
+        try:
+            return await task
+        finally:
+            if inflight.get(normalized_dir) is task:
+                inflight.pop(normalized_dir, None)
+
+    async def _list_image_dir_entries_uncached(
+        self, normalized_dir: str
+    ) -> list[Dict[str, Any]] | None:
+        cache = self._get_image_dir_entries_cache()
+        cached_entry = cache.get(normalized_dir)
+        if cached_entry is not None:
+            expires_at, entries = cached_entry
+            if self._cache_entry_is_fresh(expires_at):
+                return entries
+            cache.pop(normalized_dir, None)
+
+        stat = await self.stat(normalized_dir, quiet=True, cache_missing=True)
+        if not stat.get("isDir"):
+            cache[normalized_dir] = (self._cache_expiry(), None)
+            return None
+
+        try:
+            entries = await self.list_resources(path=normalized_dir, recursive=False)
+        except Exception as e:
+            logger.warning(f"Failed to list image directory {normalized_dir}: {e}")
+            entries = []
+
+        image_entries = [
+            entry
+            for entry in entries
+            if not entry.get("isDir")
+            and Path(entry.get("name", "") or self._uri_name(str(entry.get("uri", "")))).suffix.lower()
+            in IMAGE_EXTENSIONS
+        ]
+        image_entries.sort(key=lambda entry: self._image_sort_key(str(entry.get("uri", ""))))
+        cache[normalized_dir] = (self._cache_expiry(), image_entries)
+        return image_entries
+
+    async def _lookup_image_uri_in_dir(self, images_dir: str, image_ref: str) -> Optional[str]:
+        """Resolve one image name from a cached _images directory listing."""
+        image_name = self._image_ref_name(image_ref)
+        if not image_name:
+            return None
+
+        normalized_dir = images_dir.rstrip("/")
+        missing_lookup_cache = self._get_missing_image_lookup_cache()
+        lookup_key = (normalized_dir, image_name.lower())
+        expires_at = missing_lookup_cache.get(lookup_key)
+        if expires_at is not None:
+            if self._cache_entry_is_fresh(expires_at):
+                return None
+            missing_lookup_cache.pop(lookup_key, None)
+
+        image_entries = await self._list_image_dir_entries(images_dir)
+        if image_entries is None:
+            missing_lookup_cache[lookup_key] = self._cache_expiry()
+            return None
+
+        for entry in image_entries:
+            entry_name = str(entry.get("name") or self._uri_name(str(entry.get("uri", "")))).strip()
+            if entry_name == image_name:
+                return str(entry.get("uri") or "").rstrip("/")
+
+        image_name_lower = image_name.lower()
+        for entry in image_entries:
+            entry_name = str(entry.get("name") or self._uri_name(str(entry.get("uri", "")))).strip()
+            if entry_name.lower() == image_name_lower:
+                return str(entry.get("uri") or "").rstrip("/")
+        missing_lookup_cache[lookup_key] = self._cache_expiry()
         return None
 
     async def _resolve_start_directory(self, uri: str) -> str:
@@ -748,6 +939,12 @@ class VikingClient:
         match = re.search(r"(\d+)", name)
         number = int(match.group(1)) if match else 10**9
         return number, name
+
+    @staticmethod
+    def _image_ref_name(ref: str) -> str:
+        normalized = unquote(str(ref or "").split("#", 1)[0].split("?", 1)[0]).strip()
+        normalized = normalized.replace("\\", "/").rstrip("/")
+        return normalized.rsplit("/", 1)[-1]
 
     @staticmethod
     def _apply_image_limit(image_uris: list[str], max_images: int | None) -> list[str]:
