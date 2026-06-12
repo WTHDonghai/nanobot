@@ -11,6 +11,18 @@ from vikingbot.providers.base import REQUIRED_TOOL_DISPATCH_NAME
 from vikingbot.providers.litellm_provider import LiteLLMProvider
 
 
+class AsyncChunks:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        for chunk in self.chunks:
+            yield chunk
+
+
 @pytest.mark.asyncio
 async def test_litellm_provider_records_effective_tool_choice(monkeypatch) -> None:
     provider = LiteLLMProvider(api_key="test-key", default_model="openai/gpt-4o")
@@ -54,6 +66,63 @@ async def test_litellm_provider_records_effective_tool_choice(monkeypatch) -> No
     assert response.content == "ok"
     assert captured["tool_choice"] == "required"
     assert response.metadata["effective_tool_choice"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_litellm_provider_streams_plain_text_deltas(monkeypatch) -> None:
+    provider = LiteLLMProvider(api_key="test-key", default_model="openai/gpt-4o")
+    captured: dict = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return AsyncChunks(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="你"),
+                            finish_reason=None,
+                        )
+                    ],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="好"),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(
+                        prompt_tokens=2,
+                        completion_tokens=2,
+                        total_tokens=4,
+                    ),
+                ),
+            ]
+        )
+
+    monkeypatch.setattr(litellm_provider, "acompletion", fake_acompletion)
+    deltas: list[str] = []
+
+    async def on_delta(delta: str) -> None:
+        deltas.append(delta)
+
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "hello"}],
+        model="openai/gpt-4o",
+        temperature=0,
+        on_delta=on_delta,
+    )
+
+    assert captured["stream"] is True
+    assert deltas == ["你", "好"]
+    assert response.content == "你好"
+    assert response.usage == {
+        "prompt_tokens": 2,
+        "completion_tokens": 2,
+        "total_tokens": 4,
+    }
 
 
 @pytest.mark.asyncio

@@ -3,9 +3,10 @@
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 REQUIRED_TOOL_DISPATCH_NAME = "dispatch_required_tool"
+ResponseDeltaCallback = Callable[[str], Awaitable[None]]
 
 
 def build_required_tool_dispatch(tools: list[dict[str, Any]]) -> dict[str, Any]:
@@ -133,6 +134,7 @@ class LLMProvider(ABC):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         session_id: str | None = None,
+        on_delta: ResponseDeltaCallback | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -145,6 +147,7 @@ class LLMProvider(ABC):
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
             session_id: Optional session ID for tracing.
+            on_delta: Optional callback for streaming final response text chunks.
 
         Returns:
             LLMResponse with content and/or tool calls.

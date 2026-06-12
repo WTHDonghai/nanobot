@@ -56,6 +56,7 @@ export type ChatMessage = {
   text: string;
   status?: string;
   loading?: boolean;
+  streaming?: boolean;
   createdAt?: string;
   elapsedMs?: number;
   steps?: string[];

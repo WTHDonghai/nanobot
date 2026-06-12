@@ -356,7 +356,8 @@ export const readStoredSessionMessages = (
           role,
           text: rewriteBotImageUris(text, serverUrl),
           status: typeof record.status === 'string' ? record.status : undefined,
-          loading: typeof record.loading === 'boolean' ? record.loading : undefined,
+          loading: false,
+          streaming: false,
           createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
           elapsedMs: typeof record.elapsedMs === 'number' ? record.elapsedMs : undefined,
           steps: Array.isArray(record.steps)

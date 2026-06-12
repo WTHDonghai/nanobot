@@ -12,6 +12,7 @@ class OutboundEventType(str, Enum):
     """Type of outbound message/event."""
 
     RESPONSE = "response"  # Normal response message
+    RESPONSE_DELTA = "response_delta"  # Incremental response content for streaming clients
     TOOL_CALL = "tool_call"  # Tool being called
     TOOL_RESULT = "tool_result"  # Result from tool execution
     REASONING = "reasoning"  # Reasoning content

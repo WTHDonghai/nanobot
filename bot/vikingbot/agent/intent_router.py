@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from vikingbot.providers.base import LLMProvider
+from vikingbot.providers.base import LLMProvider, ResponseDeltaCallback
 
 
 class IntentRoute(str, Enum):
@@ -194,9 +194,14 @@ async def generate_route_response(
     user_message: str,
     history: list[dict[str, Any]] | None = None,
     session_id: str | None = None,
+    on_delta: ResponseDeltaCallback | None = None,
 ) -> str:
     """Generate a route-specific user-facing response without hardcoded reply text."""
     recent_history = _format_recent_history(history or [])
+    chat_kwargs: dict[str, Any] = {}
+    if on_delta is not None:
+        chat_kwargs["on_delta"] = on_delta
+
     response = await provider.chat(
         messages=[
             {"role": "system", "content": _route_response_system_prompt()},
@@ -215,6 +220,7 @@ async def generate_route_response(
         max_tokens=160,
         temperature=0,
         session_id=f"{session_id}::route-response::{route_label}" if session_id else None,
+        **chat_kwargs,
     )
 
     content = (response.content or "").strip()

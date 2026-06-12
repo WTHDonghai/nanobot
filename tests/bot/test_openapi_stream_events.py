@@ -69,6 +69,39 @@ class StubProvider(LLMProvider):
         return "stub-model"
 
 
+class StreamingStubProvider(StubProvider):
+    """Provider stub that emits response deltas before returning final content."""
+
+    async def chat(
+        self,
+        messages,
+        tools=None,
+        tool_choice=None,
+        model=None,
+        max_tokens=4096,
+        temperature=0.7,
+        session_id=None,
+        on_delta=None,
+    ):
+        self.calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "session_id": session_id,
+                "on_delta": on_delta,
+            }
+        )
+        response = self.responses.pop(0)
+        if on_delta and session_id and session_id.endswith(":kb-selected-evidence-answer"):
+            await on_delta("流")
+            await on_delta("式")
+        return response
+
+
 def _decode_sse_chunk(chunk: str | bytes) -> dict:
     """Parse one SSE data line into JSON."""
     text = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
@@ -283,6 +316,44 @@ async def test_openapi_channel_forwards_iteration_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openapi_channel_forwards_response_delta_before_final_response() -> None:
+    bus = MessageBus()
+    channel = OpenAPIChannel(
+        config=OpenAPIChannelConfig(),
+        bus=bus,
+        workspace_path=Path.cwd(),
+    )
+    pending = PendingResponse()
+    channel._pending["session-1"] = pending
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="session-1")
+
+    await channel.send(
+        OutboundMessage(
+            session_key=session_key,
+            content="正在",
+            event_type=OutboundEventType.RESPONSE_DELTA,
+        )
+    )
+    await channel.send(
+        OutboundMessage(
+            session_key=session_key,
+            content="正在回复",
+            event_type=OutboundEventType.RESPONSE,
+        )
+    )
+
+    delta_event = await pending.stream_queue.get()
+    final_event = await pending.stream_queue.get()
+    close_event = await pending.stream_queue.get()
+
+    assert delta_event.event == EventType.RESPONSE_DELTA
+    assert delta_event.data == "正在"
+    assert final_event.event == EventType.RESPONSE
+    assert final_event.data == "正在回复"
+    assert close_event is None
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_publishes_tool_call_before_execution_starts() -> None:
     config = Config()
     config.agents.mode = AgentMode.FULL
@@ -353,6 +424,186 @@ async def test_agent_loop_publishes_tool_call_before_execution_starts() -> None:
     tool_result_index = order.index(("publish", "tool_result"))
 
     assert reasoning_index < tool_call_index < execute_index < tool_result_index
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_response_delta_helper_respects_publish_flag() -> None:
+    config = Config()
+    published: list[tuple[str, str]] = []
+    bus = MessageBus()
+
+    async def record_outbound(msg: OutboundMessage) -> None:
+        published.append((msg.event_type.value, msg.content))
+
+    bus.publish_outbound = record_outbound
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "You are a general assistant.",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=bus,
+            provider=StubProvider([]),
+            workspace=workspace,
+            config=config,
+            max_iterations=1,
+        )
+        session_key = SessionKey(type="cli", channel_id="default", chat_id="openapi-delta")
+
+        await loop._publish_response_delta_events(
+            session_key=session_key,
+            content="实时回复正文。",
+            publish_events=True,
+        )
+    assert any(event_type == "response_delta" for event_type, _ in published)
+
+    published.clear()
+    await loop._publish_response_delta_events(
+        session_key=session_key,
+        content="CLI 回复。",
+        publish_events=False,
+    )
+    assert all(event_type != "response_delta" for event_type, _ in published)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_response_delta_helper_publishes_only_missing_suffix() -> None:
+    config = Config()
+    published: list[tuple[str, str]] = []
+    bus = MessageBus()
+
+    async def record_outbound(msg: OutboundMessage) -> None:
+        published.append((msg.event_type.value, msg.content))
+
+    bus.publish_outbound = record_outbound
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "You are a general assistant.",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=bus,
+            provider=StubProvider([]),
+            workspace=workspace,
+            config=config,
+            max_iterations=1,
+        )
+        session_key = SessionKey(type="cli", channel_id="default", chat_id="delta-suffix")
+        on_delta = loop._make_response_delta_callback(
+            session_key=session_key,
+            publish_events=True,
+        )
+        assert on_delta is not None
+
+        await on_delta("部分")
+        await loop._publish_missing_response_delta_events(
+            session_key=session_key,
+            final_content="部分完整回答",
+            publish_events=True,
+        )
+
+    assert published == [
+        ("response_delta", "部分"),
+        ("response_delta", "完整回答"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_response_delta_helper_skips_mismatched_fallback_text() -> None:
+    config = Config()
+    published: list[tuple[str, str]] = []
+    bus = MessageBus()
+
+    async def record_outbound(msg: OutboundMessage) -> None:
+        published.append((msg.event_type.value, msg.content))
+
+    bus.publish_outbound = record_outbound
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "You are a general assistant.",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=bus,
+            provider=StubProvider([]),
+            workspace=workspace,
+            config=config,
+            max_iterations=1,
+        )
+        session_key = SessionKey(type="cli", channel_id="default", chat_id="delta-mismatch")
+        on_delta = loop._make_response_delta_callback(
+            session_key=session_key,
+            publish_events=True,
+        )
+        assert on_delta is not None
+
+        await on_delta("旧前缀")
+        await loop._publish_missing_response_delta_events(
+            session_key=session_key,
+            final_content="新答案",
+            publish_events=True,
+        )
+
+    assert published == [("response_delta", "旧前缀")]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_streams_provider_deltas_for_final_kb_answer() -> None:
+    config = Config()
+
+    provider = StreamingStubProvider(
+        [
+            LLMResponse(content="流式回答正文"),
+        ]
+    )
+    published: list[tuple[str, str]] = []
+    bus = MessageBus()
+
+    async def record_outbound(msg: OutboundMessage) -> None:
+        published.append((msg.event_type.value, msg.content))
+
+    bus.publish_outbound = record_outbound
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=workspace,
+            config=config,
+            max_iterations=1,
+        )
+        messages = [
+            {"role": "user", "content": "宾客状态有哪些？"},
+            {
+                "role": "system",
+                "content": loop._build_relevant_evidence_prompt(
+                    "宾客状态有哪些？",
+                    ["## 宾客状态\n宾客状态包含 A、R、D。"],
+                    source_uri="viking://resources/demo/status.md",
+                ),
+            },
+        ]
+        final_content = await loop._compose_answer_from_selected_evidence(
+            messages,
+            session_key=SessionKey(type="cli", channel_id="default", chat_id="kb-stream"),
+            publish_events=True,
+        )
+
+    assert final_content == "流式回答正文"
+    assert [event for event, _ in published].count("response_delta") == 2
+    assert ("response_delta", "流") in published
+    assert ("response_delta", "式") in published
 
 
 @pytest.mark.asyncio

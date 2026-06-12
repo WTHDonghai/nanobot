@@ -57,6 +57,8 @@ const REFERENCE_DRAWER_MIN_WIDTH = 360;
 const REFERENCE_DRAWER_MAX_WIDTH = 860;
 const REFERENCE_DRAWER_PAGE_GUTTER = 420;
 const REFERENCE_EXPORT_CHUNK_MAX_HEIGHT = 1200;
+const RESPONSE_STREAM_INTERVAL_MS = 16;
+const RESPONSE_STREAM_CHARS_PER_FRAME = 4;
 
 type ReferencePreviewState = {
   href: string;
@@ -83,6 +85,13 @@ type MessageReferenceItem = {
 type MessageContentSections = {
   body: string;
   references: MessageReferenceItem[];
+};
+
+type BotResponseStreamBuffer = {
+  displayed: string;
+  pending: string;
+  timerId: number | null;
+  finalText?: string;
 };
 
 function clampReferenceDrawerWidth(width: number): number {
@@ -511,6 +520,112 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const replayRequestRef = useRef(0);
   const referencePreviewRequestRef = useRef(0);
   const referenceResizeCleanupRef = useRef<(() => void) | null>(null);
+  const responseStreamBuffersRef = useRef<Record<string, BotResponseStreamBuffer>>({});
+
+  const updateBotMessage = (messageKey: string, patch: Partial<ChatMessage>) => {
+    setMessages((prev) => prev.map((message) => (
+      message.key === messageKey
+        ? { ...message, ...patch }
+        : message
+    )));
+  };
+
+  const finishBotResponseStream = (messageKey: string) => {
+    const buffer = responseStreamBuffersRef.current[messageKey];
+    if (!buffer) return;
+
+    if (buffer.timerId !== null) {
+      window.clearTimeout(buffer.timerId);
+    }
+    const text = buffer.finalText ?? `${buffer.displayed}${buffer.pending}`;
+    delete responseStreamBuffersRef.current[messageKey];
+    updateBotMessage(messageKey, { text, streaming: false });
+  };
+
+  const scheduleBotResponseStream = (messageKey: string) => {
+    const buffer = responseStreamBuffersRef.current[messageKey];
+    if (!buffer || buffer.timerId !== null) return;
+
+    buffer.timerId = window.setTimeout(() => {
+      const activeBuffer = responseStreamBuffersRef.current[messageKey];
+      if (!activeBuffer) return;
+
+      activeBuffer.timerId = null;
+      if (activeBuffer.pending.length === 0) {
+        if (activeBuffer.finalText !== undefined) {
+          finishBotResponseStream(messageKey);
+        }
+        return;
+      }
+
+      const nextChunk = activeBuffer.pending.slice(0, RESPONSE_STREAM_CHARS_PER_FRAME);
+      activeBuffer.pending = activeBuffer.pending.slice(nextChunk.length);
+      activeBuffer.displayed += nextChunk;
+      updateBotMessage(messageKey, {
+        text: activeBuffer.displayed,
+        streaming: true,
+      });
+
+      scheduleBotResponseStream(messageKey);
+    }, RESPONSE_STREAM_INTERVAL_MS);
+  };
+
+  const enqueueBotResponseDelta = (
+    messageKey: string,
+    delta: string,
+    createdAt?: string,
+  ) => {
+    if (!delta) return;
+
+    const existing = responseStreamBuffersRef.current[messageKey];
+    const buffer = existing || {
+      displayed: '',
+      pending: '',
+      timerId: null,
+    };
+    buffer.pending += delta;
+    responseStreamBuffersRef.current[messageKey] = buffer;
+
+    updateBotMessage(messageKey, {
+      status: 'Bot 回复',
+      streaming: true,
+      ...(createdAt ? { createdAt } : {}),
+    });
+    scheduleBotResponseStream(messageKey);
+  };
+
+  const completeBotResponseStream = (messageKey: string, finalText?: string) => {
+    const buffer = responseStreamBuffersRef.current[messageKey];
+    if (!buffer) {
+      if (finalText !== undefined) {
+        updateBotMessage(messageKey, { text: finalText, streaming: false });
+      }
+      return;
+    }
+
+    buffer.finalText = finalText ?? `${buffer.displayed}${buffer.pending}`;
+    if (buffer.pending.length === 0) {
+      finishBotResponseStream(messageKey);
+    } else {
+      scheduleBotResponseStream(messageKey);
+    }
+  };
+
+  const cancelBotResponseStream = (messageKey: string) => {
+    const buffer = responseStreamBuffersRef.current[messageKey];
+    if (buffer?.timerId !== null && buffer?.timerId !== undefined) {
+      window.clearTimeout(buffer.timerId);
+    }
+    delete responseStreamBuffersRef.current[messageKey];
+  };
+
+  const clearAllBotResponseStreams = () => {
+    Object.keys(responseStreamBuffersRef.current).forEach(cancelBotResponseStream);
+  };
+
+  useEffect(() => () => {
+    clearAllBotResponseStreams();
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -562,6 +677,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
   }
 
   function resetConversation(status = '') {
+    clearAllBotResponseStreams();
     closeReferencePreview();
     persistLastActiveSession(null);
     setSessionId(null);
@@ -739,9 +855,14 @@ const ChatApp: React.FC<ChatAppProps> = ({
   }
 
   function setCachedSessionMessages(targetSessionId: string, nextMessages: ChatMessage[]) {
+    const cacheableMessages = nextMessages.map((message) => ({
+      ...message,
+      loading: false,
+      streaming: false,
+    }));
     updateSessionMessageCache((prev) => ({
       ...prev,
-      [targetSessionId]: nextMessages,
+      [targetSessionId]: cacheableMessages,
     }));
   }
 
@@ -1358,6 +1479,8 @@ const ChatApp: React.FC<ChatAppProps> = ({
       const dec = new TextDecoder();
       let buf = '';
       let finalContent = '';
+      let streamedContent = '';
+      let receivedResponseDelta = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1374,6 +1497,28 @@ const ChatApp: React.FC<ChatAppProps> = ({
             if (typeof evt.timestamp === 'string') {
               latestEventTimestamp = evt.timestamp;
             }
+
+            if (evt.event === 'error') {
+              let detail = 'Bot 服务异常';
+              if (typeof evt.data === 'string') {
+                try {
+                  const parsed = JSON.parse(evt.data) as { error?: string };
+                  detail = parsed.error || evt.data;
+                } catch {
+                  detail = evt.data;
+                }
+              }
+              throw new Error(detail);
+            }
+
+            if (evt.event === 'response_delta') {
+              const delta = typeof evt.data === 'string' ? evt.data : JSON.stringify(evt.data);
+              receivedResponseDelta = true;
+              streamedContent += delta;
+              enqueueBotResponseDelta(botId, delta, latestEventTimestamp);
+              continue;
+            }
+
             let status = '思考中...';
             let currentIteration: number | undefined;
 
@@ -1442,21 +1587,23 @@ const ChatApp: React.FC<ChatAppProps> = ({
               status = 'Bot 回复';
             }
 
-            if (evt.event === 'error') {
-              let detail = 'Bot 服务异常';
-              if (typeof evt.data === 'string') {
-                try {
-                  const parsed = JSON.parse(evt.data) as { error?: string };
-                  detail = parsed.error || evt.data;
-                } catch {
-                  detail = evt.data;
-                }
-              }
-              throw new Error(detail);
-            }
-
             if (evt.event === 'response') {
               finalContent = typeof evt.data === 'string' ? evt.data : JSON.stringify(evt.data);
+              if (receivedResponseDelta) {
+                if (finalContent.startsWith(streamedContent)) {
+                  completeBotResponseStream(botId, finalContent);
+                } else {
+                  cancelBotResponseStream(botId);
+                  updateBotMessage(botId, {
+                    text: finalContent,
+                    streaming: false,
+                    createdAt: latestEventTimestamp,
+                  });
+                }
+              } else if (finalContent) {
+                enqueueBotResponseDelta(botId, finalContent, latestEventTimestamp);
+                completeBotResponseStream(botId, finalContent);
+              }
             }
 
             setMessages((prev) => prev.map((message) => {
@@ -1468,7 +1615,6 @@ const ChatApp: React.FC<ChatAppProps> = ({
                 const nextMessage = {
                   ...message,
                   status,
-                  text: finalContent || '',
                   createdAt: latestEventTimestamp,
                   steps: nextSteps,
                 };
@@ -1490,13 +1636,23 @@ const ChatApp: React.FC<ChatAppProps> = ({
       const elapsedMs = streamStartedAt === null
         ? undefined
         : Math.max(0, Math.round(performance.now() - streamStartedAt));
+      if (!finalContent && streamedContent) {
+        finalContent = streamedContent;
+      }
+      if (finalContent) {
+        completeBotResponseStream(botId, finalContent);
+      }
+      const hasPendingResponseStream = Boolean(responseStreamBuffersRef.current[botId]);
       setMessages((prev) => prev.map((message) => (
         message.key === botId
           ? {
             ...message,
-            text: finalContent || '（无回复）',
+            text: hasPendingResponseStream
+              ? message.text
+              : finalContent || message.text || '（无回复）',
             status: 'Bot 回复',
             loading: false,
+            streaming: hasPendingResponseStream,
             createdAt: latestEventTimestamp,
             elapsedMs,
           }
@@ -1506,6 +1662,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
       const elapsedMs = streamStartedAt === null
         ? undefined
         : Math.max(0, Math.round(performance.now() - streamStartedAt));
+      cancelBotResponseStream(botId);
       setMessages((prev) => prev.map((message) => (
         message.key === botId
           ? {
@@ -1513,6 +1670,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
             text: `错误: ${err.message}`,
             status: 'Error',
             loading: false,
+            streaming: false,
             createdAt: latestEventTimestamp,
             elapsedMs,
           }
@@ -1775,6 +1933,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
                 ? splitMessageReferenceSection(message.text, serverUrl)
                 : { body: message.text, references: [] };
               const shouldRenderMessageBody = messageSections.body.trim().length > 0 || messageSections.references.length === 0;
+              const showInlineCursor = message.role === 'bot' && Boolean(message.streaming);
               
               // 决定是否在界面上展示思考过程折叠面板的条件：
               // 1. 只有 Bot 回复展示思考过程
@@ -1834,17 +1993,22 @@ const ChatApp: React.FC<ChatAppProps> = ({
                     ) : null}
                     <div className="chat-bubble">
                       {message.loading && !message.text ? (
-                        <div className="typing-dots"><span /><span /><span /></div>
+                        <div className="chat-stream-placeholder">
+                          <span>{message.status || '思考中...'}</span>
+                        </div>
                       ) : (
                         <>
                           {shouldRenderMessageBody && (
-                            <MarkdownRenderer
-                              className="markdown-body"
-                              content={messageSections.body}
-                              serverUrl={serverUrl}
-                              onImageClick={setPreviewImage}
-                              onReferenceClick={(target, label) => { void openReferencePreview(target, label); }}
-                            />
+                            <div className="chat-stream-body">
+                              <MarkdownRenderer
+                                className="markdown-body"
+                                content={messageSections.body}
+                                serverUrl={serverUrl}
+                                onImageClick={setPreviewImage}
+                                onReferenceClick={(target, label) => { void openReferencePreview(target, label); }}
+                              />
+                              {showInlineCursor && <span className="chat-stream-cursor" aria-hidden="true" />}
+                            </div>
                           )}
                           {message.role === 'bot' && (
                             <ChatBubbleReferences
@@ -1852,7 +2016,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
                               onOpenReference={(target, label) => { void openReferencePreview(target, label); }}
                             />
                           )}
-                          {message.role === 'bot' && message.key !== 'welcome' && (
+                          {message.role === 'bot' && message.key !== 'welcome' && !message.loading && !message.streaming && (
                             <div className="chat-bubble-actions" data-export-ignore="true">
                               <button
                                 className="chat-export-btn"

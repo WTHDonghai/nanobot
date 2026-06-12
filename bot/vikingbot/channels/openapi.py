@@ -203,6 +203,9 @@ class OpenAPIChannel(BaseChannel):
             await pending.add_event("response", content)
             pending.set_final(content)
             await pending.close_stream()
+        elif msg.event_type == OutboundEventType.RESPONSE_DELTA:
+            content = self._replace_bot_resource_links(msg.content or "")
+            await pending.add_event("response_delta", content)
         elif msg.event_type == OutboundEventType.REASONING:
             await pending.add_event("reasoning", msg.content)
         elif msg.event_type == OutboundEventType.ITERATION:

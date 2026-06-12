@@ -1051,6 +1051,35 @@
   animation-delay: 0.4s;
 }
 
+.chat-stream-placeholder {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.7em;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.chat-stream-body {
+  display: block;
+}
+
+.chat-stream-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  vertical-align: -0.14em;
+  animation: chat-cursor-blink 0.9s steps(2, start) infinite;
+}
+
+@keyframes chat-cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
 @keyframes td {
   from {
     opacity: 0.3;

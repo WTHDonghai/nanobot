@@ -10,6 +10,18 @@ from vikingbot.providers.base import REQUIRED_TOOL_DISPATCH_NAME
 from vikingbot.providers.openai_compatible_provider import OpenAICompatibleProvider
 
 
+class AsyncChunks:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        for chunk in self.chunks:
+            yield chunk
+
+
 @pytest.mark.asyncio
 async def test_openai_compatible_provider_passes_through_tool_choice() -> None:
     provider = OpenAICompatibleProvider(
@@ -60,6 +72,69 @@ async def test_openai_compatible_provider_passes_through_tool_choice() -> None:
     assert response.content == "ok"
     assert captured["tool_choice"] == "required"
     assert response.metadata["effective_tool_choice"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_streams_plain_text_deltas() -> None:
+    provider = OpenAICompatibleProvider(
+        api_key="test-key",
+        api_base="https://example.com/v1",
+        default_model="stub-model",
+    )
+    captured: dict = {}
+
+    async def create(**kwargs):
+        captured.update(kwargs)
+        return AsyncChunks(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="你"),
+                            finish_reason=None,
+                        )
+                    ],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="好"),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(
+                        prompt_tokens=2,
+                        completion_tokens=2,
+                        total_tokens=4,
+                    ),
+                ),
+            ]
+        )
+
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    deltas: list[str] = []
+
+    async def on_delta(delta: str) -> None:
+        deltas.append(delta)
+
+    response = await provider.chat(
+        messages=[{"role": "user", "content": "hello"}],
+        model="stub-model",
+        temperature=0,
+        on_delta=on_delta,
+    )
+
+    assert captured["stream"] is True
+    assert deltas == ["你", "好"]
+    assert response.content == "你好"
+    assert response.usage == {
+        "prompt_tokens": 2,
+        "completion_tokens": 2,
+        "total_tokens": 4,
+    }
 
 
 @pytest.mark.asyncio

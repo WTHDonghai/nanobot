@@ -19,6 +19,7 @@ from vikingbot.providers.base import (
     REQUIRED_TOOL_DISPATCH_NAME,
     LLMProvider,
     LLMResponse,
+    ResponseDeltaCallback,
     ToolCallRequest,
     build_required_tool_dispatch,
     translate_required_tool_dispatch,
@@ -137,6 +138,7 @@ class OpenAICompatibleProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         session_id: str | None = None,
+        on_delta: ResponseDeltaCallback | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request to OpenAI-compatible API.
@@ -149,6 +151,7 @@ class OpenAICompatibleProvider(LLMProvider):
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
             session_id: Optional session ID for tracing.
+            on_delta: Optional callback for streaming final response text chunks.
 
         Returns:
             LLMResponse with content and/or tool calls.
@@ -199,7 +202,20 @@ class OpenAICompatibleProvider(LLMProvider):
                     )
 
             try:
-                response = await self.client.chat.completions.create(**kwargs)
+                if on_delta and not tools:
+                    try:
+                        llm_response = await self._stream_chat_response(kwargs, on_delta)
+                        response = None
+                    except Exception as stream_error:
+                        logger.warning(
+                            "[LLM_STREAM] OpenAI-compatible streaming failed; retrying non-stream "
+                            f"model={model} session_id={session_id}: {stream_error}"
+                        )
+                        response = await self.client.chat.completions.create(**kwargs)
+                        llm_response = self._parse_response(response)
+                else:
+                    response = await self.client.chat.completions.create(**kwargs)
+                    llm_response = self._parse_response(response)
             except Exception as e:
                 if kwargs.get("tool_choice") == "required" and _is_tool_choice_parameter_error(e):
                     logger.warning(
@@ -214,9 +230,9 @@ class OpenAICompatibleProvider(LLMProvider):
                         "function": {"name": REQUIRED_TOOL_DISPATCH_NAME},
                     }
                     response = await self.client.chat.completions.create(**kwargs)
+                    llm_response = self._parse_response(response)
                 else:
                     raise
-            llm_response = self._parse_response(response)
             if required_dispatch:
                 llm_response = translate_required_tool_dispatch(llm_response, tools or [])
                 llm_response.metadata["effective_tool_choice"] = "required_dispatch"
@@ -302,6 +318,94 @@ class OpenAICompatibleProvider(LLMProvider):
                 finish_reason="error",
             )
 
+    @staticmethod
+    def _field(obj: Any, key: str, default: Any = None) -> Any:
+        """Read a value from SDK objects and dict-like streaming chunks."""
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    @classmethod
+    def _parse_usage_obj(cls, usage_obj: Any) -> dict[str, int]:
+        """Parse token usage from either object or dict responses."""
+        if not usage_obj:
+            return {}
+
+        prompt_tokens = cls._field(usage_obj, "prompt_tokens", 0) or 0
+        completion_tokens = cls._field(usage_obj, "completion_tokens", 0) or 0
+        total_tokens = cls._field(usage_obj, "total_tokens", 0) or 0
+        usage = {
+            "prompt_tokens": int(prompt_tokens),
+            "completion_tokens": int(completion_tokens),
+            "total_tokens": int(total_tokens),
+        }
+
+        details = cls._field(usage_obj, "prompt_tokens_details")
+        cached = cls._field(details, "cached_tokens") if details else None
+        cached = cached or cls._field(usage_obj, "cache_read_input_tokens")
+        if cached:
+            usage["cache_read_input_tokens"] = int(cached)
+        return usage
+
+    @classmethod
+    def _first_choice(cls, response_or_chunk: Any) -> Any | None:
+        choices = cls._field(response_or_chunk, "choices") or []
+        return choices[0] if choices else None
+
+    async def _stream_chat_response(
+        self,
+        kwargs: dict[str, Any],
+        on_delta: ResponseDeltaCallback,
+    ) -> LLMResponse:
+        """Stream a plain-text chat completion and accumulate the final response."""
+        stream = await self.client.chat.completions.create(**kwargs, stream=True)
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        finish_reason = "stop"
+        usage: dict[str, int] = {}
+
+        async def handle_chunk(chunk: Any) -> None:
+            nonlocal finish_reason, usage
+            if parsed_usage := self._parse_usage_obj(self._field(chunk, "usage")):
+                usage = parsed_usage
+
+            choice = self._first_choice(chunk)
+            if choice is None:
+                return
+            if reason := self._field(choice, "finish_reason"):
+                finish_reason = str(reason)
+
+            delta = self._field(choice, "delta")
+            if not delta:
+                return
+
+            reasoning = self._field(delta, "reasoning_content") or self._field(
+                delta, "reasoning"
+            )
+            if reasoning:
+                reasoning_parts.append(str(reasoning))
+
+            content = self._field(delta, "content")
+            if not content:
+                return
+            text = str(content)
+            content_parts.append(text)
+            await on_delta(text)
+
+        if hasattr(stream, "__aiter__"):
+            async for chunk in stream:
+                await handle_chunk(chunk)
+        else:
+            for chunk in stream:
+                await handle_chunk(chunk)
+
+        return LLMResponse(
+            content="".join(content_parts),
+            finish_reason=finish_reason,
+            usage=usage,
+            reasoning_content="".join(reasoning_parts) or None,
+        )
+
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse OpenAI API response into our standard format."""
         choice = response.choices[0]
@@ -324,27 +428,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     ToolCallRequest(id=tc.id, name=tc.function.name, arguments=args, tokens=tokens)
                 )
 
-        usage = {}
-        if hasattr(response, "usage") and response.usage:
-            usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-
-            # Extract cached tokens from various provider formats
-            # OpenAI style: prompt_tokens_details.cached_tokens
-            if hasattr(response.usage, "prompt_tokens_details"):
-                details = response.usage.prompt_tokens_details
-                if details and hasattr(details, "cached_tokens"):
-                    cached = details.cached_tokens
-                    if cached:
-                        usage["cache_read_input_tokens"] = cached
-            # Anthropic style: cache_read_input_tokens
-            elif hasattr(response.usage, "cache_read_input_tokens"):
-                cached = response.usage.cache_read_input_tokens
-                if cached:
-                    usage["cache_read_input_tokens"] = cached
+        usage = self._parse_usage_obj(getattr(response, "usage", None))
 
         reasoning_content = getattr(message, "reasoning_content", None)
 

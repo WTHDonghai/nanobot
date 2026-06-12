@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -168,6 +168,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         self._inflight_message_tasks: set[asyncio.Task[None]] = set()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._openviking_sync_tasks: dict[str, asyncio.Task[None]] = {}
+        self._streamed_response_text: dict[str, str] = {}
         self._register_default_tools()
 
     def _should_use_kb_fast_batch_path(self) -> bool:
@@ -286,6 +287,103 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                 event_type=OutboundEventType.TOOL_RESULT,
             )
         )
+
+    async def _publish_response_delta_events(
+        self,
+        *,
+        session_key: SessionKey,
+        content: str | None,
+        publish_events: bool,
+    ) -> None:
+        """Publish final answer chunks for clients that render streaming text."""
+        if not publish_events or not content:
+            return
+
+        chunks = self._split_response_delta_chunks(content)
+        for chunk in chunks:
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    session_key=session_key,
+                    content=chunk,
+                    event_type=OutboundEventType.RESPONSE_DELTA,
+                )
+            )
+
+    async def _publish_missing_response_delta_events(
+        self,
+        *,
+        session_key: SessionKey,
+        final_content: str | None,
+        publish_events: bool,
+    ) -> None:
+        """Publish only response text that was not already emitted as provider deltas."""
+        if not publish_events or not final_content:
+            self._consume_streamed_response_text(session_key)
+            return
+
+        streamed_content = self._consume_streamed_response_text(session_key)
+        if not streamed_content:
+            await self._publish_response_delta_events(
+                session_key=session_key,
+                content=final_content,
+                publish_events=publish_events,
+            )
+            return
+
+        if final_content.startswith(streamed_content):
+            await self._publish_response_delta_events(
+                session_key=session_key,
+                content=final_content[len(streamed_content) :],
+                publish_events=publish_events,
+            )
+
+    @staticmethod
+    def _split_response_delta_chunks(content: str, max_chars: int = 24) -> list[str]:
+        """Split text into readable UI chunks without changing its content."""
+        if not content:
+            return []
+
+        chunks: list[str] = []
+        current = ""
+        for char in content:
+            current += char
+            if char in "\n。！？!?；;，,、 " or len(current) >= max_chars:
+                chunks.append(current)
+                current = ""
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _make_response_delta_callback(
+        self,
+        *,
+        session_key: SessionKey,
+        publish_events: bool,
+    ) -> Callable[[str], Awaitable[None]] | None:
+        """Build a provider streaming callback for final response text."""
+        if not publish_events:
+            return None
+
+        async def publish_delta(delta: str) -> None:
+            if not delta:
+                return
+            safe_name = session_key.safe_name()
+            self._streamed_response_text[safe_name] = (
+                self._streamed_response_text.get(safe_name, "") + delta
+            )
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    session_key=session_key,
+                    content=delta,
+                    event_type=OutboundEventType.RESPONSE_DELTA,
+                )
+            )
+
+        return publish_delta
+
+    def _consume_streamed_response_text(self, session_key: SessionKey) -> str:
+        """Return response text already emitted as deltas and clear the marker."""
+        return self._streamed_response_text.pop(session_key.safe_name(), "")
 
     async def _execute_fast_batch_tool(
         self,
@@ -454,6 +552,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                         await self.bus.publish_outbound(response)
                 except Exception as e:
                     logger.exception(f"Error processing message: {e}")
+                    self._consume_streamed_response_text(msg.session_key)
                     await self.bus.publish_outbound(
                         OutboundMessage(
                             session_key=msg.session_key,
@@ -660,6 +759,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         publish_events: bool = True,
         sender_id: str | None = None,
         allow_grounded_history_reuse: bool = False,
+        stream_response_events: bool = False,
     ) -> tuple[str | None, list[dict], dict[str, int], int]:
         """
         Run the core agent loop: call LLM, execute tools, repeat until done.
@@ -682,6 +782,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                     publish_events=publish_events,
                     sender_id=sender_id,
                     allow_grounded_history_reuse=allow_grounded_history_reuse,
+                    stream_response_events=stream_response_events,
                 )
             final_content = self._build_iteration_limit_terminal_response(
                 messages=messages,
@@ -700,6 +801,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
             publish_events=publish_events,
             sender_id=sender_id,
             allow_grounded_history_reuse=allow_grounded_history_reuse,
+            stream_response_events=stream_response_events,
         )
 
     async def _run_kb_fast_batch_loop(
@@ -709,6 +811,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         publish_events: bool = True,
         sender_id: str | None = None,
         allow_grounded_history_reuse: bool = False,
+        stream_response_events: bool = False,
     ) -> tuple[str | None, list[dict], dict[str, int], int]:
         """Run the deterministic no-fallback KB path: search, batch read, answer."""
         trace_session = session_key.safe_name()
@@ -921,7 +1024,11 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         )
 
         answer_start = time.time()
-        final_content = await self._compose_answer_from_selected_evidence(messages, session_key)
+        final_content = await self._compose_answer_from_selected_evidence(
+            messages,
+            session_key,
+            publish_events=stream_response_events,
+        )
         answer_duration_ms = (time.time() - answer_start) * 1000
         logger.info(
             f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
@@ -953,6 +1060,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         publish_events: bool = True,
         sender_id: str | None = None,
         allow_grounded_history_reuse: bool = False,
+        stream_response_events: bool = False,
     ) -> tuple[str | None, list[dict], dict[str, int], int]:
         """Run the original model-planned agent loop for non-KB modes."""
         iteration = 0
@@ -1393,6 +1501,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                 final_content = await self._compose_answer_from_selected_evidence(
                     messages,
                     session_key,
+                    publish_events=stream_response_events,
                 )
                 if final_content and trace_enabled:
                     logger.info(
@@ -1676,6 +1785,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         self,
         messages: list[dict],
         session_key: SessionKey,
+        publish_events: bool = False,
     ) -> str | None:
         """Answer from already selected evidence without running more retrieval tools."""
         current_turn_messages = messages[self._current_turn_start_index(messages) :]
@@ -1702,10 +1812,18 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
             },
         ]
         try:
+            chat_kwargs: dict[str, Any] = {}
+            on_delta = self._make_response_delta_callback(
+                session_key=session_key,
+                publish_events=publish_events,
+            )
+            if on_delta is not None:
+                chat_kwargs["on_delta"] = on_delta
             response = await self.provider.chat(
                 messages=final_messages,
                 model=self.model,
                 session_id=f"{session_key.safe_name()}:kb-selected-evidence-answer",
+                **chat_kwargs,
             )
         except Exception as exc:
             logger.debug(f"[KB_TRACE] selected evidence answer failed: {exc}")
@@ -1994,6 +2112,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         # The chat_id contains the original "channel:chat_id" to route back to
         start_time = time.time()
         long_running_notified = False
+        self._consume_streamed_response_text(msg.session_key)
 
         # 监控处理时长，每50秒发送处理中提示事件
         async def check_long_running():
@@ -2110,6 +2229,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
 
             from vikingbot.agent.context import ContextBuilder
 
+            should_stream_response = bool(msg.metadata and "openviking_session_id" in msg.metadata)
             message_context = ContextBuilder(
                 message_workspace,
                 sandbox_manager=self.sandbox_manager,
@@ -2144,9 +2264,18 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                             user_message=msg.content,
                             history=session.get_history(),
                             session_id=session_key.safe_name(),
+                            on_delta=self._make_response_delta_callback(
+                                session_key=msg.session_key,
+                                publish_events=should_stream_response,
+                            ),
                         )
                         response_text = self._normalize_final_output_text(response_text)
                         await self._persist_session_turn(session, msg, response_text)
+                        await self._publish_missing_response_delta_events(
+                            session_key=msg.session_key,
+                            final_content=response_text,
+                            publish_events=should_stream_response,
+                        )
 
                         time_cost = round(time.time() - start_time, 2)
                         return OutboundMessage(
@@ -2160,6 +2289,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                         f"[IntentRouter] Classification failed, falling back to agent loop: {e}",
                         exc_info=True,
                     )
+                    self._consume_streamed_response_text(msg.session_key)
 
             # Build initial messages (use get_history for LLM-formatted messages)
             messages = await message_context.build_messages(
@@ -2187,6 +2317,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                 publish_events=True,
                 sender_id=msg.sender_id,
                 allow_grounded_history_reuse=allow_grounded_history_reuse,
+                stream_response_events=should_stream_response,
             )
 
             # Log response preview
@@ -2207,6 +2338,11 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                 tools_used_names = [tool["tool_name"] for tool in tools_used]
             else:
                 tools_used_names = []
+            await self._publish_missing_response_delta_events(
+                session_key=msg.session_key,
+                final_content=final_content,
+                publish_events=should_stream_response,
+            )
             return OutboundMessage(
                 session_key=msg.session_key,
                 content=final_content,

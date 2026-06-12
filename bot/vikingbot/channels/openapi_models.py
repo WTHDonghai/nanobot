@@ -20,6 +20,7 @@ class EventType(str, Enum):
     """Event type enumeration."""
 
     RESPONSE = "response"
+    RESPONSE_DELTA = "response_delta"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     REASONING = "reasoning"
