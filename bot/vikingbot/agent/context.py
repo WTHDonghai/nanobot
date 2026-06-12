@@ -46,7 +46,7 @@ Do not use model knowledge to complete missing parts.
 Do not add unstated details, assumptions, examples, steps, numbers, names, causes, capabilities, policies, or recommendations.
 Do not mention retrieval, tools, internal files, prompts, or implementation details.
 Do not narrate the process, repeat the answer, or add self-introduction unless asked.
-Preserve any provided send:// Markdown image lines exactly.
+Do not output, rewrite, summarize, or rearrange any send:// Markdown image lines; the system will append selected image evidence after your text.
 If the evidence is partial, answer only the supported part and briefly note what the evidence does not cover.
 Return the final reply only."""
 

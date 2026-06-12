@@ -37,6 +37,7 @@ from vikingbot.providers.base import LLMProvider
 from vikingbot.sandbox import SandboxManager
 from vikingbot.session.manager import SessionManager
 from vikingbot.utils.helpers import cal_str_tokens
+from vikingbot.utils.markdown_images import repair_send_image_markdown
 from vikingbot.utils.tracing import trace
 
 if TYPE_CHECKING:
@@ -1891,7 +1892,9 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         if not isinstance(content, str):
             return content
 
-        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = (repair_send_image_markdown(content) or content).replace("\r\n", "\n").replace(
+            "\r", "\n"
+        )
         if not normalized.strip():
             return normalized.strip()
 

@@ -19,6 +19,7 @@ from openviking_cli.resource_preview import (
 from vikingbot.agent.kb_patterns import MARKDOWN_IMAGE_LINE_RE, SEND_IMAGE_LINE_RE
 from vikingbot.config.schema import SessionKey
 from vikingbot.openviking_mount.uri_utils import is_generic_scope_summary_uri, is_summary_uri
+from vikingbot.utils.markdown_images import repair_send_image_markdown, strip_send_image_markdown
 
 
 class KbResponseMixin:
@@ -35,6 +36,7 @@ class KbResponseMixin:
             content = message.get("content")
             if not isinstance(content, str):
                 continue
+            content = repair_send_image_markdown(content) or content
             if not SEND_IMAGE_LINE_RE.search(content):
                 continue
             normalized = content.strip()
@@ -48,6 +50,7 @@ class KbResponseMixin:
         """Collect unique send:// Markdown image lines from a text block."""
         seen: set[str] = set()
         lines: list[str] = []
+        content = repair_send_image_markdown(content) or ""
         for match in SEND_IMAGE_LINE_RE.finditer(content):
             line = match.group(0)
             if line not in seen:
@@ -71,6 +74,7 @@ class KbResponseMixin:
         """Split image evidence blocks into smaller text-image segments."""
         segments: list[str] = []
         for block in blocks:
+            block = repair_send_image_markdown(block) or ""
             text_buffer: list[str] = []
             image_buffer: list[str] = []
             for raw_line in block.splitlines():
@@ -195,9 +199,10 @@ class KbResponseMixin:
             f"model={self.fast_model}"
         )
         should_include_images = bool(selected_image_segments)
+        sanitized_draft = strip_send_image_markdown(draft_content) or ""
 
         if not should_include_images:
-            result = self._append_reference_links(draft_content, reference_links)
+            result = self._append_reference_links(sanitized_draft, reference_links)
             logger.info(
                 f"[KB_TRACE] session={trace_session} finalize_fast_path "
                 f"duration_ms={(time.time() - finalize_start_time) * 1000:.1f}"
@@ -206,9 +211,9 @@ class KbResponseMixin:
 
         image_content = self._build_inline_image_content(selected_image_segments)
         body_content = (
-            f"{draft_content.rstrip()}\n\n{image_content}"
+            f"{sanitized_draft.rstrip()}\n\n{image_content}"
             if image_content.strip()
-            else draft_content
+            else sanitized_draft
         )
         final_content = self._append_reference_links(body_content, reference_links)
         logger.info(
@@ -227,6 +232,7 @@ class KbResponseMixin:
         rendered_segments: list[str] = []
         seen_images: set[str] = set()
         for segment in selected_image_segments:
+            segment = repair_send_image_markdown(segment) or ""
             segment_images = cls._extract_send_image_lines_from_text(segment)
             unique_images = [line for line in segment_images if line not in seen_images]
             if not unique_images:

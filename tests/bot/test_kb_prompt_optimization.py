@@ -476,3 +476,55 @@ def test_retrieval_finalizer_inlines_images_when_agent_selects_them() -> None:
     assert "单击入住按钮完成登记。" in reply
     assert "![入住按钮](send://check-in.png)" in reply
     assert len(provider.calls) == 1
+
+
+def test_retrieval_finalizer_rebuilds_images_from_evidence_not_model_draft() -> None:
+    async def run_case(workspace: Path) -> tuple[str, SequenceProvider]:
+        image_line = "![image144](send://bd57ec19e4d4434e825864ab8a303223.jpeg)"
+        provider = SequenceProvider([LLMResponse(content="1")])
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=Config(),
+        )
+        evidence_block = (
+            "图2.5-2 VIP客人信息列表\n\n"
+            "团队：点击【团队】标签，即可查看团队信息列表。\n\n"
+            f"{image_line}"
+        )
+        messages = [
+            {"role": "user", "content": "团队信息怎么查看？"},
+            {
+                "role": "system",
+                "content": loop._build_relevant_evidence_prompt(
+                    "团队信息怎么查看？",
+                    [evidence_block],
+                    source_uri="viking://resources/demo/team.md",
+                ),
+            },
+        ]
+        bad_draft = (
+            "团队：点击【团队】标签，即可查看团队信息列表，默认显示预抵状态下的团队信息，"
+            "如图： ](send://bd57ec19e4d4434e825864ab8a303223.jpeg)image144 "
+            "图2.5-3 团队信息列表"
+        )
+        session_key = SessionKey(type="cli", channel_id="default", chat_id="image-rebuild-test")
+        reply = await loop._finalize_kb_response(bad_draft, session_key, messages)
+        return reply, provider
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        reply, provider = asyncio.run(run_case(workspace))
+
+    assert "团队：点击【团队】标签，即可查看团队信息列表" in reply
+    assert "相关图文说明" in reply
+    assert "图2.5-2 VIP客人信息列表" in reply
+    assert "![image144](send://bd57ec19e4d4434e825864ab8a303223.jpeg)" in reply
+    assert "](send://bd57ec19e4d4434e825864ab8a303223.jpeg)image144" not in reply
+    assert reply.count("send://bd57ec19e4d4434e825864ab8a303223.jpeg") == 1
+    assert len(provider.calls) == 1
