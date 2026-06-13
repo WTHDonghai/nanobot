@@ -797,13 +797,14 @@ class AsyncHTTPClient(BaseClient):
         content: str | None = None,
         parts: list[dict] | None = None,
         created_at: str | None = None,
+        token_usage: dict[str, int] | None = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
         Args:
             session_id: Session ID
             role: Message role ("user" or "assistant")
-            content: Text content (simple mode, backward compatible)
+            content: Text content (simple input mode)
             parts: Parts array (full Part support mode)
             created_at: Message creation time (ISO format string)
 
@@ -819,6 +820,8 @@ class AsyncHTTPClient(BaseClient):
 
         if created_at is not None:
             payload["created_at"] = created_at
+        if token_usage is not None:
+            payload["token_usage"] = token_usage
 
         response = await self._http.post(
             f"/api/v1/sessions/{session_id}/messages",

@@ -23,7 +23,13 @@ from openviking.session.memory_extractor import (
     MemoryExtractor,
     ToolSkillCandidateMemory,
 )
-from openviking.session.session import Session, SessionCompression, SessionMeta, SessionStats
+from openviking.session.session import (
+    AUDIT_SUMMARY_VERSION,
+    Session,
+    SessionCompression,
+    SessionMeta,
+    SessionStats,
+)
 from openviking.storage import VikingDBManager
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config import get_openviking_config
@@ -73,6 +79,7 @@ def create_session_compressor(
 __all__ = [
     # Session
     "Session",
+    "AUDIT_SUMMARY_VERSION",
     "SessionCompression",
     "SessionMeta",
     "SessionStats",

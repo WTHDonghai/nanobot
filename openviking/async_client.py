@@ -167,6 +167,7 @@ class AsyncOpenViking:
         content: str | None = None,
         parts: list[dict] | None = None,
         created_at: str | None = None,
+        token_usage: dict[str, int] | None = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
@@ -181,7 +182,12 @@ class AsyncOpenViking:
         """
         await self._ensure_initialized()
         return await self._client.add_message(
-            session_id=session_id, role=role, content=content, parts=parts, created_at=created_at
+            session_id=session_id,
+            role=role,
+            content=content,
+            parts=parts,
+            created_at=created_at,
+            token_usage=token_usage,
         )
 
     async def commit_session(

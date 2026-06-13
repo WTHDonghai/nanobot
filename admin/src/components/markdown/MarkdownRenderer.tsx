@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useMemo } from 'react';
 import { BookOpen } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -12,6 +12,7 @@ export type MarkdownReferenceTarget = {
 export type MarkdownRendererProps = {
   content: string;
   className?: string;
+  highlightQuery?: string;
   imageClassName?: string;
   referenceLinkClassName?: string;
   serverUrl?: string;
@@ -21,6 +22,43 @@ export type MarkdownRendererProps = {
 };
 
 const passthroughUrlTransform = (url: string) => url;
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function highlightText(value: string, query?: string): React.ReactNode {
+  const needle = query?.trim();
+  if (!needle) return value;
+
+  const parts = value.split(new RegExp(`(${escapeRegExp(needle)})`, 'ig'));
+  return parts.map((part, index) => (
+    part.toLowerCase() === needle.toLowerCase()
+      ? <mark className="markdown-search-highlight" key={`${part}-${index}`}>{part}</mark>
+      : <React.Fragment key={`${part}-${index}`}>{part}</React.Fragment>
+  ));
+}
+
+function highlightReactNode(node: React.ReactNode, query?: string): React.ReactNode {
+  const needle = query?.trim();
+  if (!needle) return node;
+
+  if (typeof node === 'string' || typeof node === 'number') {
+    return highlightText(String(node), needle);
+  }
+
+  if (Array.isArray(node)) {
+    return node.map((child, index) => (
+      <React.Fragment key={index}>{highlightReactNode(child, needle)}</React.Fragment>
+    ));
+  }
+
+  if (React.isValidElement<{ children?: React.ReactNode }>(node) && node.props.children) {
+    return React.cloneElement(node, {
+      children: highlightReactNode(node.props.children, needle),
+    });
+  }
+
+  return node;
+}
 
 export function getTextFromReactNode(node: React.ReactNode): string {
   if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -114,6 +152,7 @@ export function getMarkdownReferenceTarget(
 const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
   content,
   className,
+  highlightQuery,
   imageClassName,
   referenceLinkClassName = 'markdown-reference-link',
   serverUrl,
@@ -121,13 +160,18 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
   onReferenceClick,
   resolveImageSrc,
 }) => {
-  const components = {
+  const renderChildren = useCallback(
+    (children: React.ReactNode) => highlightReactNode(children, highlightQuery),
+    [highlightQuery],
+  );
+
+  const components = useMemo(() => ({
     a({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { children?: React.ReactNode }) {
       const referenceTarget = getMarkdownReferenceTarget(href, serverUrl);
       if (!referenceTarget || !onReferenceClick) {
         return (
           <a href={href} target="_blank" rel="noreferrer" {...props}>
-            {children}
+            {renderChildren(children)}
           </a>
         );
       }
@@ -141,9 +185,54 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
           title="在右侧预览参考文档"
         >
           <BookOpen size={13} />
-          <span>{children}</span>
+          <span>{renderChildren(children)}</span>
         </button>
       );
+    },
+    p({ children, ...props }: React.HTMLAttributes<HTMLParagraphElement> & { children?: React.ReactNode }) {
+      return <p {...props}>{renderChildren(children)}</p>;
+    },
+    li({ children, ...props }: React.LiHTMLAttributes<HTMLLIElement> & { children?: React.ReactNode }) {
+      return <li {...props}>{renderChildren(children)}</li>;
+    },
+    strong({ children, ...props }: React.HTMLAttributes<HTMLElement> & { children?: React.ReactNode }) {
+      return <strong {...props}>{renderChildren(children)}</strong>;
+    },
+    em({ children, ...props }: React.HTMLAttributes<HTMLElement> & { children?: React.ReactNode }) {
+      return <em {...props}>{renderChildren(children)}</em>;
+    },
+    del({ children, ...props }: React.HTMLAttributes<HTMLElement> & { children?: React.ReactNode }) {
+      return <del {...props}>{renderChildren(children)}</del>;
+    },
+    blockquote({ children, ...props }: React.BlockquoteHTMLAttributes<HTMLQuoteElement> & { children?: React.ReactNode }) {
+      return <blockquote {...props}>{renderChildren(children)}</blockquote>;
+    },
+    h1({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement> & { children?: React.ReactNode }) {
+      return <h1 {...props}>{renderChildren(children)}</h1>;
+    },
+    h2({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement> & { children?: React.ReactNode }) {
+      return <h2 {...props}>{renderChildren(children)}</h2>;
+    },
+    h3({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement> & { children?: React.ReactNode }) {
+      return <h3 {...props}>{renderChildren(children)}</h3>;
+    },
+    h4({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement> & { children?: React.ReactNode }) {
+      return <h4 {...props}>{renderChildren(children)}</h4>;
+    },
+    h5({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement> & { children?: React.ReactNode }) {
+      return <h5 {...props}>{renderChildren(children)}</h5>;
+    },
+    h6({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement> & { children?: React.ReactNode }) {
+      return <h6 {...props}>{renderChildren(children)}</h6>;
+    },
+    td({ children, ...props }: React.TdHTMLAttributes<HTMLTableCellElement> & { children?: React.ReactNode }) {
+      return <td {...props}>{renderChildren(children)}</td>;
+    },
+    th({ children, ...props }: React.ThHTMLAttributes<HTMLTableCellElement> & { children?: React.ReactNode }) {
+      return <th {...props}>{renderChildren(children)}</th>;
+    },
+    code({ children, ...props }: React.HTMLAttributes<HTMLElement> & { children?: React.ReactNode }) {
+      return <code {...props}>{renderChildren(children)}</code>;
     },
     img(props: React.ImgHTMLAttributes<HTMLImageElement>) {
       const src = (resolveImageSrc || ((value: string) => resolveBotMarkdownImageSrc(value, serverUrl)))(
@@ -163,7 +252,9 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
         />
       );
     },
-  };
+  }), [imageClassName, onImageClick, onReferenceClick, referenceLinkClassName, renderChildren, resolveImageSrc, serverUrl]);
+
+  const normalizedContent = useMemo(() => normalizeMarkdownForDisplay(content), [content]);
 
   return (
     <div className={className}>
@@ -172,7 +263,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
         urlTransform={passthroughUrlTransform}
         components={components}
       >
-        {normalizeMarkdownForDisplay(content)}
+        {normalizedContent}
       </ReactMarkdown>
     </div>
   );

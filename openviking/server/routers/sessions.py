@@ -54,9 +54,9 @@ PartRequest = TextPartRequest | ContextPartRequest | ToolPartRequest
 class AddMessageRequest(BaseModel):
     """Request model for adding a message.
 
-    Supports two modes:
-    1. Simple mode: provide `content` string (backward compatible)
-    2. Parts mode: provide `parts` array for full Part support
+    Supports two input modes:
+    1. Simple input: provide `content` string, stored as a text part
+    2. Parts input: provide `parts` array for full Part support
 
     If both are provided, `parts` takes precedence.
     """
@@ -65,6 +65,7 @@ class AddMessageRequest(BaseModel):
     content: Optional[str] = None
     parts: Optional[List[Dict[str, Any]]] = None
     created_at: Optional[str] = None
+    token_usage: Optional[Dict[str, int]] = None
 
     @model_validator(mode="after")
     def validate_content_or_parts(self) -> "AddMessageRequest":
@@ -243,11 +244,11 @@ async def add_message(
 ):
     """Add a message to a session.
 
-    Supports two modes:
-    1. Simple mode: provide `content` string (backward compatible)
+    Supports two input modes:
+    1. Simple input: provide `content` string, stored as a text part
        Example: {"role": "user", "content": "Hello"}
 
-    2. Parts mode: provide `parts` array for full Part support
+    2. Parts input: provide `parts` array for full Part support
        Example: {"role": "assistant", "parts": [
            {"type": "text", "text": "Here's the answer"},
            {"type": "context", "uri": "viking://resources/doc.md", "abstract": "..."}
@@ -272,7 +273,12 @@ async def add_message(
         except ValueError:
             logger.warning(f"Invalid created_at format: {request.created_at}")
 
-    session.add_message(request.role, parts, created_at=created_at)
+    session.add_message(
+        request.role,
+        parts,
+        created_at=created_at,
+        token_usage=request.token_usage,
+    )
     return Response(
         status="ok",
         result={

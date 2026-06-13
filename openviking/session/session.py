@@ -9,17 +9,19 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from uuid import uuid4
 
 from openviking.message import Message, Part
+from openviking.message.part import ContextPart, ToolPart
 from openviking.server.identity import RequestContext, Role
 from openviking.telemetry import get_current_telemetry
 from openviking.utils.time_utils import get_current_timestamp
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils import get_logger, run_async
 from openviking_cli.utils.config import get_openviking_config
+
 from .memory_scope import ALL_MEMORY_SCOPE, normalize_memory_scope
 
 if TYPE_CHECKING:
@@ -30,6 +32,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ARCHIVE_WAIT_POLL_SECONDS = 0.1
+FAILED_TOOL_STATUSES = {"error", "failed"}
+AUDIT_SUMMARY_VERSION = 1
 
 
 @dataclass
@@ -89,6 +93,25 @@ class SessionMeta:
             "total_tokens": 0,
         }
     )
+    audit_summary: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "message_count": 0,
+            "user_message_count": 0,
+            "assistant_message_count": 0,
+            "tool_call_count": 0,
+            "failed_tool_call_count": 0,
+            "context_ref_count": 0,
+            "token_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+            "first_message_at": "",
+            "last_message_at": "",
+        }
+    )
+    audit_summary_version: int = AUDIT_SUMMARY_VERSION
+    audit_summary_complete: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -101,6 +124,9 @@ class SessionMeta:
             "last_commit_at": self.last_commit_at,
             "llm_token_usage": dict(self.llm_token_usage),
             "embedding_token_usage": dict(self.embedding_token_usage),
+            "audit_summary": dict(self.audit_summary),
+            "audit_summary_version": self.audit_summary_version,
+            "audit_summary_complete": self.audit_summary_complete,
         }
 
     @classmethod
@@ -108,6 +134,11 @@ class SessionMeta:
         llm_token_usage = data.get("llm_token_usage", {})
         embedding_token_usage = data.get("embedding_token_usage", {})
         memories = data.get("memories_extracted", {})
+        audit = data.get("audit_summary", {})
+        audit_present = isinstance(audit, dict)
+        if not audit_present:
+            audit = {}
+        audit_token_usage = audit.get("token_usage", {})
 
         return cls(
             session_id=data.get("session_id", ""),
@@ -135,6 +166,23 @@ class SessionMeta:
             embedding_token_usage={
                 "total_tokens": embedding_token_usage.get("total_tokens", 0),
             },
+            audit_summary={
+                "message_count": audit.get("message_count", 0),
+                "user_message_count": audit.get("user_message_count", 0),
+                "assistant_message_count": audit.get("assistant_message_count", 0),
+                "tool_call_count": audit.get("tool_call_count", 0),
+                "failed_tool_call_count": audit.get("failed_tool_call_count", 0),
+                "context_ref_count": audit.get("context_ref_count", 0),
+                "token_usage": {
+                    "prompt_tokens": audit_token_usage.get("prompt_tokens", 0),
+                    "completion_tokens": audit_token_usage.get("completion_tokens", 0),
+                    "total_tokens": audit_token_usage.get("total_tokens", 0),
+                },
+                "first_message_at": audit.get("first_message_at", ""),
+                "last_message_at": audit.get("last_message_at", ""),
+            },
+            audit_summary_version=int(data.get("audit_summary_version", 0) or 0),
+            audit_summary_complete=bool(data.get("audit_summary_complete", False)),
         )
 
 
@@ -149,6 +197,84 @@ class Usage:
     output: str = ""
     success: bool = True
     timestamp: str = field(default_factory=get_current_timestamp)
+
+
+def _normalize_token_usage(token_usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, int]]:
+    """Return integer token usage fields, preserving provider-specific numeric keys."""
+    if not token_usage:
+        return None
+
+    normalized: Dict[str, int] = {}
+    for key, value in token_usage.items():
+        try:
+            normalized[str(key)] = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+
+    prompt_tokens = normalized.get("prompt_tokens", 0)
+    completion_tokens = normalized.get("completion_tokens", 0)
+    normalized.setdefault("total_tokens", prompt_tokens + completion_tokens)
+    return normalized
+
+
+def _message_token_usage(message: Message) -> Dict[str, int]:
+    usage = message.token_usage or {}
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    total_tokens = int(usage.get("total_tokens", 0) or 0)
+
+    for part in message.parts:
+        if isinstance(part, ToolPart):
+            prompt_tokens += int(part.prompt_tokens or 0)
+            completion_tokens += int(part.completion_tokens or 0)
+
+    merged_total = prompt_tokens + completion_tokens
+    if merged_total > 0:
+        total_tokens = max(total_tokens, merged_total)
+    if total_tokens <= 0:
+        total_tokens = int(message.estimated_tokens or 0)
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _merge_token_usage(total: Dict[str, int], usage: Dict[str, int]) -> None:
+    total["prompt_tokens"] = int(total.get("prompt_tokens", 0) or 0) + int(
+        usage.get("prompt_tokens", 0) or 0
+    )
+    total["completion_tokens"] = int(total.get("completion_tokens", 0) or 0) + int(
+        usage.get("completion_tokens", 0) or 0
+    )
+    total["total_tokens"] = int(total.get("total_tokens", 0) or 0) + int(
+        usage.get("total_tokens", 0) or 0
+    )
+
+
+def _parse_summary_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def _format_summary_datetime(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _is_failed_tool_status(status: str) -> bool:
+    return status in FAILED_TOOL_STATUSES
 
 
 class Session:
@@ -170,7 +296,7 @@ class Session:
         self.user = user or UserIdentifier.the_default_user()
         self.ctx = ctx or RequestContext(user=self.user, role=Role.ROOT)
         self.session_id = session_id or str(uuid4())
-        self.created_at = datetime.now()
+        self.created_at = datetime.now(timezone.utc)
         self._auto_commit_threshold = auto_commit_threshold
         self._session_uri = f"viking://session/{self.user.user_space_name()}/{self.session_id}"
 
@@ -192,11 +318,19 @@ class Session:
             content = await self._viking_fs.read_file(
                 f"{self._session_uri}/messages.jsonl", ctx=self.ctx
             )
-            self._messages = [
-                Message.from_dict(json.loads(line))
-                for line in content.strip().split("\n")
-                if line.strip()
-            ]
+            messages: List[Message] = []
+            for line in content.strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    messages.append(Message.from_dict(json.loads(line)))
+                except Exception as e:
+                    logger.debug(
+                        "Skipped invalid message in session %s: %s",
+                        self.session_id,
+                        e,
+                    )
+            self._messages = messages
             logger.info(f"Session loaded: {self.session_id} ({len(self._messages)} messages)")
         except (FileNotFoundError, Exception):
             logger.debug(f"Session {self.session_id} not found, starting fresh")
@@ -303,13 +437,15 @@ class Session:
         role: str,
         parts: List[Part],
         created_at: datetime = None,
+        token_usage: Optional[Dict[str, Any]] = None,
     ) -> Message:
         """Add a message."""
         msg = Message(
             id=f"msg_{uuid4().hex}",
             role=role,
             parts=parts,
-            created_at=created_at or datetime.now(),
+            created_at=created_at or datetime.now(timezone.utc),
+            token_usage=_normalize_token_usage(token_usage),
         )
         self._messages.append(msg)
 
@@ -317,12 +453,79 @@ class Session:
         if role == "user":
             self._stats.total_turns += 1
         self._stats.total_tokens += msg.estimated_tokens
+        self._add_message_token_usage(msg.token_usage)
+        self._add_message_to_audit_summary(msg)
 
         self._append_to_jsonl(msg)
 
         self._meta.message_count = len(self._messages)
         self._save_meta_sync()
         return msg
+
+    def _add_message_token_usage(self, token_usage: Optional[Dict[str, int]]) -> None:
+        """Accumulate message-level LLM token usage into session metadata."""
+        if not token_usage:
+            return
+
+        prompt_tokens = int(token_usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(token_usage.get("completion_tokens", 0) or 0)
+        total_tokens = int(token_usage.get("total_tokens", 0) or 0)
+        if total_tokens <= 0:
+            total_tokens = prompt_tokens + completion_tokens
+
+        self._meta.llm_token_usage["prompt_tokens"] += prompt_tokens
+        self._meta.llm_token_usage["completion_tokens"] += completion_tokens
+        self._meta.llm_token_usage["total_tokens"] += total_tokens
+
+    def _add_message_to_audit_summary(self, message: Message) -> None:
+        """Accumulate list-page audit fields without rereading raw messages."""
+        summary = self._meta.audit_summary
+        summary["message_count"] = int(summary.get("message_count", 0) or 0) + 1
+        if message.role == "user":
+            summary["user_message_count"] = int(
+                summary.get("user_message_count", 0) or 0
+            ) + 1
+        elif message.role == "assistant":
+            summary["assistant_message_count"] = int(
+                summary.get("assistant_message_count", 0) or 0
+            ) + 1
+
+        created_at = _parse_summary_datetime(message.created_at)
+        if created_at:
+            first_at = _parse_summary_datetime(summary.get("first_message_at"))
+            last_at = _parse_summary_datetime(summary.get("last_message_at"))
+            if first_at is None or created_at < first_at:
+                summary["first_message_at"] = _format_summary_datetime(created_at)
+            if last_at is None or created_at > last_at:
+                summary["last_message_at"] = _format_summary_datetime(created_at)
+
+        _merge_token_usage(summary["token_usage"], _message_token_usage(message))
+        for part in message.parts:
+            if isinstance(part, ToolPart):
+                summary["tool_call_count"] = int(
+                    summary.get("tool_call_count", 0) or 0
+                ) + 1
+                if _is_failed_tool_status(part.tool_status):
+                    summary["failed_tool_call_count"] = int(
+                        summary.get("failed_tool_call_count", 0) or 0
+                    ) + 1
+            elif isinstance(part, ContextPart):
+                summary["context_ref_count"] = int(
+                    summary.get("context_ref_count", 0) or 0
+                ) + 1
+
+    def _update_audit_summary_for_tool_status(
+        self, old_status: str, new_status: str
+    ) -> None:
+        if old_status == new_status:
+            return
+        summary = self._meta.audit_summary
+        failed = int(summary.get("failed_tool_call_count", 0) or 0)
+        if _is_failed_tool_status(old_status):
+            failed -= 1
+        if _is_failed_tool_status(new_status):
+            failed += 1
+        summary["failed_tool_call_count"] = max(0, failed)
 
     def update_tool_part(
         self,
@@ -340,11 +543,14 @@ class Session:
         if not tool_part:
             return
 
+        old_status = tool_part.tool_status
         tool_part.tool_output = output
         tool_part.tool_status = status
+        self._update_audit_summary_for_tool_status(old_status, status)
 
         self._save_tool_result(tool_id, msg, output, status)
         self._update_message_in_jsonl()
+        self._save_meta_sync()
 
     def commit(self, *, memory_scope: str = ALL_MEMORY_SCOPE) -> Dict[str, Any]:
         """Sync wrapper for commit_async()."""

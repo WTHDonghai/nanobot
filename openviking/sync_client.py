@@ -71,6 +71,7 @@ class SyncOpenViking:
         role: str,
         content: str | None = None,
         parts: list[dict] | None = None,
+        token_usage: dict[str, int] | None = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
@@ -82,7 +83,15 @@ class SyncOpenViking:
 
         If both content and parts are provided, parts takes precedence.
         """
-        return run_async(self._async_client.add_message(session_id, role, content, parts))
+        return run_async(
+            self._async_client.add_message(
+                session_id,
+                role,
+                content,
+                parts,
+                token_usage=token_usage,
+            )
+        )
 
     def commit_session(
         self,

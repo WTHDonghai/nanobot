@@ -262,6 +262,7 @@ class BaseClient(ABC):
         content: str | None = None,
         parts: list[dict] | None = None,
         created_at: str | None = None,
+        token_usage: dict[str, int] | None = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 

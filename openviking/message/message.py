@@ -8,7 +8,7 @@ Message = role + parts, supports serialization to JSONL.
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from openviking.message.part import ContextPart, Part, TextPart, ToolPart
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
@@ -22,6 +22,7 @@ class Message:
     role: Literal["user", "assistant"]
     parts: List[Part]
     created_at: datetime = None
+    token_usage: Optional[Dict[str, int]] = None
 
     @property
     def content(self) -> str:
@@ -66,12 +67,17 @@ class Message:
         """Serialize to JSONL."""
         created_at_val = self.created_at or datetime.now(timezone.utc)
         created_at_str = format_iso8601(created_at_val)
-        return {
+        data = {
             "id": self.id,
             "role": self.role,
             "parts": [self._part_to_dict(p) for p in self.parts],
             "created_at": created_at_str,
         }
+        if self.token_usage:
+            data["token_usage"] = {
+                key: int(value or 0) for key, value in self.token_usage.items()
+            }
+        return data
 
     def _part_to_dict(self, part: Part) -> dict:
         if isinstance(part, TextPart):
@@ -108,24 +114,49 @@ class Message:
     @classmethod
     def from_dict(cls, data: dict) -> "Message":
         """Deserialize from JSONL."""
+        if not isinstance(data, dict):
+            raise ValueError("message must be a dictionary")
+
+        msg_id = data.get("id")
+        if not isinstance(msg_id, str) or not msg_id:
+            raise ValueError("message.id is required")
+
+        role = data.get("role")
+        if role not in {"user", "assistant"}:
+            raise ValueError("message.role must be 'user' or 'assistant'")
+
+        raw_parts = data.get("parts")
+        if not isinstance(raw_parts, list):
+            raise ValueError("message.parts must be a list")
+
+        created_at_raw = data.get("created_at")
+        if not isinstance(created_at_raw, str) or not created_at_raw:
+            raise ValueError("message.created_at is required")
+        created_at = parse_iso_datetime(created_at_raw)
+
         parts = []
-        for p in data.get("parts", []):
-            if p["type"] == "text":
+        for p in raw_parts:
+            if not isinstance(p, dict):
+                raise ValueError("message.parts items must be dictionaries")
+            part_type = p.get("type")
+            if part_type == "text":
+                if "text" not in p:
+                    raise ValueError("text parts require text")
                 parts.append(TextPart(text=p.get("text", "")))
-            elif p["type"] == "context":
+            elif part_type == "context":
                 parts.append(
                     ContextPart(
-                        uri=p["uri"],
+                        uri=p.get("uri", ""),
                         context_type=p.get("context_type", "memory"),
                         abstract=p.get("abstract", ""),
                     )
                 )
-            elif p["type"] == "tool":
+            elif part_type == "tool":
                 parts.append(
                     ToolPart(
-                        tool_id=p["tool_id"],
-                        tool_name=p["tool_name"],
-                        tool_uri=p["tool_uri"],
+                        tool_id=p.get("tool_id", ""),
+                        tool_name=p.get("tool_name", ""),
+                        tool_uri=p.get("tool_uri", ""),
                         skill_uri=p.get("skill_uri", ""),
                         tool_input=p.get("tool_input"),
                         tool_output=p.get("tool_output", ""),
@@ -135,11 +166,15 @@ class Message:
                         completion_tokens=p.get("completion_tokens"),
                     )
                 )
+            else:
+                raise ValueError(f"unsupported message part type: {part_type}")
+
         return cls(
-            id=data["id"],
-            role=data["role"],
+            id=msg_id,
+            role=role,
             parts=parts,
-            created_at=parse_iso_datetime(data["created_at"]),
+            created_at=created_at,
+            token_usage=data.get("token_usage"),
         )
 
     @classmethod

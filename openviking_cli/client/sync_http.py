@@ -109,6 +109,7 @@ class SyncHTTPClient:
         content: str | None = None,
         parts: list[dict] | None = None,
         created_at: str | None = None,
+        token_usage: dict[str, int] | None = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
@@ -122,7 +123,14 @@ class SyncHTTPClient:
         If both content and parts are provided, parts takes precedence.
         """
         return run_async(
-            self._async_client.add_message(session_id, role, content, parts, created_at)
+            self._async_client.add_message(
+                session_id,
+                role,
+                content,
+                parts,
+                created_at,
+                token_usage,
+            )
         )
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:

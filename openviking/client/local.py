@@ -432,13 +432,14 @@ class LocalClient(BaseClient):
         content: Optional[str] = None,
         parts: Optional[List[Dict[str, Any]]] = None,
         created_at: Optional[str] = None,
+        token_usage: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
         Args:
             session_id: Session ID
             role: Message role ("user" or "assistant")
-            content: Text content (simple mode, backward compatible)
+            content: Text content (simple input mode)
             parts: Parts array (full Part support mode)
             created_at: Message creation time (ISO format string)
 
@@ -467,7 +468,12 @@ class LocalClient(BaseClient):
             except ValueError:
                 pass
 
-        session.add_message(role, message_parts, created_at=msg_created_at)
+        session.add_message(
+            role,
+            message_parts,
+            created_at=msg_created_at,
+            token_usage=token_usage,
+        )
         return {
             "session_id": session_id,
             "message_count": len(session.messages),

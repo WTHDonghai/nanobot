@@ -40,6 +40,7 @@ class Session:
         role: str,
         content: Optional[str] = None,
         parts: Optional[List[Part]] = None,
+        token_usage: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         """Add a message to the session.
 
@@ -55,8 +56,18 @@ class Session:
         """
         if parts is not None:
             parts_dicts = [asdict(p) for p in parts]
-            return await self._client.add_message(self.session_id, role, parts=parts_dicts)
-        return await self._client.add_message(self.session_id, role, content=content)
+            return await self._client.add_message(
+                self.session_id,
+                role,
+                parts=parts_dicts,
+                token_usage=token_usage,
+            )
+        return await self._client.add_message(
+            self.session_id,
+            role,
+            content=content,
+            token_usage=token_usage,
+        )
 
     async def commit(
         self,

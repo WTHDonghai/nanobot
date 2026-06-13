@@ -6,6 +6,8 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from openviking.message import ContextPart, Message, TextPart, ToolPart
 from openviking.message.part import part_from_dict
 
@@ -533,6 +535,23 @@ class TestMessageFromDict:
         assert len(restored.parts) == len(original.parts)
         assert isinstance(restored.parts[0], TextPart)
         assert isinstance(restored.parts[1], ContextPart)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"role": "user", "parts": [], "created_at": "2026-03-26T10:30:00Z"},
+            {"id": "msg-1", "parts": [], "created_at": "2026-03-26T10:30:00Z"},
+            {"id": "msg-1", "role": "system", "parts": [], "created_at": "2026-03-26T10:30:00Z"},
+            {"id": "msg-1", "role": "user", "content": "content only", "created_at": "2026-03-26T10:30:00Z"},
+            {"id": "msg-1", "role": "user", "parts": [], "created_at": "not-a-date"},
+            {"id": "msg-1", "role": "user", "parts": [{"text": "missing type"}], "created_at": "2026-03-26T10:30:00Z"},
+            {"id": "msg-1", "role": "user", "parts": [{"type": "text", "content": "legacy text"}], "created_at": "2026-03-26T10:30:00Z"},
+        ],
+    )
+    def test_from_dict_rejects_invalid_persisted_shape(self, payload):
+        """Persisted messages must use the canonical role + parts JSONL shape."""
+        with pytest.raises(ValueError):
+            Message.from_dict(payload)
 
 
 class TestMessageFactoryMethods:

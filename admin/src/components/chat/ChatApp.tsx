@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
-  BookOpen,
   Bot,
   ChevronRight,
   FileDown,

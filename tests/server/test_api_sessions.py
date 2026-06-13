@@ -276,7 +276,7 @@ async def test_extract_session_jsonable_regression(client: httpx.AsyncClient, se
         def to_dict(self):
             return {"uri": self.uri}
 
-    async def fake_extract(_session_id: str, _ctx):
+    async def fake_extract(_session_id: str, _ctx, *, memory_scope: str = "all"):
         return [FakeMemory("viking://user/memories/mock.md")]
 
     monkeypatch.setattr(service.sessions, "extract", fake_extract)

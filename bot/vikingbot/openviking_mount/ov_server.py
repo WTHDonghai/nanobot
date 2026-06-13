@@ -1364,7 +1364,11 @@ class VikingClient:
             if not role or not parts:
                 continue
 
-            await session.add_message(role=role, parts=parts)
+            await session.add_message(
+                role=role,
+                parts=parts,
+                token_usage=message.get("token_usage") if role == "assistant" else None,
+            )
             appended_indices.append(index)
 
         return appended_indices

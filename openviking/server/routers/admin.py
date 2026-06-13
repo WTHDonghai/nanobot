@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Admin endpoints for OpenViking multi-tenant HTTP Server."""
 
-from fastapi import APIRouter, Path, Request
+from datetime import datetime, time, timezone
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 from pydantic import BaseModel
 
 from openviking.server.auth import require_role
@@ -17,6 +20,7 @@ from openviking_cli.utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+USER_ID_PATTERN = r"^[A-Za-z0-9_-]+$"
 
 
 class CreateAccountRequest(BaseModel):
@@ -45,6 +49,26 @@ def _check_account_access(ctx: RequestContext, account_id: str) -> None:
     """ADMIN can only operate on their own account."""
     if ctx.role == Role.ADMIN and ctx.account_id != account_id:
         raise PermissionDeniedError(f"ADMIN can only manage account: {ctx.account_id}")
+
+
+def _parse_day(value: Optional[str], *, end_of_day: bool = False) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        day = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            day = datetime.combine(datetime.strptime(value, "%Y-%m-%d").date(), time.min)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Date must be ISO datetime or YYYY-MM-DD",
+            ) from exc
+    if day.tzinfo is None:
+        day = day.replace(tzinfo=timezone.utc)
+    if end_of_day:
+        day = day.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return day
 
 
 # ---- Account endpoints ----
@@ -220,3 +244,115 @@ async def regenerate_key(
     manager = _get_api_key_manager(request)
     new_key = await manager.regenerate_key(account_id, user_id)
     return Response(status="ok", result={"user_key": new_key})
+
+
+# ---- Analytics and session audit endpoints ----
+
+
+@router.get("/accounts/{account_id}/analytics/daily")
+async def get_daily_analytics(
+    account_id: str = Path(..., description="Account ID"),
+    user_id: Optional[str] = Query(
+        None,
+        pattern=USER_ID_PATTERN,
+        description="Optional user ID filter",
+    ),
+    from_date: Optional[str] = Query(None, description="Start date, YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="End date, YYYY-MM-DD"),
+    ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN),
+):
+    """Get daily usage statistics for an account."""
+    _check_account_access(ctx, account_id)
+    service = get_service()
+    result = await service.sessions.get_admin_daily_analytics(
+        account_id,
+        user_id=user_id or "",
+        from_date=_parse_day(from_date),
+        to_date=_parse_day(to_date, end_of_day=True),
+    )
+    return Response(status="ok", result=result)
+
+
+@router.get("/accounts/{account_id}/sessions")
+async def list_account_sessions(
+    account_id: str = Path(..., description="Account ID"),
+    user_id: Optional[str] = Query(
+        None,
+        pattern=USER_ID_PATTERN,
+        description="Optional user ID filter",
+    ),
+    from_date: Optional[str] = Query(None, description="Start date, YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="End date, YYYY-MM-DD"),
+    q: str = Query("", description="Search text in raw messages and tool records"),
+    sort_by: str = Query("last_active", description="Sort field"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Sort order"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=1000),
+    ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN),
+):
+    """List sessions across users in an account for admin audit."""
+    _check_account_access(ctx, account_id)
+    service = get_service()
+    result = await service.sessions.list_admin_sessions_paginated(
+        account_id,
+        user_id=user_id or "",
+        from_date=_parse_day(from_date),
+        to_date=_parse_day(to_date, end_of_day=True),
+        query=q.strip(),
+        sort_by=sort_by.strip(),
+        sort_order=sort_order.strip(),
+        page=page,
+        page_size=page_size,
+    )
+    return Response(status="ok", result=result)
+
+
+@router.get("/accounts/{account_id}/sessions/{session_id}")
+async def get_account_session_detail(
+    account_id: str = Path(..., description="Account ID"),
+    session_id: str = Path(..., description="Session ID"),
+    user_id: str = Query(
+        ...,
+        pattern=USER_ID_PATTERN,
+        description="User ID that owns the session",
+    ),
+    include_messages: bool = Query(True, description="Include raw messages"),
+    q: str = Query("", description="Search text in raw messages and tool records"),
+    ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN),
+):
+    """Get raw session audit detail across users in an account."""
+    _check_account_access(ctx, account_id)
+    service = get_service()
+    result = await service.sessions.get_admin_session_detail(
+        account_id,
+        user_id,
+        session_id,
+        include_messages=include_messages,
+        query=q.strip(),
+    )
+    return Response(status="ok", result=result)
+
+
+@router.delete("/accounts/{account_id}/sessions/{session_id}")
+async def delete_account_session(
+    account_id: str = Path(..., description="Account ID"),
+    session_id: str = Path(..., description="Session ID"),
+    user_id: str = Query(
+        ...,
+        pattern=USER_ID_PATTERN,
+        description="User ID that owns the session",
+    ),
+    ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN),
+):
+    """Delete a target user's session from an admin audit view."""
+    _check_account_access(ctx, account_id)
+    service = get_service()
+    await service.sessions.delete_admin_session(account_id, user_id, session_id)
+    return Response(
+        status="ok",
+        result={
+            "account_id": account_id,
+            "user_id": user_id,
+            "session_id": session_id,
+        },
+    )
