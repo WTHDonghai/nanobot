@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import MarkdownRenderer from '../components/markdown/MarkdownRenderer';
 import { fetchApi } from '../services/api';
-import { AlertCircle, AlertTriangle, Bot, Eye, MessageSquare, RefreshCw, Search, Wrench, X } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bot, Check, Copy, Eye, MessageSquare, RefreshCw, Search, Wrench, X } from 'lucide-react';
 import './Pages.css';
 
 type TokenUsage = {
@@ -108,17 +108,17 @@ type SessionSortBy =
 type SortOrder = 'asc' | 'desc';
 
 const failedToolStatuses = new Set(['error', 'failed']);
-const sessionSortOptions: Array<{ value: SessionSortBy; label: string; descLabel: string; ascLabel: string; requiresQuery?: boolean }> = [
-  { value: 'last_active', label: '最后活跃', descLabel: '新到旧', ascLabel: '旧到新' },
-  { value: 'created_at', label: '创建时间', descLabel: '新到旧', ascLabel: '旧到新' },
-  { value: 'message_count', label: '消息量', descLabel: '多到少', ascLabel: '少到多' },
-  { value: 'user_message_count', label: '用户问题', descLabel: '多到少', ascLabel: '少到多' },
-  { value: 'assistant_message_count', label: 'Agent 回复', descLabel: '多到少', ascLabel: '少到多' },
-  { value: 'tool_call_count', label: '工具调用', descLabel: '多到少', ascLabel: '少到多' },
-  { value: 'failed_tool_call_count', label: '失败工具', descLabel: '多到少', ascLabel: '少到多' },
-  { value: 'token_total', label: 'Token 消耗', descLabel: '高到低', ascLabel: '低到高' },
-  { value: 'matched_message_count', label: '搜索命中', descLabel: '多到少', ascLabel: '少到多', requiresQuery: true },
-  { value: 'user_id', label: '用户', descLabel: 'Z 到 A', ascLabel: 'A 到 Z' },
+const sessionSortOptions: Array<{ value: SessionSortBy; label: string; requiresQuery?: boolean }> = [
+  { value: 'last_active', label: '最后活跃' },
+  { value: 'created_at', label: '创建时间' },
+  { value: 'message_count', label: '消息量' },
+  { value: 'user_message_count', label: '用户问题' },
+  { value: 'assistant_message_count', label: 'Agent 回复' },
+  { value: 'tool_call_count', label: '工具调用' },
+  { value: 'failed_tool_call_count', label: '失败工具' },
+  { value: 'token_total', label: 'Token 消耗' },
+  { value: 'matched_message_count', label: '搜索命中', requiresQuery: true },
+  { value: 'user_id', label: '用户' },
 ];
 
 const localDateIso = (date: Date) => {
@@ -198,6 +198,341 @@ const collectToolRecords = (messages: SessionMessage[]) => messages.flatMap((mes
     index,
   }))
 ));
+
+const writeClipboardText = async (text: string) => {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall through to the legacy command for local HTTP or restricted clipboard contexts.
+    }
+  }
+
+  const textArea = document.createElement('textarea');
+  textArea.value = text;
+  textArea.setAttribute('readonly', '');
+  textArea.style.position = 'fixed';
+  textArea.style.top = '0';
+  textArea.style.left = '-9999px';
+  document.body.appendChild(textArea);
+  textArea.focus();
+  textArea.select();
+  try {
+    if (!document.execCommand('copy')) {
+      throw new Error('Clipboard copy command failed');
+    }
+  } finally {
+    document.body.removeChild(textArea);
+  }
+};
+
+const CopyButton: React.FC<{ text: string }> = ({ text }) => {
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const resetTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+  }, []);
+
+  const setTimedStatus = (status: 'copied' | 'failed') => {
+    setCopyStatus(status);
+    if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+    resetTimerRef.current = window.setTimeout(() => {
+      setCopyStatus('idle');
+      resetTimerRef.current = null;
+    }, 2000);
+  };
+
+  const handleCopy = async (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    e.preventDefault();
+    try {
+      await writeClipboardText(text);
+      setTimedStatus('copied');
+    } catch (error) {
+      console.error(error);
+      setTimedStatus('failed');
+    }
+  };
+
+  const copied = copyStatus === 'copied';
+  const failed = copyStatus === 'failed';
+
+  return (
+    <button
+      className={`btn btn-ghost btn-sm code-copy-btn ${copied ? 'copied' : ''} ${failed ? 'failed' : ''}`}
+      onClick={handleCopy}
+      title={failed ? '复制失败' : '复制内容'}
+      type="button"
+    >
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+      <span>{copied ? '已复制' : failed ? '失败' : '复制'}</span>
+    </button>
+  );
+};
+
+const TrendChart: React.FC<{ data: DailyAnalyticsRow[] }> = ({ data }) => {
+  const [activeMetric, setActiveMetric] = useState<'sessions' | 'messages' | 'tokens'>('sessions');
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const chartId = useId().replace(/:/g, '');
+
+  if (!data || data.length === 0) return null;
+
+  const titleId = `${chartId}-title`;
+  const descId = `${chartId}-desc`;
+  const primaryGradientId = `${chartId}-grad-primary`;
+  const secondaryGradientId = `${chartId}-grad-secondary`;
+  const metricLabel = activeMetric === 'sessions' ? '会话与用户' : activeMetric === 'messages' ? '消息与工具' : 'Token 消耗';
+
+  const points = data.map((d) => {
+    let val1 = 0;
+    let val2 = 0;
+    let label1 = '';
+    let label2 = '';
+
+    if (activeMetric === 'sessions') {
+      val1 = d.session_count || 0;
+      val2 = d.active_users || 0;
+      label1 = '会话数';
+      label2 = '活跃用户';
+    } else if (activeMetric === 'messages') {
+      val1 = d.message_count || 0;
+      val2 = d.tool_call_count || 0;
+      label1 = '消息数';
+      label2 = '工具调用';
+    } else {
+      val1 = d.token_usage?.total_tokens || 0;
+      val2 = 0;
+      label1 = 'Token';
+      label2 = '';
+    }
+    return { date: d.date, val1, val2, label1, label2 };
+  });
+
+  const maxVal1 = Math.max(...points.map((p) => p.val1), 1);
+  const maxVal2 = Math.max(...points.map((p) => p.val2), 1);
+  const maxVal = activeMetric === 'tokens' ? maxVal1 : Math.max(maxVal1, maxVal2);
+
+  const width = 800;
+  const height = 180;
+  const paddingLeft = 50;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 30;
+
+  const chartWidth = width - paddingLeft - paddingRight;
+  const chartHeight = height - paddingTop - paddingBottom;
+
+  const getX = (index: number) => {
+    if (points.length <= 1) return paddingLeft + chartWidth / 2;
+    return paddingLeft + (index / (points.length - 1)) * chartWidth;
+  };
+
+  const getY = (val: number) => {
+    return paddingTop + chartHeight - (val / maxVal) * chartHeight;
+  };
+
+  const pointLabel = (point: typeof points[number]) => {
+    const secondary = activeMetric !== 'tokens' && point.label2
+      ? `，${point.label2} ${point.val2.toLocaleString()}`
+      : '';
+    return `${point.date}，${point.label1} ${point.val1.toLocaleString()}${secondary}`;
+  };
+
+  // Generate paths
+  let path1 = '';
+  let area1 = '';
+  let path2 = '';
+  let area2 = '';
+
+  points.forEach((p, idx) => {
+    const x = getX(idx);
+    const y1 = getY(p.val1);
+
+    if (idx === 0) {
+      path1 = `M ${x} ${y1}`;
+      area1 = `M ${x} ${paddingTop + chartHeight} L ${x} ${y1}`;
+    } else {
+      path1 += ` L ${x} ${y1}`;
+      area1 += ` L ${x} ${y1}`;
+    }
+
+    if (idx === points.length - 1) {
+      area1 += ` L ${x} ${paddingTop + chartHeight} Z`;
+    }
+
+    if (activeMetric !== 'tokens') {
+      const y2 = getY(p.val2);
+      if (idx === 0) {
+        path2 = `M ${x} ${y2}`;
+        area2 = `M ${x} ${paddingTop + chartHeight} L ${x} ${y2}`;
+      } else {
+        path2 += ` L ${x} ${y2}`;
+        area2 += ` L ${x} ${y2}`;
+      }
+      if (idx === points.length - 1) {
+        area2 += ` L ${x} ${paddingTop + chartHeight} Z`;
+      }
+    }
+  });
+
+  return (
+    <div className="trend-chart-container">
+      <div className="trend-chart-header">
+        <span className="trend-chart-title">使用趋势可视化</span>
+        <div className="trend-chart-tabs">
+          <button
+            className={`btn btn-sm ${activeMetric === 'sessions' ? 'active' : 'btn-ghost'}`}
+            onClick={() => setActiveMetric('sessions')}
+            type="button"
+          >
+            会话与用户
+          </button>
+          <button
+            className={`btn btn-sm ${activeMetric === 'messages' ? 'active' : 'btn-ghost'}`}
+            onClick={() => setActiveMetric('messages')}
+            type="button"
+          >
+            消息与工具
+          </button>
+          <button
+            className={`btn btn-sm ${activeMetric === 'tokens' ? 'active' : 'btn-ghost'}`}
+            onClick={() => setActiveMetric('tokens')}
+            type="button"
+          >
+            Token 消耗
+          </button>
+        </div>
+      </div>
+      <div className="trend-chart-svg-wrap">
+        <svg
+          aria-describedby={descId}
+          aria-labelledby={titleId}
+          role="group"
+          viewBox={`0 0 ${width} ${height}`}
+          width="100%"
+          height="100%"
+        >
+          <title id={titleId}>使用趋势图</title>
+          <desc id={descId}>{metricLabel}每日趋势。可用 Tab 聚焦每个日期查看精确值。</desc>
+          <defs>
+            <linearGradient id={primaryGradientId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--primary)" stopOpacity="0.25" />
+              <stop offset="100%" stopColor="var(--primary)" stopOpacity="0.0" />
+            </linearGradient>
+            <linearGradient id={secondaryGradientId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--success)" stopOpacity="0.2" />
+              <stop offset="100%" stopColor="var(--success)" stopOpacity="0.0" />
+            </linearGradient>
+          </defs>
+
+          {/* Grid lines */}
+          {[0, 0.25, 0.5, 0.75, 1].map((ratio, idx) => {
+            const y = paddingTop + ratio * chartHeight;
+            const val = Math.round(maxVal * (1 - ratio));
+            return (
+              <g key={idx} className="chart-grid-line">
+                <line x1={paddingLeft} y1={y} x2={width - paddingRight} y2={y} stroke="var(--border)" strokeDasharray="4 4" />
+                <text x={paddingLeft - 8} y={y + 4} textAnchor="end" fill="var(--muted)" fontSize="10">
+                  {val.toLocaleString()}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Paths */}
+          {area1 && <path d={area1} fill={`url(#${primaryGradientId})`} />}
+          {area2 && activeMetric !== 'tokens' && <path d={area2} fill={`url(#${secondaryGradientId})`} />}
+
+          {path1 && <path d={path1} fill="none" stroke="var(--primary)" strokeWidth="2.5" strokeLinecap="round" />}
+          {path2 && activeMetric !== 'tokens' && <path d={path2} fill="none" stroke="var(--success)" strokeWidth="2.5" strokeLinecap="round" />}
+
+          {/* Hover points & line */}
+          {points.map((p, idx) => {
+            const x = getX(idx);
+            const isHovered = hoverIndex === idx;
+            return (
+              <g key={idx}>
+                {isHovered && (
+                  <line x1={x} y1={paddingTop} x2={x} y2={paddingTop + chartHeight} stroke="var(--light)" strokeWidth="1" strokeDasharray="2 2" />
+                )}
+                {/* Dots on line */}
+                {isHovered && (
+                  <>
+                    <circle cx={x} cy={getY(p.val1)} r="5" fill="var(--primary)" stroke="#fff" strokeWidth="1.5" />
+                    {activeMetric !== 'tokens' && (
+                      <circle cx={x} cy={getY(p.val2)} r="5" fill="var(--success)" stroke="#fff" strokeWidth="1.5" />
+                    )}
+                  </>
+                )}
+                {/* Invisible hover trigger area */}
+                <rect
+                  aria-label={pointLabel(p)}
+                  className="trend-chart-hit-area"
+                  x={x - chartWidth / (points.length * 2)}
+                  y={paddingTop}
+                  width={chartWidth / points.length}
+                  height={chartHeight}
+                  fill="transparent"
+                  focusable="true"
+                  role="button"
+                  tabIndex={0}
+                  onBlur={() => setHoverIndex(null)}
+                  onClick={() => setHoverIndex(idx)}
+                  onFocus={() => setHoverIndex(idx)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      setHoverIndex(idx);
+                    }
+                  }}
+                  onMouseEnter={() => setHoverIndex(idx)}
+                  onMouseLeave={() => setHoverIndex(null)}
+                />
+              </g>
+            );
+          })}
+
+          {/* X axis labels */}
+          {points.map((p, idx) => {
+            if (idx % Math.ceil(points.length / 7) !== 0 && idx !== points.length - 1) return null;
+            const x = getX(idx);
+            return (
+              <text key={idx} x={x} y={height - 8} textAnchor="middle" fill="var(--muted)" fontSize="10">
+                {p.date.slice(5)}
+              </text>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* Hover Tooltip Overlay */}
+      {hoverIndex !== null && points[hoverIndex] && (
+        <div
+          className="trend-chart-tooltip"
+          style={{
+            left: `${(getX(hoverIndex) / width) * 100}%`,
+          }}
+        >
+          <div className="tooltip-date">{points[hoverIndex].date}</div>
+          <div className="tooltip-row">
+            <span className="tooltip-dot primary"></span>
+            <span className="tooltip-label">{points[hoverIndex].label1}:</span>
+            <strong className="tooltip-val">{points[hoverIndex].val1.toLocaleString()}</strong>
+          </div>
+          {activeMetric !== 'tokens' && (
+            <div className="tooltip-row">
+              <span className="tooltip-dot success"></span>
+              <span className="tooltip-label">{points[hoverIndex].label2}:</span>
+              <strong className="tooltip-val">{points[hoverIndex].val2.toLocaleString()}</strong>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const toolStatus = (tool: Record<string, unknown>) => partString(tool, 'tool_status') || 'unknown';
 
@@ -450,6 +785,7 @@ const HighlightedText = ({ text, query }: { text: string; query: string }) => {
 const ToolRecordCard = ({ record, query, serverUrl }: { record: ToolRecord; query: string; serverUrl: string }) => {
   const failed = isFailedTool(record.tool);
   const tokens = toolTokenCount(record.tool);
+  const toolJson = JSON.stringify(record.tool, null, 2);
   return (
     <details className={`session-tool-record ${failed ? 'has-failure' : ''}`} open={failed}>
       <summary className="tool-record-header">
@@ -482,7 +818,10 @@ const ToolRecordCard = ({ record, query, serverUrl }: { record: ToolRecord; quer
         </div>
         <details className="tool-json-details">
           <summary>查看完整 JSON</summary>
-          <pre><HighlightedText text={JSON.stringify(record.tool, null, 2)} query={query} /></pre>
+          <div className="code-container">
+            <CopyButton text={toolJson} />
+            <pre><HighlightedText text={toolJson} query={query} /></pre>
+          </div>
         </details>
       </div>
     </details>
@@ -717,6 +1056,7 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
                       <div className="tool-list">
                         {tools.map((tool, index) => {
                           const failed = isFailedTool(tool);
+                          const toolJson = JSON.stringify(tool, null, 2);
                           return (
                             <details key={`${message.id}-tool-${index}`} open={failed}>
                               <summary>
@@ -731,7 +1071,10 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
                                   <span>{formatNumber(Number(tool.prompt_tokens || 0) + Number(tool.completion_tokens || 0))} tokens</span>
                                 )}
                               </summary>
-                              <pre><HighlightedText text={JSON.stringify(tool, null, 2)} query={query} /></pre>
+                              <div className="code-container">
+                                <CopyButton text={toolJson} />
+                                <pre><HighlightedText text={toolJson} query={query} /></pre>
+                              </div>
                             </details>
                           );
                         })}
@@ -746,7 +1089,10 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
             {!loading && !error && (
               <details className="raw-json">
                 <summary>查看完整 JSON</summary>
-                <pre><HighlightedText text={rawJson} query={query} /></pre>
+                <div className="code-container">
+                  <CopyButton text={rawJson} />
+                  <pre><HighlightedText text={rawJson} query={query} /></pre>
+                </div>
               </details>
             )}
           </div>
@@ -762,9 +1108,42 @@ const Sessions: React.FC = () => {
   const [accounts, setAccounts] = useState<Array<{ account_id: string }>>([]);
   const [selectedAcc, setSelectedAcc] = useState('');
   const [selectedUser, setSelectedUser] = useState('');
+  const [localUser, setLocalUser] = useState('');
   const [fromDate, setFromDate] = useState(daysAgoIso(13));
   const [toDate, setToDate] = useState(todayIso());
   const [query, setQuery] = useState('');
+  const [localQuery, setLocalQuery] = useState('');
+
+  // Sync inputs on prop/init updates
+  useEffect(() => {
+    setLocalUser(selectedUser);
+  }, [selectedUser]);
+
+  useEffect(() => {
+    setLocalQuery(query);
+  }, [query]);
+
+  // Debounce User ID input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (localUser !== selectedUser) {
+        setSelectedUser(localUser);
+        setPage(1);
+      }
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [localUser, selectedUser]);
+
+  // Debounce Search Query input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (localQuery !== query) {
+        setQuery(localQuery);
+        setPage(1);
+      }
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [localQuery, query]);
   const [sortBy, setSortBy] = useState<SessionSortBy>('last_active');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -971,7 +1350,6 @@ const Sessions: React.FC = () => {
     () => sessionSortOptions.filter((option) => !option.requiresQuery || Boolean(query.trim())),
     [query]
   );
-  const currentSortOption = visibleSortOptions.find((option) => option.value === sortBy) || sessionSortOptions[0];
 
   const pageStart = sessionTotal === 0 ? 0 : (page - 1) * pageSize + 1;
   const pageEnd = Math.min(sessionTotal, page * pageSize);
@@ -1006,10 +1384,9 @@ const Sessions: React.FC = () => {
           <label>User ID</label>
           <input
             className="input"
-            value={selectedUser}
+            value={localUser}
             onChange={(e) => {
-              setSelectedUser(e.target.value);
-              setPage(1);
+              setLocalUser(e.target.value);
             }}
             placeholder="全部用户"
           />
@@ -1044,10 +1421,9 @@ const Sessions: React.FC = () => {
             <Search size={16} />
             <input
               className="input"
-              value={query}
+              value={localQuery}
               onChange={(e) => {
-                setQuery(e.target.value);
-                setPage(1);
+                setLocalQuery(e.target.value);
               }}
               placeholder="问题、回复、工具名"
             />
@@ -1079,7 +1455,14 @@ const Sessions: React.FC = () => {
         </div>
       </div>
 
-      <div className="table-wrap session-daily-table">
+      {daily.length > 0 && (
+        <div className={analyticsLoading ? 'loading-fade' : ''}>
+          <TrendChart data={daily} />
+        </div>
+      )}
+
+      <div className="table-wrap session-daily-table" style={{ position: 'relative' }}>
+        {analyticsLoading && <div className="table-loading-bar" />}
         <div className="table-header">
           <span className="table-header-title">每日使用趋势</span>
         </div>
@@ -1089,10 +1472,8 @@ const Sessions: React.FC = () => {
               <th>日期</th><th>用户</th><th>会话</th><th>消息</th><th>工具调用</th><th>失败工具</th><th>Token</th>
             </tr>
           </thead>
-          <tbody>
-            {analyticsLoading ? (
-              <tr><td colSpan={7}><div className="loader" style={{ margin: '20px auto', display: 'block' }} /></td></tr>
-            ) : daily.length > 0 ? daily.map((row) => (
+          <tbody className={analyticsLoading && daily.length > 0 ? 'loading-fade' : ''}>
+            {daily.length > 0 ? daily.map((row) => (
               <tr key={row.date}>
                 <td>{row.date}</td>
                 <td>{formatNumber(row.active_users)}</td>
@@ -1103,7 +1484,11 @@ const Sessions: React.FC = () => {
                 <td>{formatNumber(tokenTotal(row.token_usage))}</td>
               </tr>
             )) : (
-              <tr><td colSpan={7} className="empty">{selectedAcc ? '暂无统计数据' : '请先选择账号'}</td></tr>
+              <tr>
+                <td colSpan={7} className="empty">
+                  {analyticsLoading ? '正在读取最新数据...' : (selectedAcc ? '暂无统计数据' : '请先选择账号')}
+                </td>
+              </tr>
             )}
           </tbody>
         </table>
@@ -1111,7 +1496,8 @@ const Sessions: React.FC = () => {
 
       <hr className="divider" />
 
-      <div className="table-wrap session-list-table">
+      <div className="table-wrap session-list-table" style={{ position: 'relative' }}>
+        {loading && <div className="table-loading-bar" />}
         <div className="table-header">
           <span className="table-header-title">会话列表 (共 {formatNumber(sessionTotal)} 条)</span>
           <div className="session-list-controls">
@@ -1139,8 +1525,9 @@ const Sessions: React.FC = () => {
                 }}
                 disabled={loading}
                 type="button"
+                title={sortOrder === 'desc' ? '降序' : '升序'}
               >
-                {sortOrder === 'desc' ? currentSortOption.descLabel : currentSortOption.ascLabel}
+                {sortOrder === 'desc' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
               </button>
             </div>
             <span className="muted-text">每页</span>
@@ -1166,10 +1553,8 @@ const Sessions: React.FC = () => {
               <th>User ID</th><th>Session ID</th><th>最后活跃</th><th>消息</th><th>工具</th><th>Token</th><th>操作</th>
             </tr>
           </thead>
-          <tbody>
-            {loading ? (
-              <tr><td colSpan={7}><div className="loader" style={{ margin: '20px auto', display: 'block' }} /></td></tr>
-            ) : sessions.length > 0 ? sessions.map((session) => (
+          <tbody className={loading && sessions.length > 0 ? 'loading-fade' : ''}>
+            {sessions.length > 0 ? sessions.map((session) => (
               <tr
                 className={`session-row ${detail?.session_id === session.session_id && detail?.user_id === session.user_id ? 'active' : ''}`}
                 key={`${session.user_id}:${session.session_id}`}
@@ -1187,7 +1572,15 @@ const Sessions: React.FC = () => {
                 aria-selected={detail?.session_id === session.session_id && detail?.user_id === session.user_id}
               >
                 <td><code>{session.user_id}</code></td>
-                <td><code>{session.session_id}</code></td>
+                <td>
+                  <code>{session.session_id}</code>
+                  {tokenTotal(session.token_usage) >= 50000 && (
+                    <span className="quality-chip warning compact" style={{ marginLeft: 6 }}>高 Token</span>
+                  )}
+                  {(session.message_count || 0) >= 20 && (
+                    <span className="quality-chip neutral compact" style={{ marginLeft: 6 }}>长会话</span>
+                  )}
+                </td>
                 <td>{formatTime(session.last_message_at || session.updated_at || session.created_at)}</td>
                 <td>
                   <span className="session-table-metric">{formatNumber(session.message_count)}</span>
@@ -1208,7 +1601,11 @@ const Sessions: React.FC = () => {
                 </td>
               </tr>
             )) : (
-              <tr><td colSpan={7} className="empty">{selectedAcc ? '暂无会话' : '请先选择账号'}</td></tr>
+              <tr>
+                <td colSpan={7} className="empty">
+                  {loading ? '正在读取会话列表...' : (selectedAcc ? '暂无会话' : '请先选择账号')}
+                </td>
+              </tr>
             )}
           </tbody>
         </table>

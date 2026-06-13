@@ -48,9 +48,9 @@ code { font-family: monospace; font-size: 0.9em; background: rgba(255,255,255,0.
 .session-daily-table { margin-bottom: 24px; }
 .session-list-controls { display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px 14px; }
 .session-sort-control { display: inline-flex; align-items: center; gap: 8px; }
-.session-sort-select { width: 136px; height: 34px; padding-top: 6px; padding-bottom: 6px; }
-.session-sort-order-btn { min-width: 74px; height: 34px; white-space: nowrap; justify-content: center; }
-.session-page-size { width: 92px; height: 34px; padding-top: 6px; padding-bottom: 6px; }
+.session-list-controls .session-sort-select { width: 158px; height: 36px; padding-top: 4px; padding-bottom: 4px; line-height: normal; }
+.session-list-controls .session-sort-order-btn { width: 36px; min-width: 36px; height: 36px; white-space: nowrap; justify-content: center; padding: 0; }
+.session-list-controls .session-page-size { width: 96px; height: 36px; padding-top: 4px; padding-bottom: 4px; line-height: normal; }
 .session-pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 20px; border-top: 1px solid var(--border); }
 .session-pagination-actions { display: inline-flex; align-items: center; gap: 10px; }
 .session-page-indicator { color: var(--muted); font-size: 0.82rem; min-width: 86px; text-align: center; }
@@ -212,7 +212,7 @@ code { font-family: monospace; font-size: 0.9em; background: rgba(255,255,255,0.
   .table-header, .session-pagination { align-items: flex-start; flex-direction: column; }
   .session-list-controls { width: 100%; justify-content: flex-start; }
   .session-sort-control { width: 100%; flex-wrap: wrap; }
-  .session-sort-select { flex: 1 1 160px; }
+  .session-list-controls .session-sort-select { flex: 1 1 160px; width: auto; }
   .session-pagination-actions { width: 100%; justify-content: space-between; }
   .session-drawer { width: 100vw; }
   .session-drawer-header { padding: 18px 16px 14px; }
@@ -229,3 +229,246 @@ code { font-family: monospace; font-size: 0.9em; background: rgba(255,255,255,0.
 
 /* Key Reveal Box */
 .key-box { background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: monospace; font-size: 0.8rem; word-break: break-all; color: var(--success); margin: 12px 0; }
+
+/* Code block container & Copy button styling */
+.code-container {
+  position: relative;
+  display: block;
+}
+.code-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(4px);
+  z-index: 5;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  color: var(--light);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+.code-copy-btn:hover {
+  background: rgba(0, 0, 0, 0.7);
+  border-color: var(--primary);
+  color: var(--text);
+}
+.code-copy-btn.copied {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: var(--success);
+  color: #6ee7b7;
+}
+.code-copy-btn.failed {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: var(--danger);
+  color: #fca5a5;
+}
+
+/* Trend Chart styles */
+.trend-chart-container {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 24px;
+  position: relative;
+}
+.trend-chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.trend-chart-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.trend-chart-tabs {
+  display: flex;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.15);
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.trend-chart-tabs .btn {
+  padding: 4px 10px;
+  font-size: 0.76rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  color: var(--muted);
+  transition: all 0.15s ease;
+}
+.trend-chart-tabs .btn.active {
+  background: var(--bg);
+  color: var(--primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.trend-chart-svg-wrap {
+  width: 100%;
+  height: 180px;
+  overflow: visible;
+}
+.chart-grid-line line {
+  stroke: var(--border);
+}
+.chart-grid-line text {
+  fill: var(--muted);
+}
+.trend-chart-hit-area {
+  cursor: pointer;
+  outline: none;
+}
+.trend-chart-hit-area:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.trend-chart-tooltip {
+  position: absolute;
+  top: 65px;
+  transform: translateX(-50%);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  pointer-events: none;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 132px;
+  backdrop-filter: blur(4px);
+}
+.tooltip-date {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+}
+.tooltip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.tooltip-dot.primary { background: var(--primary); }
+.tooltip-dot.success { background: var(--success); }
+.tooltip-label {
+  color: var(--light);
+}
+.tooltip-val {
+  margin-left: auto;
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Animations for Drawer and Details */
+.session-drawer-overlay {
+  animation: fadeInOverlay 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.session-drawer {
+  animation: slideInDrawer 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fadeInOverlay {
+  from { opacity: 0; backdrop-filter: blur(0px); }
+  to { opacity: 1; backdrop-filter: blur(3px); }
+}
+
+@keyframes slideInDrawer {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.session-tool-record[open] > .tool-record-body {
+  animation: slideDownFade 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+@keyframes slideDownFade {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Custom interactive disclosure triangle for inline tool lists */
+.tool-list summary::before {
+  content: '▶';
+  font-size: 0.62rem;
+  color: var(--muted);
+  transition: transform 0.2s;
+  display: inline-block;
+  margin-right: 6px;
+}
+.tool-list details[open] summary::before {
+  transform: rotate(90deg);
+}
+
+/* Custom row hover transition and focus styles */
+.session-row {
+  transition: background-color 0.15s ease;
+}
+.session-row:hover td {
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+.session-row.active td {
+  background: rgba(99, 102, 241, 0.08) !important;
+  border-left: 2px solid var(--primary);
+}
+.session-row:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+/* Responsive horizontal scrolling detail toolbar */
+.session-detail-toolbar {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  overflow-x: auto !important;
+  padding-bottom: 8px !important;
+  scrollbar-width: none; /* Firefox */
+}
+.session-detail-toolbar::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, Opera */
+}
+.session-filter-chip {
+  flex: 0 0 auto;
+}
+
+/* Progress/Loading Bar styling */
+.table-loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--primary), transparent);
+  z-index: 10;
+  animation: loadingBarRun 1.6s infinite ease-in-out;
+  transform-origin: left;
+}
+@keyframes loadingBarRun {
+  0% {
+    transform: scaleX(0.1);
+    left: 0;
+  }
+  50% {
+    transform: scaleX(0.5);
+    left: 25%;
+  }
+  100% {
+    transform: scaleX(0.1);
+    left: 100%;
+  }
+}
