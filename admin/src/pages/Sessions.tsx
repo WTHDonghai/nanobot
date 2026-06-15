@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import MarkdownRenderer from '../components/markdown/MarkdownRenderer';
 import { fetchApi } from '../services/api';
@@ -9,18 +10,6 @@ type TokenUsage = {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
-};
-
-type DailyAnalyticsRow = {
-  date: string;
-  active_users: number;
-  session_count: number;
-  message_count: number;
-  user_message_count: number;
-  assistant_message_count: number;
-  tool_call_count: number;
-  failed_tool_call_count: number;
-  token_usage: TokenUsage;
 };
 
 type SessionSummary = {
@@ -98,13 +87,10 @@ type SessionSortBy =
   | 'last_active'
   | 'created_at'
   | 'message_count'
-  | 'user_message_count'
-  | 'assistant_message_count'
   | 'tool_call_count'
   | 'failed_tool_call_count'
   | 'token_total'
-  | 'matched_message_count'
-  | 'user_id';
+  | 'matched_message_count';
 type SortOrder = 'asc' | 'desc';
 
 const failedToolStatuses = new Set(['error', 'failed']);
@@ -112,14 +98,22 @@ const sessionSortOptions: Array<{ value: SessionSortBy; label: string; requiresQ
   { value: 'last_active', label: '最后活跃' },
   { value: 'created_at', label: '创建时间' },
   { value: 'message_count', label: '消息量' },
-  { value: 'user_message_count', label: '用户问题' },
-  { value: 'assistant_message_count', label: 'Agent 回复' },
   { value: 'tool_call_count', label: '工具调用' },
   { value: 'failed_tool_call_count', label: '失败工具' },
   { value: 'token_total', label: 'Token 消耗' },
   { value: 'matched_message_count', label: '搜索命中', requiresQuery: true },
-  { value: 'user_id', label: '用户' },
 ];
+
+const isIsoDay = (value: string | null) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
+
+const isSessionSortBy = (value: string | null): value is SessionSortBy => (
+  Boolean(value && sessionSortOptions.some((option) => option.value === value))
+);
+
+const parsePageParam = (value: string | null) => {
+  const page = Number(value || '1');
+  return Number.isInteger(page) && page >= 1 ? page : 1;
+};
 
 const localDateIso = (date: Date) => {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
@@ -133,6 +127,45 @@ const daysAgoIso = (days: number) => {
   date.setDate(date.getDate() - days);
   return localDateIso(date);
 };
+
+const defaultDateRange = () => ({
+  fromDate: daysAgoIso(13),
+  toDate: todayIso(),
+});
+
+const parseSessionUrlState = (params: URLSearchParams) => {
+  const fallback = defaultDateRange();
+  const fromDate = params.get('from_date');
+  const toDate = params.get('to_date');
+  const sortBy = params.get('sort_by');
+  const sortOrder = params.get('sort_order');
+  const hasValidFromDate = isIsoDay(fromDate);
+  const hasValidToDate = isIsoDay(toDate);
+  let normalizedFromDate = hasValidFromDate ? fromDate as string : fallback.fromDate;
+  let normalizedToDate = hasValidToDate ? toDate as string : fallback.toDate;
+
+  if (normalizedFromDate > normalizedToDate) {
+    if (hasValidFromDate && hasValidToDate) {
+      [normalizedFromDate, normalizedToDate] = [normalizedToDate, normalizedFromDate];
+    } else if (hasValidFromDate) {
+      normalizedToDate = normalizedFromDate;
+    } else if (hasValidToDate) {
+      normalizedFromDate = normalizedToDate;
+    }
+  }
+
+  return {
+    fromDate: normalizedFromDate,
+    toDate: normalizedToDate,
+    sortBy: isSessionSortBy(sortBy) ? sortBy : 'last_active',
+    sortOrder: sortOrder === 'asc' ? 'asc' : 'desc',
+    query: params.get('q') || '',
+    selectedUser: params.get('user_id') || '',
+    page: parsePageParam(params.get('page')),
+  };
+};
+
+const browserTimeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
 const formatNumber = (value: number | undefined) => Number(value || 0).toLocaleString();
 
@@ -269,268 +302,6 @@ const CopyButton: React.FC<{ text: string }> = ({ text }) => {
       {copied ? <Check size={12} /> : <Copy size={12} />}
       <span>{copied ? '已复制' : failed ? '失败' : '复制'}</span>
     </button>
-  );
-};
-
-const TrendChart: React.FC<{ data: DailyAnalyticsRow[] }> = ({ data }) => {
-  const [activeMetric, setActiveMetric] = useState<'sessions' | 'messages' | 'tokens'>('sessions');
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const chartId = useId().replace(/:/g, '');
-
-  if (!data || data.length === 0) return null;
-
-  const titleId = `${chartId}-title`;
-  const descId = `${chartId}-desc`;
-  const primaryGradientId = `${chartId}-grad-primary`;
-  const secondaryGradientId = `${chartId}-grad-secondary`;
-  const metricLabel = activeMetric === 'sessions' ? '会话与用户' : activeMetric === 'messages' ? '消息与工具' : 'Token 消耗';
-
-  const points = data.map((d) => {
-    let val1 = 0;
-    let val2 = 0;
-    let label1 = '';
-    let label2 = '';
-
-    if (activeMetric === 'sessions') {
-      val1 = d.session_count || 0;
-      val2 = d.active_users || 0;
-      label1 = '会话数';
-      label2 = '活跃用户';
-    } else if (activeMetric === 'messages') {
-      val1 = d.message_count || 0;
-      val2 = d.tool_call_count || 0;
-      label1 = '消息数';
-      label2 = '工具调用';
-    } else {
-      val1 = d.token_usage?.total_tokens || 0;
-      val2 = 0;
-      label1 = 'Token';
-      label2 = '';
-    }
-    return { date: d.date, val1, val2, label1, label2 };
-  });
-
-  const maxVal1 = Math.max(...points.map((p) => p.val1), 1);
-  const maxVal2 = Math.max(...points.map((p) => p.val2), 1);
-  const maxVal = activeMetric === 'tokens' ? maxVal1 : Math.max(maxVal1, maxVal2);
-
-  const width = 800;
-  const height = 180;
-  const paddingLeft = 50;
-  const paddingRight = 20;
-  const paddingTop = 20;
-  const paddingBottom = 30;
-
-  const chartWidth = width - paddingLeft - paddingRight;
-  const chartHeight = height - paddingTop - paddingBottom;
-
-  const getX = (index: number) => {
-    if (points.length <= 1) return paddingLeft + chartWidth / 2;
-    return paddingLeft + (index / (points.length - 1)) * chartWidth;
-  };
-
-  const getY = (val: number) => {
-    return paddingTop + chartHeight - (val / maxVal) * chartHeight;
-  };
-
-  const pointLabel = (point: typeof points[number]) => {
-    const secondary = activeMetric !== 'tokens' && point.label2
-      ? `，${point.label2} ${point.val2.toLocaleString()}`
-      : '';
-    return `${point.date}，${point.label1} ${point.val1.toLocaleString()}${secondary}`;
-  };
-
-  // Generate paths
-  let path1 = '';
-  let area1 = '';
-  let path2 = '';
-  let area2 = '';
-
-  points.forEach((p, idx) => {
-    const x = getX(idx);
-    const y1 = getY(p.val1);
-
-    if (idx === 0) {
-      path1 = `M ${x} ${y1}`;
-      area1 = `M ${x} ${paddingTop + chartHeight} L ${x} ${y1}`;
-    } else {
-      path1 += ` L ${x} ${y1}`;
-      area1 += ` L ${x} ${y1}`;
-    }
-
-    if (idx === points.length - 1) {
-      area1 += ` L ${x} ${paddingTop + chartHeight} Z`;
-    }
-
-    if (activeMetric !== 'tokens') {
-      const y2 = getY(p.val2);
-      if (idx === 0) {
-        path2 = `M ${x} ${y2}`;
-        area2 = `M ${x} ${paddingTop + chartHeight} L ${x} ${y2}`;
-      } else {
-        path2 += ` L ${x} ${y2}`;
-        area2 += ` L ${x} ${y2}`;
-      }
-      if (idx === points.length - 1) {
-        area2 += ` L ${x} ${paddingTop + chartHeight} Z`;
-      }
-    }
-  });
-
-  return (
-    <div className="trend-chart-container">
-      <div className="trend-chart-header">
-        <span className="trend-chart-title">使用趋势可视化</span>
-        <div className="trend-chart-tabs">
-          <button
-            className={`btn btn-sm ${activeMetric === 'sessions' ? 'active' : 'btn-ghost'}`}
-            onClick={() => setActiveMetric('sessions')}
-            type="button"
-          >
-            会话与用户
-          </button>
-          <button
-            className={`btn btn-sm ${activeMetric === 'messages' ? 'active' : 'btn-ghost'}`}
-            onClick={() => setActiveMetric('messages')}
-            type="button"
-          >
-            消息与工具
-          </button>
-          <button
-            className={`btn btn-sm ${activeMetric === 'tokens' ? 'active' : 'btn-ghost'}`}
-            onClick={() => setActiveMetric('tokens')}
-            type="button"
-          >
-            Token 消耗
-          </button>
-        </div>
-      </div>
-      <div className="trend-chart-svg-wrap">
-        <svg
-          aria-describedby={descId}
-          aria-labelledby={titleId}
-          role="group"
-          viewBox={`0 0 ${width} ${height}`}
-          width="100%"
-          height="100%"
-        >
-          <title id={titleId}>使用趋势图</title>
-          <desc id={descId}>{metricLabel}每日趋势。可用 Tab 聚焦每个日期查看精确值。</desc>
-          <defs>
-            <linearGradient id={primaryGradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--primary)" stopOpacity="0.25" />
-              <stop offset="100%" stopColor="var(--primary)" stopOpacity="0.0" />
-            </linearGradient>
-            <linearGradient id={secondaryGradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--success)" stopOpacity="0.2" />
-              <stop offset="100%" stopColor="var(--success)" stopOpacity="0.0" />
-            </linearGradient>
-          </defs>
-
-          {/* Grid lines */}
-          {[0, 0.25, 0.5, 0.75, 1].map((ratio, idx) => {
-            const y = paddingTop + ratio * chartHeight;
-            const val = Math.round(maxVal * (1 - ratio));
-            return (
-              <g key={idx} className="chart-grid-line">
-                <line x1={paddingLeft} y1={y} x2={width - paddingRight} y2={y} stroke="var(--border)" strokeDasharray="4 4" />
-                <text x={paddingLeft - 8} y={y + 4} textAnchor="end" fill="var(--muted)" fontSize="10">
-                  {val.toLocaleString()}
-                </text>
-              </g>
-            );
-          })}
-
-          {/* Paths */}
-          {area1 && <path d={area1} fill={`url(#${primaryGradientId})`} />}
-          {area2 && activeMetric !== 'tokens' && <path d={area2} fill={`url(#${secondaryGradientId})`} />}
-
-          {path1 && <path d={path1} fill="none" stroke="var(--primary)" strokeWidth="2.5" strokeLinecap="round" />}
-          {path2 && activeMetric !== 'tokens' && <path d={path2} fill="none" stroke="var(--success)" strokeWidth="2.5" strokeLinecap="round" />}
-
-          {/* Hover points & line */}
-          {points.map((p, idx) => {
-            const x = getX(idx);
-            const isHovered = hoverIndex === idx;
-            return (
-              <g key={idx}>
-                {isHovered && (
-                  <line x1={x} y1={paddingTop} x2={x} y2={paddingTop + chartHeight} stroke="var(--light)" strokeWidth="1" strokeDasharray="2 2" />
-                )}
-                {/* Dots on line */}
-                {isHovered && (
-                  <>
-                    <circle cx={x} cy={getY(p.val1)} r="5" fill="var(--primary)" stroke="#fff" strokeWidth="1.5" />
-                    {activeMetric !== 'tokens' && (
-                      <circle cx={x} cy={getY(p.val2)} r="5" fill="var(--success)" stroke="#fff" strokeWidth="1.5" />
-                    )}
-                  </>
-                )}
-                {/* Invisible hover trigger area */}
-                <rect
-                  aria-label={pointLabel(p)}
-                  className="trend-chart-hit-area"
-                  x={x - chartWidth / (points.length * 2)}
-                  y={paddingTop}
-                  width={chartWidth / points.length}
-                  height={chartHeight}
-                  fill="transparent"
-                  focusable="true"
-                  role="button"
-                  tabIndex={0}
-                  onBlur={() => setHoverIndex(null)}
-                  onClick={() => setHoverIndex(idx)}
-                  onFocus={() => setHoverIndex(idx)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      setHoverIndex(idx);
-                    }
-                  }}
-                  onMouseEnter={() => setHoverIndex(idx)}
-                  onMouseLeave={() => setHoverIndex(null)}
-                />
-              </g>
-            );
-          })}
-
-          {/* X axis labels */}
-          {points.map((p, idx) => {
-            if (idx % Math.ceil(points.length / 7) !== 0 && idx !== points.length - 1) return null;
-            const x = getX(idx);
-            return (
-              <text key={idx} x={x} y={height - 8} textAnchor="middle" fill="var(--muted)" fontSize="10">
-                {p.date.slice(5)}
-              </text>
-            );
-          })}
-        </svg>
-      </div>
-
-      {/* Hover Tooltip Overlay */}
-      {hoverIndex !== null && points[hoverIndex] && (
-        <div
-          className="trend-chart-tooltip"
-          style={{
-            left: `${(getX(hoverIndex) / width) * 100}%`,
-          }}
-        >
-          <div className="tooltip-date">{points[hoverIndex].date}</div>
-          <div className="tooltip-row">
-            <span className="tooltip-dot primary"></span>
-            <span className="tooltip-label">{points[hoverIndex].label1}:</span>
-            <strong className="tooltip-val">{points[hoverIndex].val1.toLocaleString()}</strong>
-          </div>
-          {activeMetric !== 'tokens' && (
-            <div className="tooltip-row">
-              <span className="tooltip-dot success"></span>
-              <span className="tooltip-label">{points[hoverIndex].label2}:</span>
-              <strong className="tooltip-val">{points[hoverIndex].val2.toLocaleString()}</strong>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
   );
 };
 
@@ -1104,17 +875,21 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
 };
 
 const Sessions: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
   const { serverUrl, apiKey, role, accountId } = useAuth();
+
   const [accounts, setAccounts] = useState<Array<{ account_id: string }>>([]);
   const [selectedAcc, setSelectedAcc] = useState('');
-  const [selectedUser, setSelectedUser] = useState('');
-  const [localUser, setLocalUser] = useState('');
-  const [fromDate, setFromDate] = useState(daysAgoIso(13));
-  const [toDate, setToDate] = useState(todayIso());
-  const [query, setQuery] = useState('');
-  const [localQuery, setLocalQuery] = useState('');
 
-  // Sync inputs on prop/init updates
+  // URL parameters as Single Source of Truth
+  const urlState = useMemo(() => parseSessionUrlState(searchParams), [searchParams]);
+  const { fromDate, toDate, sortBy, sortOrder, query, selectedUser, page } = urlState;
+
+  // Local state for debounced inputs
+  const [localUser, setLocalUser] = useState(selectedUser);
+  const [localQuery, setLocalQuery] = useState(query);
+
+  // Sync state when URL updates
   useEffect(() => {
     setLocalUser(selectedUser);
   }, [selectedUser]);
@@ -1123,41 +898,78 @@ const Sessions: React.FC = () => {
     setLocalQuery(query);
   }, [query]);
 
+  const updateUrlParams = useCallback((newParams: Record<string, string | null>) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      Object.entries(newParams).forEach(([key, val]) => {
+        if (val === null || val === '') {
+          next.delete(key);
+        } else {
+          next.set(key, val);
+        }
+      });
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+
+  useEffect(() => {
+    const normalized = new URLSearchParams(searchParams);
+    let changed = false;
+
+    const deleteParam = (key: string) => {
+      if (normalized.has(key)) {
+        normalized.delete(key);
+        changed = true;
+      }
+    };
+
+    if (searchParams.has('from_date') && !isIsoDay(searchParams.get('from_date'))) deleteParam('from_date');
+    if (searchParams.has('to_date') && !isIsoDay(searchParams.get('to_date'))) deleteParam('to_date');
+    if (isIsoDay(searchParams.get('from_date')) && searchParams.get('from_date') !== fromDate) {
+      normalized.set('from_date', fromDate);
+      changed = true;
+    }
+    if (isIsoDay(searchParams.get('to_date')) && searchParams.get('to_date') !== toDate) {
+      normalized.set('to_date', toDate);
+      changed = true;
+    }
+    if (searchParams.has('sort_by') && sortBy === 'last_active') deleteParam('sort_by');
+    if (searchParams.has('sort_order') && sortOrder === 'desc') deleteParam('sort_order');
+    if (searchParams.has('page') && page === 1) deleteParam('page');
+
+    if (changed) {
+      setSearchParams(normalized, { replace: true });
+    }
+  }, [fromDate, page, searchParams, setSearchParams, sortBy, sortOrder, toDate]);
+
   // Debounce User ID input
   useEffect(() => {
     const timer = setTimeout(() => {
       if (localUser !== selectedUser) {
-        setSelectedUser(localUser);
-        setPage(1);
+        updateUrlParams({ user_id: localUser, page: '1' });
       }
     }, 450);
     return () => clearTimeout(timer);
-  }, [localUser, selectedUser]);
+  }, [localUser, selectedUser, updateUrlParams]);
 
   // Debounce Search Query input
   useEffect(() => {
     const timer = setTimeout(() => {
       if (localQuery !== query) {
-        setQuery(localQuery);
-        setPage(1);
+        updateUrlParams({ q: localQuery, page: '1' });
       }
     }, 450);
     return () => clearTimeout(timer);
-  }, [localQuery, query]);
-  const [sortBy, setSortBy] = useState<SessionSortBy>('last_active');
-  const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
+  }, [localQuery, query, updateUrlParams]);
+
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [daily, setDaily] = useState<DailyAnalyticsRow[]>([]);
-  const [totals, setTotals] = useState<DailyAnalyticsRow | null>(null);
   const [loading, setLoading] = useState(false);
-  const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState('');
   const [detailError, setDetailError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [sessionTotal, setSessionTotal] = useState(0);
   const [sessionTotalPages, setSessionTotalPages] = useState(0);
@@ -1187,6 +999,7 @@ const Sessions: React.FC = () => {
     if (selectedUser.trim()) params.set('user_id', selectedUser.trim());
     if (fromDate) params.set('from_date', fromDate);
     if (toDate) params.set('to_date', toDate);
+    params.set('tz', browserTimeZone());
     if (query.trim()) params.set('q', query.trim());
     params.set('page', String(page));
     params.set('page_size', String(pageSize));
@@ -1194,14 +1007,6 @@ const Sessions: React.FC = () => {
     params.set('sort_order', sortOrder);
     return params.toString();
   }, [fromDate, page, pageSize, query, selectedUser, sortBy, sortOrder, toDate]);
-
-  const buildAnalyticsQuery = useCallback(() => {
-    const params = new URLSearchParams();
-    if (selectedUser.trim()) params.set('user_id', selectedUser.trim());
-    if (fromDate) params.set('from_date', fromDate);
-    if (toDate) params.set('to_date', toDate);
-    return params.toString();
-  }, [fromDate, selectedUser, toDate]);
 
   const loadSessions = useCallback(() => {
     if (!selectedAcc) {
@@ -1227,7 +1032,9 @@ const Sessions: React.FC = () => {
           const items = sessionResult?.items || [];
           const responsePage = sessionResult?.page || 1;
           setSessions(items);
-          setPage((current) => current === responsePage ? current : responsePage);
+          if (page !== responsePage) {
+            updateUrlParams({ page: String(responsePage) });
+          }
           setSessionTotal(sessionResult?.total || 0);
           setSessionTotalPages(sessionResult?.total_pages || 0);
         }
@@ -1242,46 +1049,19 @@ const Sessions: React.FC = () => {
       .finally(() => { if (mounted) setLoading(false); });
 
     return () => { mounted = false; };
-  }, [apiKey, buildSessionQuery, selectedAcc, serverUrl]);
-
-  const loadAnalytics = useCallback(() => {
-    if (!selectedAcc) {
-      setDaily([]);
-      setTotals(null);
-      return;
-    }
-
-    let mounted = true;
-    setAnalyticsLoading(true);
-    setError('');
-    const analyticsParams = buildAnalyticsQuery();
-    fetchApi(serverUrl, apiKey, `/api/v1/admin/accounts/${encodeURIComponent(selectedAcc)}/analytics/daily?${analyticsParams}`)
-      .then((analyticsRes) => {
-        if (!mounted) return;
-        setDaily(analyticsRes.result?.daily || []);
-        setTotals(analyticsRes.result?.totals || null);
-      })
-      .catch((e) => {
-        if (!mounted) return;
-        setError(e.message);
-        setDaily([]);
-        setTotals(null);
-      })
-      .finally(() => { if (mounted) setAnalyticsLoading(false); });
-
-    return () => { mounted = false; };
-  }, [apiKey, buildAnalyticsQuery, selectedAcc, serverUrl]);
+  }, [apiKey, buildSessionQuery, selectedAcc, serverUrl, page, updateUrlParams]);
 
   useEffect(() => loadSessions(), [loadSessions, reloadKey]);
-  useEffect(() => loadAnalytics(), [loadAnalytics, reloadKey]);
 
   useEffect(() => {
     if (sortBy === 'matched_message_count' && !query.trim()) {
-      setSortBy('last_active');
-      setSortOrder('desc');
-      setPage(1);
+      updateUrlParams({
+        sort_by: 'last_active',
+        sort_order: 'desc',
+        page: '1',
+      });
     }
-  }, [query, sortBy]);
+  }, [query, sortBy, updateUrlParams]);
 
   const closeDetail = useCallback(() => {
     detailRequestRef.current += 1;
@@ -1332,7 +1112,7 @@ const Sessions: React.FC = () => {
       }
       const currentPageHadOneItem = sessions.length === 1;
       if (currentPageHadOneItem && page > 1) {
-        setPage((value) => Math.max(1, value - 1));
+        updateUrlParams({ page: String(Math.max(1, page - 1)) });
       } else {
         setReloadKey((key) => key + 1);
       }
@@ -1341,11 +1121,6 @@ const Sessions: React.FC = () => {
     }
   };
 
-  const avgTurns = useMemo(() => {
-    const sessionCount = totals?.session_count || 0;
-    if (!sessionCount) return '0';
-    return ((totals?.user_message_count || 0) / sessionCount).toFixed(1);
-  }, [totals]);
   const visibleSortOptions = useMemo(
     () => sessionSortOptions.filter((option) => !option.requiresQuery || Boolean(query.trim())),
     [query]
@@ -1358,6 +1133,47 @@ const Sessions: React.FC = () => {
 
   return (
     <div>
+      {/* Quick Date Presets */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '14px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="muted-text" style={{ fontSize: '0.75rem', marginRight: '4px', fontWeight: 500 }}>快速筛选:</span>
+        {[
+          { label: '今天', days: 0 },
+          { label: '最近 7 天', days: 6 },
+          { label: '最近 14 天', days: 13 },
+          { label: '最近 30 天', days: 29 },
+        ].map((preset) => {
+          const presetFrom = daysAgoIso(preset.days);
+          const presetTo = todayIso();
+          const isSelected = fromDate === presetFrom && toDate === presetTo;
+          return (
+            <button
+              key={preset.label}
+              type="button"
+              onClick={() => {
+                updateUrlParams({
+                  from_date: presetFrom,
+                  to_date: presetTo,
+                  page: '1',
+                });
+              }}
+              style={{
+                background: isSelected ? 'var(--primary-dim)' : 'transparent',
+                border: `1px solid ${isSelected ? 'var(--primary)' : 'var(--border)'}`,
+                color: isSelected ? 'var(--text)' : 'var(--muted)',
+                borderRadius: '20px',
+                padding: '4px 12px',
+                fontSize: '0.75rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+              }}
+            >
+              {preset.label}
+            </button>
+          );
+        })}
+      </div>
+
       <div className="session-filters">
         {role === 'root' ? (
           <div className="form-group">
@@ -1367,7 +1183,7 @@ const Sessions: React.FC = () => {
               value={selectedAcc}
               onChange={(e) => {
                 setSelectedAcc(e.target.value);
-                setPage(1);
+                updateUrlParams({ page: '1' });
               }}
             >
               <option value="">选择账号</option>
@@ -1395,11 +1211,11 @@ const Sessions: React.FC = () => {
           <label>开始日期</label>
           <input
             className="input"
+            max={toDate}
             type="date"
             value={fromDate}
             onChange={(e) => {
-              setFromDate(e.target.value);
-              setPage(1);
+              updateUrlParams({ from_date: e.target.value, page: '1' });
             }}
           />
         </div>
@@ -1407,11 +1223,11 @@ const Sessions: React.FC = () => {
           <label>结束日期</label>
           <input
             className="input"
+            min={fromDate}
             type="date"
             value={toDate}
             onChange={(e) => {
-              setToDate(e.target.value);
-              setPage(1);
+              updateUrlParams({ to_date: e.target.value, page: '1' });
             }}
           />
         </div>
@@ -1429,72 +1245,12 @@ const Sessions: React.FC = () => {
             />
           </div>
         </div>
-        <button className="btn btn-primary session-refresh-btn" onClick={() => setReloadKey((key) => key + 1)} disabled={loading || analyticsLoading}>
+        <button className="btn btn-primary session-refresh-btn" onClick={() => setReloadKey((key) => key + 1)} disabled={loading}>
           <RefreshCw size={16} /> 刷新
         </button>
       </div>
 
       {error ? <div className="error-box">{error}</div> : null}
-
-      <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-label">活跃用户</div>
-          <div className="stat-value primary">{formatNumber(totals?.active_users)}</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">会话数</div>
-          <div className="stat-value">{formatNumber(totals?.session_count)}</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">平均轮次</div>
-          <div className="stat-value">{avgTurns}</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">Token 总量</div>
-          <div className="stat-value">{formatNumber(tokenTotal(totals?.token_usage))}</div>
-        </div>
-      </div>
-
-      {daily.length > 0 && (
-        <div className={analyticsLoading ? 'loading-fade' : ''}>
-          <TrendChart data={daily} />
-        </div>
-      )}
-
-      <div className="table-wrap session-daily-table" style={{ position: 'relative' }}>
-        {analyticsLoading && <div className="table-loading-bar" />}
-        <div className="table-header">
-          <span className="table-header-title">每日使用趋势</span>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>日期</th><th>用户</th><th>会话</th><th>消息</th><th>工具调用</th><th>失败工具</th><th>Token</th>
-            </tr>
-          </thead>
-          <tbody className={analyticsLoading && daily.length > 0 ? 'loading-fade' : ''}>
-            {daily.length > 0 ? daily.map((row) => (
-              <tr key={row.date}>
-                <td>{row.date}</td>
-                <td>{formatNumber(row.active_users)}</td>
-                <td>{formatNumber(row.session_count)}</td>
-                <td>{formatNumber(row.message_count)}</td>
-                <td>{formatNumber(row.tool_call_count)}</td>
-                <td>{formatNumber(row.failed_tool_call_count)}</td>
-                <td>{formatNumber(tokenTotal(row.token_usage))}</td>
-              </tr>
-            )) : (
-              <tr>
-                <td colSpan={7} className="empty">
-                  {analyticsLoading ? '正在读取最新数据...' : (selectedAcc ? '暂无统计数据' : '请先选择账号')}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      <hr className="divider" />
 
       <div className="table-wrap session-list-table" style={{ position: 'relative' }}>
         {loading && <div className="table-loading-bar" />}
@@ -1507,9 +1263,7 @@ const Sessions: React.FC = () => {
                 className="select session-sort-select"
                 value={sortBy}
                 onChange={(e) => {
-                  setSortBy(e.target.value as SessionSortBy);
-                  setSortOrder('desc');
-                  setPage(1);
+                  updateUrlParams({ sort_by: e.target.value, sort_order: 'desc', page: '1' });
                 }}
                 disabled={loading}
               >
@@ -1520,8 +1274,10 @@ const Sessions: React.FC = () => {
               <button
                 className="btn btn-ghost btn-sm session-sort-order-btn"
                 onClick={() => {
-                  setSortOrder((value) => value === 'desc' ? 'asc' : 'desc');
-                  setPage(1);
+                  updateUrlParams({
+                    sort_order: sortOrder === 'desc' ? 'asc' : 'desc',
+                    page: '1',
+                  });
                 }}
                 disabled={loading}
                 type="button"
@@ -1536,7 +1292,7 @@ const Sessions: React.FC = () => {
               value={pageSize}
               onChange={(e) => {
                 setPageSize(Number(e.target.value));
-                setPage(1);
+                updateUrlParams({ page: '1' });
               }}
               disabled={loading}
             >
@@ -1616,13 +1372,13 @@ const Sessions: React.FC = () => {
               : '共 0 条'}
           </div>
           <div className="session-pagination-actions">
-            <button className="btn btn-ghost btn-sm" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={!canPrev}>
+            <button className="btn btn-ghost btn-sm" onClick={() => updateUrlParams({ page: String(Math.max(1, page - 1)) })} disabled={!canPrev}>
               上一页
             </button>
             <span className="session-page-indicator">
               第 {formatNumber(page)} / {formatNumber(sessionTotalPages || 1)} 页
             </span>
-            <button className="btn btn-ghost btn-sm" onClick={() => setPage((value) => value + 1)} disabled={!canNext}>
+            <button className="btn btn-ghost btn-sm" onClick={() => updateUrlParams({ page: String(page + 1) })} disabled={!canNext}>
               下一页
             </button>
           </div>

@@ -7,7 +7,7 @@ Provides session management operations: session, sessions, add_message, commit, 
 """
 
 import json
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone, tzinfo
 from functools import cmp_to_key
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +28,7 @@ logger = get_logger(__name__)
 FAILED_TOOL_STATUSES = {"error", "failed"}
 DEFAULT_ADMIN_SESSION_SORT_BY = "last_active"
 DEFAULT_ADMIN_SESSION_SORT_ORDER = "desc"
+MAX_ADMIN_DAILY_BUCKETS = 120
 ADMIN_SESSION_SORT_FIELDS = {
     "last_active",
     "created_at",
@@ -57,10 +58,28 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     return None
 
 
-def _date_key(dt: Optional[datetime]) -> str:
+def _date_key(dt: Optional[datetime], tz: tzinfo = timezone.utc) -> str:
     if dt is None:
         return "unknown"
-    return dt.astimezone(timezone.utc).date().isoformat()
+    return dt.astimezone(tz).date().isoformat()
+
+
+def _empty_daily_analytics_row(day: str) -> Dict[str, Any]:
+    return {
+        "date": day,
+        "active_users": set(),
+        "session_count": 0,
+        "message_count": 0,
+        "user_message_count": 0,
+        "assistant_message_count": 0,
+        "tool_call_count": 0,
+        "failed_tool_call_count": 0,
+        "token_usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        },
+    }
 
 
 def _session_activity_value(item: Dict[str, Any]) -> str:
@@ -744,19 +763,20 @@ class SessionService:
         user_id: str = "",
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
+        tz: tzinfo = timezone.utc,
     ) -> Dict[str, Any]:
         """Aggregate daily users, sessions, messages, tools, and tokens."""
         if from_date is None:
             from_date = datetime.combine(
-                datetime.now(timezone.utc).date() - timedelta(days=13),
+                datetime.now(tz).date() - timedelta(days=13),
                 time.min,
-                tzinfo=timezone.utc,
+                tzinfo=tz,
             )
         if to_date is None:
             to_date = datetime.combine(
-                datetime.now(timezone.utc).date(),
+                datetime.now(tz).date(),
                 time.max,
-                tzinfo=timezone.utc,
+                tzinfo=tz,
             )
 
         sessions = await self._collect_admin_session_summaries(
@@ -773,24 +793,11 @@ class SessionService:
                     session_info.get("last_message_at")
                     or session_info.get("updated_at")
                     or session_info.get("created_at")
-                )
+                ),
+                tz,
             )
             if day not in by_day:
-                by_day[day] = {
-                    "date": day,
-                    "active_users": set(),
-                    "session_count": 0,
-                    "message_count": 0,
-                    "user_message_count": 0,
-                    "assistant_message_count": 0,
-                    "tool_call_count": 0,
-                    "failed_tool_call_count": 0,
-                    "token_usage": {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0,
-                    },
-                }
+                by_day[day] = _empty_daily_analytics_row(day)
 
             bucket = by_day[day]
             bucket["active_users"].add(session_info["user_id"])
@@ -823,7 +830,22 @@ class SessionService:
                 "total_tokens": 0,
             },
         }
-        for day in sorted(by_day):
+        start_day = from_date.astimezone(tz).date()
+        end_day = to_date.astimezone(tz).date()
+        if start_day <= end_day:
+            day_count = (end_day - start_day).days + 1
+            if day_count <= MAX_ADMIN_DAILY_BUCKETS:
+                day_keys = [
+                    (start_day + timedelta(days=offset)).isoformat()
+                    for offset in range(day_count)
+                ]
+            else:
+                day_keys = sorted(by_day)
+        else:
+            day_keys = sorted(by_day)
+
+        for day in day_keys:
+            by_day.setdefault(day, _empty_daily_analytics_row(day))
             item = by_day[day]
             users = item["active_users"]
             totals["active_users"].update(users)
@@ -844,6 +866,7 @@ class SessionService:
             "user_id": user_id,
             "from": from_date.date().isoformat() if from_date else "",
             "to": to_date.date().isoformat() if to_date else "",
+            "timezone": getattr(tz, "key", str(tz)),
             "daily": daily,
             "totals": {**totals, "active_users": len(totals["active_users"])},
         }

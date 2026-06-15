@@ -5,6 +5,7 @@
 
 import json
 import uuid
+from datetime import date, timedelta
 from unittest.mock import patch
 
 import httpx
@@ -16,6 +17,7 @@ from openviking.server.app import create_app
 from openviking.server.config import ServerConfig
 from openviking.server.dependencies import set_service
 from openviking.service.core import OpenVikingService
+from openviking.service.session_service import MAX_ADMIN_DAILY_BUCKETS
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.open_viking_config import OpenVikingConfigSingleton
 from tests.utils.mock_agfs import MockLocalAGFS
@@ -760,6 +762,120 @@ async def test_admin_session_audit_orders_same_instant_with_timezone_offsets(
     ]
 
 
+async def test_admin_session_audit_uses_requested_timezone_for_dates(
+    admin_client: httpx.AsyncClient,
+):
+    """Date filters and daily buckets use the requested admin timezone."""
+    acct = _uid()
+    resp = await admin_client.post(
+        "/api/v1/admin/accounts",
+        json={"account_id": acct, "admin_user_id": "alice"},
+        headers=root_headers(),
+    )
+    alice_key = resp.json()["result"]["user_key"]
+    resp = await admin_client.post(
+        f"/api/v1/admin/accounts/{acct}/users",
+        json={"user_id": "bob", "role": "user"},
+        headers=root_headers(),
+    )
+    bob_key = resp.json()["result"]["user_key"]
+
+    create_resp = await admin_client.post("/api/v1/sessions", headers={"X-API-Key": bob_key})
+    session_id = create_resp.json()["result"]["session_id"]
+    await admin_client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "role": "user",
+            "content": "local early morning",
+            "created_at": "2026-06-13T18:21:54+00:00",
+        },
+        headers={"X-API-Key": bob_key},
+    )
+
+    list_resp = await admin_client.get(
+        (
+            f"/api/v1/admin/accounts/{acct}/sessions?user_id=bob"
+            "&from_date=2026-06-14&to_date=2026-06-14&tz=Asia/Shanghai"
+        ),
+        headers={"X-API-Key": alice_key},
+    )
+    analytics_resp = await admin_client.get(
+        (
+            f"/api/v1/admin/accounts/{acct}/analytics/daily?user_id=bob"
+            "&from_date=2026-06-12&to_date=2026-06-14&tz=Asia/Shanghai"
+        ),
+        headers={"X-API-Key": alice_key},
+    )
+
+    assert list_resp.status_code == 200
+    page = list_resp.json()["result"]
+    assert page["total"] == 1
+    assert page["items"][0]["session_id"] == session_id
+
+    assert analytics_resp.status_code == 200
+    result = analytics_resp.json()["result"]
+    assert result["timezone"] == "Asia/Shanghai"
+    assert [row["date"] for row in result["daily"]] == [
+        "2026-06-12",
+        "2026-06-13",
+        "2026-06-14",
+    ]
+    assert [row["session_count"] for row in result["daily"]] == [0, 0, 1]
+
+    utc_analytics_resp = await admin_client.get(
+        (
+            f"/api/v1/admin/accounts/{acct}/analytics/daily?user_id=bob"
+            "&from_date=2026-06-13&to_date=2026-06-13"
+        ),
+        headers={"X-API-Key": alice_key},
+    )
+
+    assert utc_analytics_resp.status_code == 200
+    utc_result = utc_analytics_resp.json()["result"]
+    assert [row["date"] for row in utc_result["daily"]] == ["2026-06-13"]
+    assert utc_result["daily"][0]["session_count"] == 1
+
+    precise_utc_resp = await admin_client.get(
+        (
+            f"/api/v1/admin/accounts/{acct}/analytics/daily?user_id=bob"
+            "&from_date=2026-06-13T00:00:00%2B00:00"
+            "&to_date=2026-06-13T18:00:00%2B00:00"
+        ),
+        headers={"X-API-Key": alice_key},
+    )
+
+    assert precise_utc_resp.status_code == 200
+    precise_result = precise_utc_resp.json()["result"]
+    assert [row["date"] for row in precise_result["daily"]] == ["2026-06-13"]
+    assert precise_result["daily"][0]["session_count"] == 0
+
+
+async def test_admin_session_audit_skips_gap_fill_for_large_daily_ranges(
+    admin_client: httpx.AsyncClient,
+):
+    """Very wide analytics ranges avoid generating excessive empty buckets."""
+    start_date = date(2026, 1, 1)
+    end_date = start_date + timedelta(days=MAX_ADMIN_DAILY_BUCKETS)
+    acct = _uid()
+    resp = await admin_client.post(
+        "/api/v1/admin/accounts",
+        json={"account_id": acct, "admin_user_id": "alice"},
+        headers=root_headers(),
+    )
+    alice_key = resp.json()["result"]["user_key"]
+
+    resp = await admin_client.get(
+        (
+            f"/api/v1/admin/accounts/{acct}/analytics/daily"
+            f"?from_date={start_date.isoformat()}&to_date={end_date.isoformat()}"
+        ),
+        headers={"X-API-Key": alice_key},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["result"]["daily"] == []
+
+
 async def test_admin_session_audit_plain_list_uses_meta_summary(
     admin_client: httpx.AsyncClient,
     admin_service: OpenVikingService,
@@ -1125,9 +1241,14 @@ async def test_admin_session_audit_rejects_invalid_date(
         f"/api/v1/admin/accounts/{acct}/analytics/daily?to_date=not-a-date",
         headers={"X-API-Key": alice_key},
     )
+    timezone_resp = await admin_client.get(
+        f"/api/v1/admin/accounts/{acct}/analytics/daily?tz=Not/AZone",
+        headers={"X-API-Key": alice_key},
+    )
 
     assert session_resp.status_code == 422
     assert analytics_resp.status_code == 422
+    assert timezone_resp.status_code == 422
 
 
 async def test_admin_session_audit_counts_failed_tool_status(

@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Admin endpoints for OpenViking multi-tenant HTTP Server."""
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timezone, tzinfo
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
 from pydantic import BaseModel
@@ -51,9 +52,27 @@ def _check_account_access(ctx: RequestContext, account_id: str) -> None:
         raise PermissionDeniedError(f"ADMIN can only manage account: {ctx.account_id}")
 
 
-def _parse_day(value: Optional[str], *, end_of_day: bool = False) -> Optional[datetime]:
+def _parse_timezone(value: str) -> tzinfo:
+    if not value:
+        return timezone.utc
+    try:
+        return ZoneInfo(value)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Timezone must be a valid IANA timezone name",
+        ) from exc
+
+
+def _parse_day(
+    value: Optional[str],
+    *,
+    end_of_day: bool = False,
+    tz: tzinfo = timezone.utc,
+) -> Optional[datetime]:
     if not value:
         return None
+    has_time = "T" in value or " " in value
     try:
         day = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -65,9 +84,13 @@ def _parse_day(value: Optional[str], *, end_of_day: bool = False) -> Optional[da
                 detail="Date must be ISO datetime or YYYY-MM-DD",
             ) from exc
     if day.tzinfo is None:
-        day = day.replace(tzinfo=timezone.utc)
-    if end_of_day:
+        day = day.replace(tzinfo=tz)
+    else:
+        day = day.astimezone(tz)
+    if end_of_day and not has_time:
         day = day.replace(hour=23, minute=59, second=59, microsecond=999999)
+    elif not has_time:
+        day = day.replace(hour=0, minute=0, second=0, microsecond=0)
     return day
 
 
@@ -259,16 +282,19 @@ async def get_daily_analytics(
     ),
     from_date: Optional[str] = Query(None, description="Start date, YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="End date, YYYY-MM-DD"),
+    tz: str = Query("UTC", description="IANA timezone for date filters and buckets"),
     ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN),
 ):
     """Get daily usage statistics for an account."""
     _check_account_access(ctx, account_id)
     service = get_service()
+    timezone_info = _parse_timezone(tz)
     result = await service.sessions.get_admin_daily_analytics(
         account_id,
         user_id=user_id or "",
-        from_date=_parse_day(from_date),
-        to_date=_parse_day(to_date, end_of_day=True),
+        from_date=_parse_day(from_date, tz=timezone_info),
+        to_date=_parse_day(to_date, end_of_day=True, tz=timezone_info),
+        tz=timezone_info,
     )
     return Response(status="ok", result=result)
 
@@ -283,6 +309,7 @@ async def list_account_sessions(
     ),
     from_date: Optional[str] = Query(None, description="Start date, YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="End date, YYYY-MM-DD"),
+    tz: str = Query("UTC", description="IANA timezone for date filters"),
     q: str = Query("", description="Search text in raw messages and tool records"),
     sort_by: str = Query("last_active", description="Sort field"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Sort order"),
@@ -293,11 +320,12 @@ async def list_account_sessions(
     """List sessions across users in an account for admin audit."""
     _check_account_access(ctx, account_id)
     service = get_service()
+    timezone_info = _parse_timezone(tz)
     result = await service.sessions.list_admin_sessions_paginated(
         account_id,
         user_id=user_id or "",
-        from_date=_parse_day(from_date),
-        to_date=_parse_day(to_date, end_of_day=True),
+        from_date=_parse_day(from_date, tz=timezone_info),
+        to_date=_parse_day(to_date, end_of_day=True, tz=timezone_info),
         query=q.strip(),
         sort_by=sort_by.strip(),
         sort_order=sort_order.strip(),
