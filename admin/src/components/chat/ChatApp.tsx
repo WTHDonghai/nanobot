@@ -9,6 +9,8 @@ import {
   MoreHorizontal,
   Pencil,
   SendHorizontal,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   User,
   Zap,
@@ -21,6 +23,7 @@ import {
   ApiEnvelope,
   ChatExperience,
   ChatMessage,
+  MessageFeedback,
   RawSessionListItem,
   SessionArchiveResult,
   SessionContextResult,
@@ -46,6 +49,7 @@ import {
   toSingleLine,
   formatShortSessionTime,
   parseIterationFromData,
+  renderMessageText,
 } from './utils';
 import { exportChatSubsetToPdf } from './pdfExport';
 import SessionSidebar from './SessionSidebar';
@@ -91,6 +95,17 @@ type BotResponseStreamBuffer = {
   pending: string;
   timerId: number | null;
   finalText?: string;
+};
+
+type FeedbackResponse = {
+  session_id: string;
+  message_id: string;
+  feedback?: MessageFeedback;
+};
+
+type SessionFeedbackResult = {
+  session_id: string;
+  feedback?: Record<string, MessageFeedback>;
 };
 
 function clampReferenceDrawerWidth(width: number): number {
@@ -528,6 +543,23 @@ const ChatApp: React.FC<ChatAppProps> = ({
         : message
     )));
   };
+
+  const updateChatMessage = (messageKey: string, patch: Partial<ChatMessage>) => {
+    setMessages((prev) => prev.map((message) => (
+      message.key === messageKey
+        ? { ...message, ...patch }
+        : message
+    )));
+  };
+
+  const mergeFeedbackIntoMessages = (
+    sourceMessages: ChatMessage[],
+    feedback: Record<string, MessageFeedback> = {},
+  ) => sourceMessages.map((message) => {
+    if (!message.messageId) return message;
+    const item = feedback[message.messageId];
+    return item?.value ? { ...message, feedback: item.value } : message;
+  });
 
   const finishBotResponseStream = (messageKey: string) => {
     const buffer = responseStreamBuffersRef.current[messageKey];
@@ -1064,6 +1096,29 @@ const ChatApp: React.FC<ChatAppProps> = ({
     return unwrapResult(response, '新建会话失败').session_id;
   }
 
+  async function resolveLatestBotMessageId(
+    targetSessionId: string,
+    finalText: string,
+  ): Promise<string | undefined> {
+    try {
+      const response = await fetchApi<ApiEnvelope<SessionContextResult>>(
+        serverUrl,
+        apiKey,
+        `/api/v1/sessions/${encodeURIComponent(targetSessionId)}/context?token_budget=${MAX_SESSION_CONTEXT_BUDGET}`,
+        getSessionRequestOptions(),
+      );
+      const context = unwrapResult(response, '同步回复 ID 失败');
+      const assistantMessages = (context.messages || [])
+        .filter((message) => message.role === 'assistant' && message.id);
+      const matched = [...assistantMessages]
+        .reverse()
+        .find((message) => renderMessageText(message.parts, serverUrl).trim() === finalText.trim());
+      return matched?.id || assistantMessages[assistantMessages.length - 1]?.id;
+    } catch {
+      return undefined;
+    }
+  }
+
   async function handleNewSession() {
     if (loading || sessionReplayLoading || sessionMutating) return;
 
@@ -1111,6 +1166,14 @@ const ChatApp: React.FC<ChatAppProps> = ({
 
     try {
       const detailPromise = fetchSessionDetail(targetSessionId).catch(() => null);
+      const feedbackPromise = fetchApi<ApiEnvelope<SessionFeedbackResult>>(
+        serverUrl,
+        apiKey,
+        `/api/v1/sessions/${encodeURIComponent(targetSessionId)}/feedback`,
+        getSessionRequestOptions(),
+      )
+        .then((response) => unwrapResult(response, '加载反馈失败').feedback || {})
+        .catch(() => ({} as Record<string, MessageFeedback>));
       const contextResponse = await fetchApi<ApiEnvelope<SessionContextResult>>(
         serverUrl,
         apiKey,
@@ -1150,14 +1213,21 @@ const ChatApp: React.FC<ChatAppProps> = ({
         .flatMap((archive) => archive.messages || []);
       const mergedMessages = [...archivedMessages, ...(context.messages || [])];
       const detail = await detailPromise;
+      const feedback = await feedbackPromise;
       const derivedTitle = deriveSessionTitleFromMessages(mergedMessages);
 
       if (replayRequestRef.current !== requestId) return;
 
       rememberSessionTitle(targetSessionId, derivedTitle);
       const nextMessages = mergedMessages.length > 0
-        ? mergeCachedMessageMetadata(mapSessionMessages(mergedMessages, serverUrl, welcomeText), cachedMessages || [])
-        : (cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages, serverUrl, welcomeText));
+        ? mergeFeedbackIntoMessages(
+          mergeCachedMessageMetadata(mapSessionMessages(mergedMessages, serverUrl, welcomeText), cachedMessages || []),
+          feedback,
+        )
+        : mergeFeedbackIntoMessages(
+          cachedMessages?.length ? cachedMessages : mapSessionMessages(mergedMessages, serverUrl, welcomeText),
+          feedback,
+        );
 
       setCachedSessionMessages(targetSessionId, nextMessages);
       persistLastActiveSession(targetSessionId);
@@ -1641,11 +1711,15 @@ const ChatApp: React.FC<ChatAppProps> = ({
       if (finalContent) {
         completeBotResponseStream(botId, finalContent);
       }
+      const resolvedMessageId = activeSessionId
+        ? await resolveLatestBotMessageId(activeSessionId, finalContent)
+        : undefined;
       const hasPendingResponseStream = Boolean(responseStreamBuffersRef.current[botId]);
       setMessages((prev) => prev.map((message) => (
         message.key === botId
           ? {
             ...message,
+            messageId: resolvedMessageId || message.messageId,
             text: hasPendingResponseStream
               ? message.text
               : finalContent || message.text || '（无回复）',
@@ -1729,6 +1803,33 @@ const ChatApp: React.FC<ChatAppProps> = ({
       setSessionError(err instanceof Error ? err.message : '联系人工失败，请稍后重试。');
     } finally {
       setHandoffLoadingKey(null);
+    }
+  };
+
+  const handleMessageFeedback = async (message: ChatMessage, value: 'up' | 'down') => {
+    if (!sessionId || !message.messageId || message.loading || message.streaming) return;
+
+    const previous = message.feedback;
+    updateChatMessage(message.key, { feedback: value });
+    setSessionError('');
+
+    try {
+      const response = await fetchApi<ApiEnvelope<FeedbackResponse>>(
+        serverUrl,
+        apiKey,
+        `/api/v1/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(message.messageId)}/feedback`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ value }),
+          ...getSessionRequestOptions(),
+        },
+      );
+      const result = unwrapResult(response, '反馈提交失败');
+      updateChatMessage(message.key, { feedback: result.feedback?.value || value });
+      void loadSessions(sessionId);
+    } catch (err: unknown) {
+      updateChatMessage(message.key, { feedback: previous });
+      setSessionError(err instanceof Error ? err.message : '反馈提交失败，请稍后重试');
     }
   };
 
@@ -2017,6 +2118,28 @@ const ChatApp: React.FC<ChatAppProps> = ({
                           )}
                           {message.role === 'bot' && message.key !== 'welcome' && !message.loading && !message.streaming && (
                             <div className="chat-bubble-actions" data-export-ignore="true">
+                              <div className="chat-feedback-actions" aria-label="回复反馈">
+                                <button
+                                  className={`chat-feedback-btn ${message.feedback === 'up' ? 'active positive' : ''}`}
+                                  onClick={() => { void handleMessageFeedback(message, 'up'); }}
+                                  disabled={busy || !sessionId || !message.messageId}
+                                  title="这条回复有帮助"
+                                  aria-label="这条回复有帮助"
+                                  aria-pressed={message.feedback === 'up'}
+                                >
+                                  <ThumbsUp size={14} />
+                                </button>
+                                <button
+                                  className={`chat-feedback-btn ${message.feedback === 'down' ? 'active negative' : ''}`}
+                                  onClick={() => { void handleMessageFeedback(message, 'down'); }}
+                                  disabled={busy || !sessionId || !message.messageId}
+                                  title="这条回复没有帮助"
+                                  aria-label="这条回复没有帮助"
+                                  aria-pressed={message.feedback === 'down'}
+                                >
+                                  <ThumbsDown size={14} />
+                                </button>
+                              </div>
                               <button
                                 className="chat-export-btn"
                                 onClick={() => { void handleExportPdf(message, index); }}

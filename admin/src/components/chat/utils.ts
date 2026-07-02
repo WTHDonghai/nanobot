@@ -274,9 +274,11 @@ export const mapSessionMessages = (
 
   return sessionMessages.map((message, index) => ({
     key: message.id || `${message.role}-${index}`,
+    messageId: message.id,
     role: message.role === 'assistant' ? 'bot' : 'user',
     text: renderMessageText(message.parts, serverUrl),
     createdAt: message.created_at,
+    feedback: message.feedback?.value,
   }));
 };
 
@@ -302,6 +304,8 @@ export const mergeCachedMessageMetadata = (
 
     return {
       ...message,
+      messageId: message.messageId ?? cached.messageId,
+      feedback: message.feedback ?? cached.feedback,
       elapsedMs: message.elapsedMs ?? cached.elapsedMs,
       steps: message.steps ?? cached.steps,
       iterationCount: message.iterationCount ?? cached.iterationCount ?? inferIterationCountFromSteps(message.steps ?? cached.steps),
@@ -353,6 +357,7 @@ export const readStoredSessionMessages = (
 
         items.push({
           key: typeof record.key === 'string' ? record.key : `${sessionId}-${index}`,
+          messageId: typeof record.messageId === 'string' ? record.messageId : undefined,
           role,
           text: rewriteBotImageUris(text, serverUrl),
           status: typeof record.status === 'string' ? record.status : undefined,
@@ -360,6 +365,7 @@ export const readStoredSessionMessages = (
           streaming: false,
           createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
           elapsedMs: typeof record.elapsedMs === 'number' ? record.elapsedMs : undefined,
+          feedback: record.feedback === 'up' || record.feedback === 'down' ? record.feedback : undefined,
           steps: Array.isArray(record.steps)
             ? record.steps.filter((step): step is string => typeof step === 'string')
             : undefined,

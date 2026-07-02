@@ -527,6 +527,11 @@ code { font-family: monospace; font-size: 0.9em; background: rgba(255,255,255,0.
   border-color: #10b981;
   color: var(--text);
 }
+.legend-btn.active.feedback {
+  background: rgba(236, 72, 153, 0.12);
+  border-color: #ec4899;
+  color: var(--text);
+}
 .legend-btn.active.tokens {
   background: rgba(245, 158, 11, 0.12);
   border-color: #f59e0b;

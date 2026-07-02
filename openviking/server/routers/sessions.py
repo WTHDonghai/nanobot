@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Path, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 
 from openviking.message.part import TextPart, part_from_dict
@@ -79,6 +80,14 @@ class UsedRequest(BaseModel):
 
     contexts: Optional[List[str]] = None
     skill: Optional[Dict[str, Any]] = None
+
+
+class FeedbackRequest(BaseModel):
+    """One-click message feedback."""
+
+    value: Literal["up", "down"]
+    reason_tags: Optional[List[str]] = None
+    comment: Optional[str] = None
 
 
 class CommitSessionRequest(BaseModel):
@@ -273,7 +282,7 @@ async def add_message(
         except ValueError:
             logger.warning(f"Invalid created_at format: {request.created_at}")
 
-    session.add_message(
+    message = session.add_message(
         request.role,
         parts,
         created_at=created_at,
@@ -283,7 +292,65 @@ async def add_message(
         status="ok",
         result={
             "session_id": session_id,
+            "message_id": message.id,
             "message_count": len(session.messages),
+        },
+    )
+
+
+@router.get("/{session_id}/feedback")
+async def get_session_feedback(
+    session_id: str = Path(..., description="Session ID"),
+    _ctx: RequestContext = Depends(get_request_context),
+):
+    """Get message feedback for a session."""
+    service = get_service()
+    session = service.sessions.session(_ctx, session_id)
+    await session.load()
+    return Response(
+        status="ok",
+        result={
+            "session_id": session_id,
+            "feedback": session.feedback,
+            "summary": session.meta.feedback_summary,
+        },
+    )
+
+
+@router.put("/{session_id}/messages/{message_id}/feedback")
+async def set_message_feedback(
+    request: FeedbackRequest,
+    session_id: str = Path(..., description="Session ID"),
+    message_id: str = Path(..., description="Message ID"),
+    _ctx: RequestContext = Depends(get_request_context),
+):
+    """Record one-click feedback for an assistant message."""
+    service = get_service()
+    session = service.sessions.session(_ctx, session_id)
+    await session.load()
+    try:
+        entry = await session.set_message_feedback(
+            message_id,
+            request.value,
+            reason_tags=request.reason_tags,
+            comment=request.comment or "",
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content=Response(
+                status="error",
+                error=ErrorInfo(code="INVALID_ARGUMENT", message=str(exc)),
+            ).model_dump(),
+        )
+
+    return Response(
+        status="ok",
+        result={
+            "session_id": session_id,
+            "message_id": message_id,
+            "feedback": entry,
+            "summary": session.meta.feedback_summary,
         },
     )
 

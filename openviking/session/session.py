@@ -34,6 +34,7 @@ logger = get_logger(__name__)
 _ARCHIVE_WAIT_POLL_SECONDS = 0.1
 FAILED_TOOL_STATUSES = {"error", "failed"}
 AUDIT_SUMMARY_VERSION = 1
+VALID_FEEDBACK_VALUES = {"up", "down"}
 
 
 @dataclass
@@ -110,6 +111,14 @@ class SessionMeta:
             "last_message_at": "",
         }
     )
+    feedback_summary: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "feedback_count": 0,
+            "positive_feedback_count": 0,
+            "negative_feedback_count": 0,
+            "latest_feedback_at": "",
+        }
+    )
     audit_summary_version: int = AUDIT_SUMMARY_VERSION
     audit_summary_complete: bool = True
 
@@ -125,6 +134,7 @@ class SessionMeta:
             "llm_token_usage": dict(self.llm_token_usage),
             "embedding_token_usage": dict(self.embedding_token_usage),
             "audit_summary": dict(self.audit_summary),
+            "feedback_summary": dict(self.feedback_summary),
             "audit_summary_version": self.audit_summary_version,
             "audit_summary_complete": self.audit_summary_complete,
         }
@@ -139,6 +149,9 @@ class SessionMeta:
         if not audit_present:
             audit = {}
         audit_token_usage = audit.get("token_usage", {})
+        feedback = data.get("feedback_summary", {})
+        if not isinstance(feedback, dict):
+            feedback = {}
 
         return cls(
             session_id=data.get("session_id", ""),
@@ -180,6 +193,16 @@ class SessionMeta:
                 },
                 "first_message_at": audit.get("first_message_at", ""),
                 "last_message_at": audit.get("last_message_at", ""),
+            },
+            feedback_summary={
+                "feedback_count": int(feedback.get("feedback_count", 0) or 0),
+                "positive_feedback_count": int(
+                    feedback.get("positive_feedback_count", 0) or 0
+                ),
+                "negative_feedback_count": int(
+                    feedback.get("negative_feedback_count", 0) or 0
+                ),
+                "latest_feedback_at": feedback.get("latest_feedback_at", ""),
             },
             audit_summary_version=int(data.get("audit_summary_version", 0) or 0),
             audit_summary_complete=bool(data.get("audit_summary_complete", False)),
@@ -301,6 +324,7 @@ class Session:
         self._session_uri = f"viking://session/{self.user.user_space_name()}/{self.session_id}"
 
         self._messages: List[Message] = []
+        self._feedback: Dict[str, Dict[str, Any]] = {}
         self._usage_records: List[Usage] = []
         self._compression: SessionCompression = SessionCompression()
         self._stats: SessionStats = SessionStats()
@@ -360,6 +384,15 @@ class Session:
             self._meta.message_count = len(self._messages)
             self._meta.commit_count = self._compression.compression_index
 
+        # Load message feedback index.
+        try:
+            feedback_content = await self._viking_fs.read_file(
+                f"{self._session_uri}/feedback.json", ctx=self.ctx
+            )
+            self._feedback = self._normalize_feedback_index(json.loads(feedback_content))
+        except Exception:
+            self._feedback = {}
+
         self._loaded = True
 
     async def exists(self) -> bool:
@@ -395,10 +428,66 @@ class Session:
             return
         run_async(self._save_meta())
 
+    async def _save_feedback(self) -> None:
+        """Persist message feedback index to storage."""
+        if not self._viking_fs:
+            return
+        await self._viking_fs.write_file(
+            uri=f"{self._session_uri}/feedback.json",
+            content=json.dumps(self._feedback, ensure_ascii=False),
+            ctx=self.ctx,
+        )
+
+    def _normalize_feedback_index(self, data: Any) -> Dict[str, Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return {}
+
+        normalized: Dict[str, Dict[str, Any]] = {}
+        for message_id, raw in data.items():
+            if not isinstance(message_id, str) or not isinstance(raw, dict):
+                continue
+            value = raw.get("value")
+            if value not in VALID_FEEDBACK_VALUES:
+                continue
+            normalized[message_id] = {
+                "message_id": message_id,
+                "value": value,
+                "created_at": str(raw.get("created_at") or ""),
+                "updated_at": str(raw.get("updated_at") or raw.get("created_at") or ""),
+            }
+            if isinstance(raw.get("reason_tags"), list):
+                normalized[message_id]["reason_tags"] = [
+                    str(tag) for tag in raw["reason_tags"] if str(tag).strip()
+                ]
+            comment = raw.get("comment")
+            if isinstance(comment, str) and comment.strip():
+                normalized[message_id]["comment"] = comment.strip()[:1000]
+        return normalized
+
+    def _refresh_feedback_summary(self) -> None:
+        values = list(self._feedback.values())
+        latest_feedback_at = ""
+        for item in values:
+            updated_at = str(item.get("updated_at") or item.get("created_at") or "")
+            if updated_at > latest_feedback_at:
+                latest_feedback_at = updated_at
+
+        self._meta.feedback_summary = {
+            "feedback_count": len(values),
+            "positive_feedback_count": sum(1 for item in values if item.get("value") == "up"),
+            "negative_feedback_count": sum(1 for item in values if item.get("value") == "down"),
+            "latest_feedback_at": latest_feedback_at,
+        }
+
     @property
     def messages(self) -> List[Message]:
         """Get message list."""
         return self._messages
+
+    @property
+    def feedback(self) -> Dict[str, Dict[str, Any]]:
+        """Get message feedback keyed by message id."""
+        return self._feedback
 
     @property
     def meta(self) -> SessionMeta:
@@ -431,6 +520,55 @@ class Session:
             self._usage_records.append(usage)
             self._stats.skills_used += 1
             logger.debug(f"Tracked skill usage: {skill.get('uri')}")
+
+    async def set_message_feedback(
+        self,
+        message_id: str,
+        value: str,
+        *,
+        reason_tags: Optional[List[str]] = None,
+        comment: str = "",
+    ) -> Dict[str, Any]:
+        """Create or update one-click feedback for an assistant message."""
+        if value not in VALID_FEEDBACK_VALUES:
+            raise ValueError("feedback value must be 'up' or 'down'")
+
+        message = next((m for m in self._messages if m.id == message_id), None)
+        if message is None:
+            for archive in await self._list_archive_refs():
+                messages = await self._read_archive_messages(archive["archive_uri"])
+                message = next((m for m in messages if m.id == message_id), None)
+                if message is not None:
+                    break
+
+        if message is None:
+            raise ValueError("message not found")
+        if message.role != "assistant":
+            raise ValueError("feedback can only be recorded for assistant messages")
+
+        now = get_current_timestamp()
+        existing = self._feedback.get(message_id) or {}
+        entry: Dict[str, Any] = {
+            "message_id": message_id,
+            "value": value,
+            "created_at": existing.get("created_at") or now,
+            "updated_at": now,
+        }
+        normalized_tags = [
+            str(tag).strip()[:80]
+            for tag in (reason_tags or [])
+            if str(tag).strip()
+        ]
+        if normalized_tags:
+            entry["reason_tags"] = normalized_tags[:8]
+        if comment.strip():
+            entry["comment"] = comment.strip()[:1000]
+
+        self._feedback[message_id] = entry
+        self._refresh_feedback_summary()
+        await self._save_feedback()
+        await self._save_meta()
+        return entry
 
     def add_message(
         self,

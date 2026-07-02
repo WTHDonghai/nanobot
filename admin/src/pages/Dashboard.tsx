@@ -19,6 +19,9 @@ type DailyAnalyticsRow = {
   assistant_message_count: number;
   tool_call_count: number;
   failed_tool_call_count: number;
+  feedback_count: number;
+  positive_feedback_count: number;
+  negative_feedback_count: number;
   token_usage: TokenUsage;
 };
 
@@ -58,6 +61,12 @@ const toolSuccessRate = (row: Pick<DailyAnalyticsRow, 'tool_call_count' | 'faile
   row.tool_call_count > 0
     ? ((row.tool_call_count - row.failed_tool_call_count) / row.tool_call_count) * 100
     : 100
+);
+
+const satisfactionRate = (row?: Pick<DailyAnalyticsRow, 'feedback_count' | 'positive_feedback_count'> | null) => (
+  row && row.feedback_count > 0
+    ? (row.positive_feedback_count / row.feedback_count) * 100
+    : 0
 );
 
 const formatShortDate = (value: string) => value.slice(5) || value;
@@ -113,6 +122,7 @@ const TrendChartPanel: React.FC<{
   const totalTokens = tokenTotal(totals?.token_usage);
   const sessionCount = totals?.session_count || 0;
   const messageCount = totals?.message_count || 0;
+  const feedbackCount = totals?.feedback_count || 0;
 
   const metricsConfig = useMemo<Array<{
     key: string;
@@ -136,13 +146,20 @@ const TrendChartPanel: React.FC<{
       total: messageCount,
     },
     {
+      key: 'feedback',
+      label: '用户反馈',
+      color: '#ec4899',
+      metric: (row) => row.feedback_count || 0,
+      total: feedbackCount,
+    },
+    {
       key: 'tokens',
       label: 'Token 消耗',
       color: '#f59e0b',
       metric: (row) => tokenTotal(row.token_usage),
       total: totalTokens,
     },
-  ], [sessionCount, messageCount, totalTokens]);
+  ], [sessionCount, messageCount, feedbackCount, totalTokens]);
 
   const activeConfigs = useMemo(() => (
     metricsConfig.filter((cfg) => activeMetrics.includes(cfg.key))
@@ -722,21 +739,21 @@ const TenantDashboard: React.FC = () => {
 
   if (loading) return <div className="empty"><div className="loader"></div></div>;
 
-  const { users, health, ready } = data;
+  const { ready } = data;
   const daily = data.daily as DailyAnalyticsRow[];
   const totals = data.totals as DailyAnalyticsTotals | null;
-  const version = health.version || '-';
-  const checks = ready.checks || {};
   const isReady = ready.status === 'ready';
   const sessionCount = totals?.session_count || 0;
-  const totalTokens = tokenTotal(totals?.token_usage);
   const toolCallCount = totals?.tool_call_count || 0;
   const failedToolCount = totals?.failed_tool_call_count || 0;
+  const feedbackCount = totals?.feedback_count || 0;
+  const positiveFeedbackCount = totals?.positive_feedback_count || 0;
+  const negativeFeedbackCount = totals?.negative_feedback_count || 0;
+  const totalSatisfactionRate = satisfactionRate(totals);
   const avgTurnsPerSession = sessionCount
     ? ((totals?.user_message_count || 0) / sessionCount).toFixed(1)
     : '0';
   const hasUsageData = sessionCount > 0;
-  const adminCount = users.filter((u: any) => u.role === 'admin').length;
   const activeUsers = totals?.active_users || 0;
   const userQuestions = totals?.user_message_count || 0;
   const assistantReplies = totals?.assistant_message_count || 0;
@@ -744,13 +761,14 @@ const TenantDashboard: React.FC = () => {
   const avgQuestionsPerUser = safeDivide(userQuestions, activeUsers);
   const latestDaily = [...daily].reverse().find((row) => row.session_count > 0) || daily[daily.length - 1] || null;
   const selectedDaily = daily.find((row) => row.date === selectedDate) || latestDaily;
-  const dailyRangeStart = daily[0]?.date || '';
-  const dailyRangeEnd = daily[daily.length - 1]?.date || '';
   const selectedDateInRange = Boolean(selectedDate && daily.some((row) => row.date === selectedDate));
   const selectedDailyTokens = tokenTotal(selectedDaily?.token_usage);
   const selectedDailyQuestions = selectedDaily?.user_message_count || 0;
   const selectedDailyToolCalls = selectedDaily?.tool_call_count || 0;
   const selectedDailyFailedTools = selectedDaily?.failed_tool_call_count || 0;
+  const selectedDailyFeedback = selectedDaily?.feedback_count || 0;
+  const selectedDailyNegativeFeedback = selectedDaily?.negative_feedback_count || 0;
+  const selectedDailySatisfactionRate = satisfactionRate(selectedDaily);
   const selectedDailySuccessRate = selectedDaily ? toolSuccessRate(selectedDaily) : 100;
 
   return (
@@ -776,11 +794,16 @@ const TenantDashboard: React.FC = () => {
           to={sessionHref({ from_date: fromDate, to_date: toDate, sort_by: 'message_count', sort_order: 'desc' })}
         />
         <ValueStatCard
-          label="工具成功率"
-          value={toolCallCount ? formatPercent(totalToolSuccessRate) : '-'}
-          caption={`${formatNumber(toolCallCount)} 次工具调用`}
-          tone={failedToolCount > 0 ? 'warning' : 'success'}
-          to={failedToolCount > 0 ? sessionHref({ from_date: fromDate, to_date: toDate, sort_by: 'failed_tool_call_count', sort_order: 'desc' }) : undefined}
+          label="满意率"
+          value={feedbackCount ? formatPercent(totalSatisfactionRate) : '-'}
+          caption={`${formatNumber(feedbackCount)} 条反馈，${formatNumber(negativeFeedbackCount)} 条倒赞`}
+          tone={negativeFeedbackCount > 0 ? 'warning' : feedbackCount > 0 ? 'success' : undefined}
+          to={feedbackCount > 0 ? sessionHref({
+            from_date: fromDate,
+            to_date: toDate,
+            sort_by: negativeFeedbackCount > 0 ? 'negative_feedback_count' : 'feedback_count',
+            sort_order: 'desc',
+          }) : undefined}
         />
       </div>
 
@@ -935,22 +958,38 @@ const TenantDashboard: React.FC = () => {
                 <div><span>承接问题</span><strong>{formatNumber(selectedDaily.user_message_count)}</strong></div>
                 <div><span>自动响应</span><strong>{formatNumber(selectedDaily.assistant_message_count)}</strong></div>
                 <div><span>工具成功率</span><strong className={selectedDailyFailedTools > 0 ? 'warning' : 'success'}>{selectedDailyToolCalls ? formatPercent(selectedDailySuccessRate) : '-'}</strong></div>
+                <div><span>满意率</span><strong className={selectedDailyNegativeFeedback > 0 ? 'warning' : selectedDailyFeedback > 0 ? 'success' : ''}>{selectedDailyFeedback ? formatPercent(selectedDailySatisfactionRate) : '-'}</strong></div>
                 <div><span>Token / 问题</span><strong>{formatNumber(Math.round(safeDivide(selectedDailyTokens, selectedDailyQuestions)))}</strong></div>
               </div>
 
-              {selectedDailyFailedTools > 0 && (
+              {(selectedDailyFailedTools > 0 || selectedDailyFeedback > 0) && (
                 <div className="daily-action-row">
-                  <Link
-                    className="daily-action-link danger"
-                    to={sessionHref({
-                      from_date: selectedDaily.date,
-                      to_date: selectedDaily.date,
-                      sort_by: 'failed_tool_call_count',
-                      sort_order: 'desc',
-                    })}
-                  >
-                    {formatNumber(selectedDailyFailedTools)} 次工具失败
-                  </Link>
+                  {selectedDailyFailedTools > 0 && (
+                    <Link
+                      className="daily-action-link danger"
+                      to={sessionHref({
+                        from_date: selectedDaily.date,
+                        to_date: selectedDaily.date,
+                        sort_by: 'failed_tool_call_count',
+                        sort_order: 'desc',
+                      })}
+                    >
+                      {formatNumber(selectedDailyFailedTools)} 次工具失败
+                    </Link>
+                  )}
+                  {selectedDailyFeedback > 0 && (
+                    <Link
+                      className={`daily-action-link ${selectedDailyNegativeFeedback > 0 ? 'warning' : 'neutral'}`}
+                      to={sessionHref({
+                        from_date: selectedDaily.date,
+                        to_date: selectedDaily.date,
+                        sort_by: selectedDailyNegativeFeedback > 0 ? 'negative_feedback_count' : 'feedback_count',
+                        sort_order: 'desc',
+                      })}
+                    >
+                      {formatNumber(selectedDailyFeedback)} 条反馈
+                    </Link>
+                  )}
                 </div>
               )}
 
@@ -977,16 +1016,16 @@ const TenantDashboard: React.FC = () => {
           <strong>{formatNumber(totals?.active_users)}</strong>
         </div>
         <div>
+          <span>工具成功率</span>
+          <strong className={failedToolCount > 0 ? 'warning' : 'success'}>{toolCallCount ? formatPercent(totalToolSuccessRate) : '-'}</strong>
+        </div>
+        <div>
+          <span>有效反馈</span>
+          <strong>{formatNumber(positiveFeedbackCount)} 赞 / {formatNumber(negativeFeedbackCount)} 倒赞</strong>
+        </div>
+        <div>
           <span>模型连接</span>
           <strong className={isReady ? 'success' : 'warning'}>{isReady ? '就绪' : '不可用'}</strong>
-        </div>
-        <div>
-          <span>服务器版本</span>
-          <strong>{version}</strong>
-        </div>
-        <div>
-          <span>Admin</span>
-          <strong>{formatNumber(adminCount)}</strong>
         </div>
       </div>
     </div>

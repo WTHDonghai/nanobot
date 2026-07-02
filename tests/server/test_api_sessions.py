@@ -164,6 +164,58 @@ async def test_add_message(client: httpx.AsyncClient):
     body = resp.json()
     assert body["status"] == "ok"
     assert body["result"]["message_count"] == 1
+    assert body["result"]["message_id"].startswith("msg_")
+
+
+async def test_message_feedback_records_assistant_rating(client: httpx.AsyncClient):
+    create_resp = await client.post("/api/v1/sessions", json={})
+    session_id = create_resp.json()["result"]["session_id"]
+
+    user_resp = await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "user", "content": "Can you help?"},
+    )
+    assistant_resp = await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "assistant", "content": "Yes, here is the answer."},
+    )
+    assistant_message_id = assistant_resp.json()["result"]["message_id"]
+
+    resp = await client.put(
+        f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
+        json={"value": "up"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["result"]["feedback"]["value"] == "up"
+    assert body["result"]["summary"]["feedback_count"] == 1
+    assert body["result"]["summary"]["positive_feedback_count"] == 1
+    assert body["result"]["summary"]["negative_feedback_count"] == 0
+
+    update_resp = await client.put(
+        f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
+        json={"value": "down"},
+    )
+    assert update_resp.status_code == 200
+    update_result = update_resp.json()["result"]
+    assert update_result["summary"]["feedback_count"] == 1
+    assert update_result["summary"]["positive_feedback_count"] == 0
+    assert update_result["summary"]["negative_feedback_count"] == 1
+
+    feedback_resp = await client.get(f"/api/v1/sessions/{session_id}/feedback")
+    assert feedback_resp.status_code == 200
+    feedback_result = feedback_resp.json()["result"]
+    assert feedback_result["feedback"][assistant_message_id]["value"] == "down"
+    assert feedback_result["summary"]["negative_feedback_count"] == 1
+
+    user_message_id = user_resp.json()["result"]["message_id"]
+    invalid_resp = await client.put(
+        f"/api/v1/sessions/{session_id}/messages/{user_message_id}/feedback",
+        json={"value": "up"},
+    )
+    assert invalid_resp.status_code == 400
+    assert invalid_resp.json()["error"]["code"] == "INVALID_ARGUMENT"
 
 
 async def test_add_multiple_messages(client: httpx.AsyncClient):

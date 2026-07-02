@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import MarkdownRenderer from '../components/markdown/MarkdownRenderer';
 import { fetchApi } from '../services/api';
-import { AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bot, Check, Copy, Eye, MessageSquare, RefreshCw, Search, Wrench, X } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bot, Check, Copy, Eye, MessageSquare, RefreshCw, Search, ThumbsDown, ThumbsUp, Wrench, X } from 'lucide-react';
 import './Pages.css';
 
 type TokenUsage = {
@@ -26,7 +26,20 @@ type SessionSummary = {
   assistant_message_count?: number;
   tool_call_count?: number;
   failed_tool_call_count?: number;
+  feedback_count?: number;
+  positive_feedback_count?: number;
+  negative_feedback_count?: number;
+  latest_feedback_at?: string;
   token_usage?: TokenUsage;
+};
+
+type MessageFeedback = {
+  message_id?: string;
+  value?: 'up' | 'down';
+  created_at?: string;
+  updated_at?: string;
+  reason_tags?: string[];
+  comment?: string;
 };
 
 type SessionMessage = {
@@ -36,6 +49,7 @@ type SessionMessage = {
   created_at?: string;
   parts?: Array<Record<string, unknown>>;
   token_usage?: TokenUsage;
+  feedback?: MessageFeedback;
 };
 
 type ToolRecord = {
@@ -70,6 +84,7 @@ type ParsedOpenVikingSearchOutput = {
 
 type SessionDetail = SessionSummary & {
   messages?: SessionMessage[];
+  feedback?: Record<string, MessageFeedback>;
 };
 
 type SessionListResult = {
@@ -82,13 +97,16 @@ type SessionListResult = {
   has_next?: boolean;
 };
 
-type DetailFilter = 'all' | 'matches' | 'user' | 'assistant' | 'tools' | 'failures';
+type DetailFilter = 'all' | 'matches' | 'user' | 'assistant' | 'feedback' | 'tools' | 'failures';
 type SessionSortBy =
   | 'last_active'
   | 'created_at'
   | 'message_count'
   | 'tool_call_count'
   | 'failed_tool_call_count'
+  | 'feedback_count'
+  | 'positive_feedback_count'
+  | 'negative_feedback_count'
   | 'token_total'
   | 'matched_message_count';
 type SortOrder = 'asc' | 'desc';
@@ -100,6 +118,9 @@ const sessionSortOptions: Array<{ value: SessionSortBy; label: string; requiresQ
   { value: 'message_count', label: '消息量' },
   { value: 'tool_call_count', label: '工具调用' },
   { value: 'failed_tool_call_count', label: '失败工具' },
+  { value: 'negative_feedback_count', label: '倒赞' },
+  { value: 'feedback_count', label: '反馈量' },
+  { value: 'positive_feedback_count', label: '赞' },
   { value: 'token_total', label: 'Token 消耗' },
   { value: 'matched_message_count', label: '搜索命中', requiresQuery: true },
 ];
@@ -204,6 +225,14 @@ const messageText = (message: SessionMessage) => {
 };
 
 const tokenTotal = (usage?: TokenUsage) => usage?.total_tokens || 0;
+
+const satisfactionRate = (item?: Pick<SessionSummary, 'feedback_count' | 'positive_feedback_count'> | null) => (
+  item && (item.feedback_count || 0) > 0
+    ? ((item.positive_feedback_count || 0) / (item.feedback_count || 1)) * 100
+    : 0
+);
+
+const formatPercent = (value: number) => `${value.toFixed(value >= 10 ? 0 : 1)}%`;
 
 const partString = (part: Record<string, unknown>, key: string) => {
   const value = part[key];
@@ -616,13 +645,39 @@ const formatDuration = (start?: string, end?: string) => {
 const sessionQualityFlags = (detail: SessionDetail) => {
   const flags: Array<{ tone: 'danger' | 'warning' | 'neutral' | 'success'; label: string }> = [];
   const failedTools = detail.failed_tool_call_count || 0;
+  const negativeFeedback = detail.negative_feedback_count || 0;
+  const feedbackCount = detail.feedback_count || 0;
   const totalTokens = tokenTotal(detail.token_usage);
   const messageCount = detail.message_count || 0;
+  if (negativeFeedback > 0) flags.push({ tone: 'warning', label: `${formatNumber(negativeFeedback)} 条倒赞` });
   if (failedTools > 0) flags.push({ tone: 'danger', label: `${formatNumber(failedTools)} 个失败工具` });
   if (totalTokens >= 50000) flags.push({ tone: 'warning', label: '高 Token 会话' });
   if (messageCount >= 20) flags.push({ tone: 'neutral', label: '长会话' });
+  if (feedbackCount > 0 && negativeFeedback === 0) flags.push({ tone: 'success', label: `${formatNumber(feedbackCount)} 条正向反馈` });
   if (flags.length === 0) flags.push({ tone: 'success', label: '常规会话' });
   return flags;
+};
+
+const feedbackForMessage = (detail: SessionDetail | null, message: SessionMessage) => (
+  message.feedback || detail?.feedback?.[message.id]
+);
+
+const FeedbackBadge = ({ feedback }: { feedback?: MessageFeedback }) => {
+  if (feedback?.value === 'up') {
+    return (
+      <span className="quality-chip success compact">
+        <ThumbsUp size={12} /> 已赞
+      </span>
+    );
+  }
+  if (feedback?.value === 'down') {
+    return (
+      <span className="quality-chip warning compact">
+        <ThumbsDown size={12} /> 倒赞
+      </span>
+    );
+  }
+  return null;
 };
 
 const ConfirmModal = ({ message, onConfirm, onCancel }: {
@@ -702,9 +757,10 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
     if (filter === 'matches') return normalizedQuery ? messageMatchesQuery(message, normalizedQuery) : true;
     if (filter === 'user') return message.role === 'user';
     if (filter === 'assistant') return message.role === 'assistant';
+    if (filter === 'feedback') return Boolean(feedbackForMessage(detail, message));
     if (filter === 'tools' || filter === 'failures') return false;
     return true;
-  }), [filter, messages, normalizedQuery]);
+  }), [detail, filter, messages, normalizedQuery]);
   const filteredTools = useMemo(() => toolRecords.filter((record) => {
     if (filter === 'tools') return true;
     if (filter === 'failures') return isFailedTool(record.tool);
@@ -713,11 +769,14 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
   }), [filter, normalizedQuery, toolRecords]);
   const flags = useMemo(() => detail ? sessionQualityFlags(detail) : [], [detail]);
   const rawJson = useMemo(() => detail ? JSON.stringify(detail, null, 2) : '', [detail]);
+  const feedbackCount = detail?.feedback_count || 0;
+  const negativeFeedbackCount = detail?.negative_feedback_count || 0;
   const filterOptions = useMemo(() => [
     { value: 'all' as const, label: '全部', count: messages.length || detail?.message_count || 0, show: true },
     { value: 'matches' as const, label: '命中', count: matchedCount, show: Boolean(normalizedQuery) },
     { value: 'user' as const, label: '用户', count: userCount, show: true },
     { value: 'assistant' as const, label: 'Agent 回复', count: assistantCount, show: true },
+    { value: 'feedback' as const, label: '反馈', count: feedbackCount, show: feedbackCount > 0 },
     { value: 'tools' as const, label: '工具调用', count: toolCount, show: true },
     { value: 'failures' as const, label: '失败', count: failedToolCount, show: true },
   ], [
@@ -729,6 +788,7 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
     normalizedQuery,
     toolCount,
     userCount,
+    feedbackCount,
   ]);
 
   return (
@@ -760,6 +820,7 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
               <div><span>用户问题</span><strong>{formatNumber(detail.user_message_count)}</strong></div>
               <div><span>Agent 回复</span><strong>{formatNumber(detail.assistant_message_count)}</strong></div>
               <div><span>工具失败</span><strong>{formatNumber(detail.failed_tool_call_count)}</strong></div>
+              <div><span>满意率</span><strong className={negativeFeedbackCount > 0 ? 'warning' : feedbackCount > 0 ? 'success' : ''}>{feedbackCount ? formatPercent(satisfactionRate(detail)) : '-'}</strong></div>
               <div><span>Token</span><strong>{formatNumber(tokenTotal(detail.token_usage))}</strong></div>
               <div><span>会话跨度</span><strong>{formatDuration(detail.first_message_at || detail.created_at, detail.last_message_at || detail.updated_at)}</strong></div>
             </div>
@@ -796,6 +857,7 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
                 const hasFailedTool = tools.some(isFailedTool);
                 const text = messageText(message);
                 const showInlineTools = filter !== 'assistant';
+                const feedback = feedbackForMessage(detail, message);
                 return (
                   <div className={`session-message ${message.role} ${hasFailedTool ? 'has-failure' : ''}`} key={message.id}>
                     <div className="session-message-topline">
@@ -805,6 +867,7 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
                       </span>
                       <span>{formatTime(message.created_at)}</span>
                       {message.token_usage && <span>{formatNumber(tokenTotal(message.token_usage))} tokens</span>}
+                      <FeedbackBadge feedback={feedback} />
                       {hasFailedTool && <span className="quality-chip danger compact"><AlertCircle size={12} /> 工具失败</span>}
                     </div>
                     {text ? (
@@ -1306,11 +1369,14 @@ const Sessions: React.FC = () => {
         <table>
           <thead>
             <tr>
-              <th>User ID</th><th>Session ID</th><th>最后活跃</th><th>消息</th><th>工具</th><th>Token</th><th>操作</th>
+              <th>User ID</th><th>Session ID</th><th>最后活跃</th><th>消息</th><th>反馈</th><th>工具</th><th>Token</th><th>操作</th>
             </tr>
           </thead>
           <tbody className={loading && sessions.length > 0 ? 'loading-fade' : ''}>
-            {sessions.length > 0 ? sessions.map((session) => (
+            {sessions.length > 0 ? sessions.map((session) => {
+              const feedbackCount = session.feedback_count || 0;
+              const negativeFeedbackCount = session.negative_feedback_count || 0;
+              return (
               <tr
                 className={`session-row ${detail?.session_id === session.session_id && detail?.user_id === session.user_id ? 'active' : ''}`}
                 key={`${session.user_id}:${session.session_id}`}
@@ -1333,6 +1399,9 @@ const Sessions: React.FC = () => {
                   {tokenTotal(session.token_usage) >= 50000 && (
                     <span className="quality-chip warning compact" style={{ marginLeft: 6 }}>高 Token</span>
                   )}
+                  {negativeFeedbackCount > 0 && (
+                    <span className="quality-chip warning compact" style={{ marginLeft: 6 }}>倒赞</span>
+                  )}
                   {(session.message_count || 0) >= 20 && (
                     <span className="quality-chip neutral compact" style={{ marginLeft: 6 }}>长会话</span>
                   )}
@@ -1342,6 +1411,20 @@ const Sessions: React.FC = () => {
                   <span className="session-table-metric">{formatNumber(session.message_count)}</span>
                   {query.trim() && typeof session.matched_message_count === 'number' && (
                     <span className="quality-chip neutral compact">命中 {formatNumber(session.matched_message_count)}</span>
+                  )}
+                </td>
+                <td>
+                  {feedbackCount > 0 ? (
+                    <>
+                      <span className="session-table-metric">{formatPercent(satisfactionRate(session))}</span>
+                      {negativeFeedbackCount > 0 ? (
+                        <span className="quality-chip warning compact">{formatNumber(negativeFeedbackCount)} 倒赞</span>
+                      ) : (
+                        <span className="quality-chip success compact">{formatNumber(feedbackCount)} 赞</span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="muted-text">-</span>
                   )}
                 </td>
                 <td>
@@ -1356,9 +1439,9 @@ const Sessions: React.FC = () => {
                   <button className="btn btn-danger btn-sm" onClick={(e) => { e.stopPropagation(); setDeleteTarget(session); }}>删除</button>
                 </td>
               </tr>
-            )) : (
+            ); }) : (
               <tr>
-                <td colSpan={7} className="empty">
+                <td colSpan={8} className="empty">
                   {loading ? '正在读取会话列表...' : (selectedAcc ? '暂无会话' : '请先选择账号')}
                 </td>
               </tr>

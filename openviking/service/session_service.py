@@ -40,6 +40,9 @@ ADMIN_SESSION_SORT_FIELDS = {
     "failed_tool_call_count",
     "token_total",
     "matched_message_count",
+    "feedback_count",
+    "positive_feedback_count",
+    "negative_feedback_count",
     "user_id",
 }
 
@@ -74,6 +77,9 @@ def _empty_daily_analytics_row(day: str) -> Dict[str, Any]:
         "assistant_message_count": 0,
         "tool_call_count": 0,
         "failed_tool_call_count": 0,
+        "feedback_count": 0,
+        "positive_feedback_count": 0,
+        "negative_feedback_count": 0,
         "token_usage": {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -109,6 +115,16 @@ def _token_total(item: Dict[str, Any]) -> int:
     if not isinstance(token_usage, dict):
         return 0
     return _safe_int(token_usage.get("total_tokens"))
+
+
+def _feedback_summary_from_meta(meta: SessionMeta) -> Dict[str, Any]:
+    feedback = getattr(meta, "feedback_summary", {}) or {}
+    return {
+        "feedback_count": _safe_int(feedback.get("feedback_count")),
+        "positive_feedback_count": _safe_int(feedback.get("positive_feedback_count")),
+        "negative_feedback_count": _safe_int(feedback.get("negative_feedback_count")),
+        "latest_feedback_at": str(feedback.get("latest_feedback_at") or ""),
+    }
 
 
 def _timestamp(value: Any) -> float:
@@ -454,6 +470,8 @@ class SessionService:
             "session_id": session_id,
             "uri": session.uri,
             "matched_message_count": matched_message_count,
+            "feedback": session.feedback,
+            **_feedback_summary_from_meta(session.meta),
             **self._summarize_messages(messages),
         }
         if include_messages:
@@ -536,6 +554,7 @@ class SessionService:
         meta: SessionMeta,
     ) -> Dict[str, Any]:
         summary = meta.audit_summary
+        feedback_summary = _feedback_summary_from_meta(meta)
         return {
             **meta.to_dict(),
             "account_id": account_id,
@@ -556,6 +575,7 @@ class SessionService:
             "token_usage": dict(summary.get("token_usage", {})),
             "first_message_at": summary.get("first_message_at", ""),
             "last_message_at": summary.get("last_message_at", ""),
+            **feedback_summary,
         }
 
     async def _backfill_admin_session_meta_summary(
@@ -813,6 +833,15 @@ class SessionService:
             bucket["failed_tool_call_count"] += int(
                 session_info.get("failed_tool_call_count", 0) or 0
             )
+            bucket["feedback_count"] += int(
+                session_info.get("feedback_count", 0) or 0
+            )
+            bucket["positive_feedback_count"] += int(
+                session_info.get("positive_feedback_count", 0) or 0
+            )
+            bucket["negative_feedback_count"] += int(
+                session_info.get("negative_feedback_count", 0) or 0
+            )
             _merge_token_usage(bucket["token_usage"], session_info.get("token_usage", {}))
 
         daily = []
@@ -824,6 +853,9 @@ class SessionService:
             "assistant_message_count": 0,
             "tool_call_count": 0,
             "failed_tool_call_count": 0,
+            "feedback_count": 0,
+            "positive_feedback_count": 0,
+            "negative_feedback_count": 0,
             "token_usage": {
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
@@ -856,6 +888,9 @@ class SessionService:
                 "assistant_message_count",
                 "tool_call_count",
                 "failed_tool_call_count",
+                "feedback_count",
+                "positive_feedback_count",
+                "negative_feedback_count",
             ]:
                 totals[key] += item[key]
             _merge_token_usage(totals["token_usage"], item["token_usage"])

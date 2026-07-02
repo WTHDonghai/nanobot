@@ -37,6 +37,7 @@ export type SessionContextMessage = {
   role: 'user' | 'assistant';
   parts?: SessionContextPart[];
   created_at?: string;
+  feedback?: MessageFeedback;
 };
 
 export type SessionContextResult = {
@@ -52,6 +53,7 @@ export type SessionArchiveResult = {
 
 export type ChatMessage = {
   key: string;
+  messageId?: string;
   role: 'user' | 'bot';
   text: string;
   status?: string;
@@ -61,4 +63,14 @@ export type ChatMessage = {
   elapsedMs?: number;
   steps?: string[];
   iterationCount?: number;
+  feedback?: 'up' | 'down';
+};
+
+export type MessageFeedback = {
+  message_id?: string;
+  value?: 'up' | 'down';
+  created_at?: string;
+  updated_at?: string;
+  reason_tags?: string[];
+  comment?: string;
 };

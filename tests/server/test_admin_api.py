@@ -383,7 +383,7 @@ async def test_admin_session_audit_and_daily_analytics(admin_client: httpx.Async
         json={"role": "user", "content": "How do I reset the headset?"},
         headers={"X-API-Key": bob_key},
     )
-    await admin_client.post(
+    assistant_resp = await admin_client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
             "role": "assistant",
@@ -396,6 +396,13 @@ async def test_admin_session_audit_and_daily_analytics(admin_client: httpx.Async
         },
         headers={"X-API-Key": bob_key},
     )
+    assistant_message_id = assistant_resp.json()["result"]["message_id"]
+    feedback_resp = await admin_client.put(
+        f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
+        json={"value": "down"},
+        headers={"X-API-Key": bob_key},
+    )
+    assert feedback_resp.status_code == 200
 
     list_resp = await admin_client.get(
         f"/api/v1/admin/accounts/{acct}/sessions?user_id=bob&q=headset",
@@ -412,6 +419,9 @@ async def test_admin_session_audit_and_daily_analytics(admin_client: httpx.Async
     assert sessions[0]["user_message_count"] == 1
     assert sessions[0]["assistant_message_count"] == 1
     assert sessions[0]["token_usage"]["total_tokens"] >= 20
+    assert sessions[0]["feedback_count"] == 1
+    assert sessions[0]["positive_feedback_count"] == 0
+    assert sessions[0]["negative_feedback_count"] == 1
 
     detail_resp = await admin_client.get(
         f"/api/v1/admin/accounts/{acct}/sessions/{session_id}?user_id=bob",
@@ -421,6 +431,9 @@ async def test_admin_session_audit_and_daily_analytics(admin_client: httpx.Async
     detail = detail_resp.json()["result"]
     assert [message["role"] for message in detail["messages"]] == ["user", "assistant"]
     assert detail["messages"][1]["token_usage"]["total_tokens"] == 20
+    assert detail["feedback"][assistant_message_id]["value"] == "down"
+    assert detail["feedback_count"] == 1
+    assert detail["negative_feedback_count"] == 1
 
     analytics_resp = await admin_client.get(
         f"/api/v1/admin/accounts/{acct}/analytics/daily?user_id=bob",
@@ -431,6 +444,9 @@ async def test_admin_session_audit_and_daily_analytics(admin_client: httpx.Async
     assert totals["active_users"] == 1
     assert totals["session_count"] == 1
     assert totals["message_count"] == 2
+    assert totals["feedback_count"] == 1
+    assert totals["positive_feedback_count"] == 0
+    assert totals["negative_feedback_count"] == 1
     assert totals["token_usage"]["total_tokens"] >= 20
 
 
@@ -565,11 +581,12 @@ async def test_admin_session_audit_sorts_by_value_fields(admin_client: httpx.Asy
         ("failed", 20, "error"),
     ]
     session_ids = {}
+    assistant_message_ids = {}
     for label, total_tokens, tool_status in specs:
         create_resp = await admin_client.post("/api/v1/sessions", headers={"X-API-Key": bob_key})
         session_id = create_resp.json()["result"]["session_id"]
         session_ids[label] = session_id
-        await admin_client.post(
+        message_resp = await admin_client.post(
             f"/api/v1/sessions/{session_id}/messages",
             json={
                 "role": "assistant",
@@ -590,6 +607,21 @@ async def test_admin_session_audit_sorts_by_value_fields(admin_client: httpx.Asy
             },
             headers={"X-API-Key": bob_key},
         )
+        assistant_message_ids[label] = message_resp.json()["result"]["message_id"]
+
+    await admin_client.put(
+        (
+            f"/api/v1/sessions/{session_ids['failed']}/messages/"
+            f"{assistant_message_ids['failed']}/feedback"
+        ),
+        json={"value": "down"},
+        headers={"X-API-Key": bob_key},
+    )
+    await admin_client.put(
+        f"/api/v1/sessions/{session_ids['low']}/messages/{assistant_message_ids['low']}/feedback",
+        json={"value": "up"},
+        headers={"X-API-Key": bob_key},
+    )
 
     token_resp = await admin_client.get(
         f"/api/v1/admin/accounts/{acct}/sessions?user_id=bob&sort_by=token_total&sort_order=desc",
@@ -613,6 +645,16 @@ async def test_admin_session_audit_sorts_by_value_fields(admin_client: httpx.Asy
     failure_items = failure_resp.json()["result"]["items"]
     assert failure_items[0]["session_id"] == session_ids["failed"]
     assert failure_items[0]["failed_tool_call_count"] == 1
+
+    feedback_resp = await admin_client.get(
+        f"/api/v1/admin/accounts/{acct}/sessions?user_id=bob&sort_by=negative_feedback_count&sort_order=desc",
+        headers={"X-API-Key": alice_key},
+    )
+    assert feedback_resp.status_code == 200
+    feedback_page = feedback_resp.json()["result"]
+    assert feedback_page["sort_by"] == "negative_feedback_count"
+    assert feedback_page["items"][0]["session_id"] == session_ids["failed"]
+    assert feedback_page["items"][0]["negative_feedback_count"] == 1
 
 
 async def test_admin_session_audit_clamps_page_past_end(admin_client: httpx.AsyncClient):
