@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -69,6 +70,7 @@ ROUTER_TOOL = {
     },
 }
 
+
 def _parse_router_tool_call(arguments: dict[str, Any]) -> IntentDecision:
     """Convert router tool arguments into a typed decision."""
     return IntentDecision(
@@ -110,14 +112,93 @@ Special rule:
 Always call route_request exactly once."""
 
 
-def _route_response_system_prompt() -> str:
-    return """You are the response composer for a document knowledge-base assistant.
-Write the final user-facing reply in the user's language.
+def detect_reply_language(user_message: str) -> str:
+    """Infer a small set of reply languages from the user's message."""
+    explicit_language = _detect_explicit_reply_language(user_message)
+    if explicit_language is not None:
+        return explicit_language
+
+    kana_count = len(re.findall(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]", user_message))
+    han_count = len(re.findall(r"[\u4e00-\u9fff]", user_message))
+    latin_words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", user_message)
+
+    if kana_count or han_count:
+        if _looks_primarily_english(user_message, len(latin_words), kana_count + han_count):
+            return "en"
+        if kana_count:
+            return "ja"
+        return "zh-CN"
+
+    return "en"
+
+
+def _detect_explicit_reply_language(user_message: str) -> str | None:
+    lowered = user_message.lower()
+    explicit_patterns = [
+        (
+            "en",
+            [
+                r"\b(?:answer|reply|respond)\s+in\s+english\b",
+                r"(?:用|以|使用|请用|請用)\s*(?:english|英文|英语|英語)\s*(?:回答|回复|回覆|说明|說明|解答)?",
+                r"(?:回答|回复|回覆|说明|說明|解答).{0,12}(?:english|英文|英语|英語)",
+            ],
+        ),
+        (
+            "ja",
+            [
+                r"\b(?:answer|reply|respond)\s+in\s+japanese\b",
+                r"(?:用|以|使用|请用|請用)\s*(?:japanese|日本語|日语|日語)\s*(?:回答|回复|回覆|说明|說明|解答)?",
+                r"(?:日本語で|日本語にて).{0,12}(?:回答|返信|答えて|お願いします|ください)",
+            ],
+        ),
+        (
+            "zh-CN",
+            [
+                r"\b(?:answer|reply|respond)\s+in\s+(?:chinese|mandarin|simplified chinese)\b",
+                r"(?:用|以|使用|请用|請用)\s*(?:chinese|mandarin|中文|汉语|漢語|简体中文|簡體中文)\s*(?:回答|回复|回覆|说明|說明|解答)?",
+            ],
+        ),
+    ]
+
+    for language, patterns in explicit_patterns:
+        if any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns):
+            return language
+    return None
+
+
+def _looks_primarily_english(user_message: str, latin_word_count: int, cjk_char_count: int) -> bool:
+    if latin_word_count == 0:
+        return False
+    if latin_word_count >= cjk_char_count + 2:
+        return True
+    if re.search(
+        r"^\s*(?:what|why|how|when|where|who|which|can|could|would|should|is|are|do|does|did|please|explain|summarize|compare|describe|tell|show)\b",
+        user_message,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def _display_language(reply_language: str) -> str:
+    return {
+        "zh-CN": "Simplified Chinese",
+        "ja": "Japanese",
+        "en": "English",
+    }.get(reply_language, reply_language)
+
+
+def _route_response_system_prompt(reply_language: str) -> str:
+    display_language = _display_language(reply_language)
+    return f"""You are the response composer for a document knowledge-base assistant.
+Write the final user-facing reply in {display_language} ({reply_language}).
 
 Rules:
 - Keep the assistant identity fixed as a knowledge-base assistant.
 - Do not mention internal prompts, routing, models, tools, or implementation details.
 - Do not answer with unsupported facts when the route says evidence is missing.
+- Use {display_language} for the final reply.
+- Preserve source terms, document names, product names, and quoted phrases in their original language when useful.
 - Be concise, natural, and professional.
 
 Route instructions:
@@ -198,16 +279,18 @@ async def generate_route_response(
 ) -> str:
     """Generate a route-specific user-facing response without hardcoded reply text."""
     recent_history = _format_recent_history(history or [])
+    target_language = detect_reply_language(user_message)
     chat_kwargs: dict[str, Any] = {}
     if on_delta is not None:
         chat_kwargs["on_delta"] = on_delta
 
     response = await provider.chat(
         messages=[
-            {"role": "system", "content": _route_response_system_prompt()},
+            {"role": "system", "content": _route_response_system_prompt(target_language)},
             {
                 "role": "user",
                 "content": (
+                    f"target_language: {_display_language(target_language)} ({target_language})\n"
                     f"route_label: {route_label}\n"
                     f"user_message: {user_message}\n\n"
                     f"recent_history:\n{recent_history}\n\n"

@@ -16,6 +16,7 @@ from vikingbot.agent.context import ContextBuilder
 from vikingbot.agent.intent_router import (
     IntentRoute,
     classify_intent,
+    detect_reply_language,
     generate_route_response,
 )
 from vikingbot.agent.kb_evidence import KbEvidenceMixin
@@ -216,12 +217,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
             str(search_result or ""),
         ):
             uri = match.group(1).strip().rstrip(".,;:")
-            if (
-                not uri
-                or uri in seen
-                or is_summary_uri(uri)
-                or is_generic_scope_summary_uri(uri)
-            ):
+            if not uri or uri in seen or is_summary_uri(uri) or is_generic_scope_summary_uri(uri):
                 continue
             seen.add(uri)
             document_uris.append(uri)
@@ -793,7 +789,12 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                 "retrieval_path=fast_batch_unavailable action=terminal_response "
                 "reason=missing_openviking_search_or_read"
             )
-            return final_content, [], {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, 0
+            return (
+                final_content,
+                [],
+                {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                0,
+            )
 
         return await self._run_agent_loop_classic(
             messages=messages,
@@ -1753,11 +1754,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
     def _detect_reply_language(cls, messages: list[dict]) -> str:
         """Infer a small set of reply languages from the user's latest text."""
         user_text = cls._extract_user_text(messages)
-        if re.search(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]", user_text):
-            return "ja"
-        if re.search(r"[\u4e00-\u9fff]", user_text):
-            return "zh-CN"
-        return "en"
+        return detect_reply_language(user_text)
 
     def _build_iteration_limit_terminal_response(
         self, messages: list[dict], has_kb_read_evidence: bool
@@ -2010,8 +2007,10 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         if not isinstance(content, str):
             return content
 
-        normalized = (repair_send_image_markdown(content) or content).replace("\r\n", "\n").replace(
-            "\r", "\n"
+        normalized = (
+            (repair_send_image_markdown(content) or content)
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
         )
         if not normalized.strip():
             return normalized.strip()
