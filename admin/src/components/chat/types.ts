@@ -38,6 +38,7 @@ export type SessionContextMessage = {
   parts?: SessionContextPart[];
   created_at?: string;
   feedback?: MessageFeedback;
+  metadata?: Record<string, unknown>;
 };
 
 export type SessionContextResult = {
@@ -49,6 +50,16 @@ export type SessionContextResult = {
 export type SessionArchiveResult = {
   archive_id: string;
   messages?: SessionContextMessage[];
+};
+
+export type GuidedQuestionSuggestion = {
+  id: string;
+  display_text: string;
+  canonical_question: string;
+  token?: string;
+  source_uris?: string[];
+  confidence?: string;
+  selected?: boolean;
 };
 
 export type ChatMessage = {
@@ -64,6 +75,7 @@ export type ChatMessage = {
   steps?: string[];
   iterationCount?: number;
   feedback?: 'up' | 'down';
+  suggestions?: GuidedQuestionSuggestion[];
 };
 
 export type MessageFeedback = {

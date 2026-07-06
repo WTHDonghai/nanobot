@@ -67,6 +67,7 @@ class AddMessageRequest(BaseModel):
     parts: Optional[List[Dict[str, Any]]] = None
     created_at: Optional[str] = None
     token_usage: Optional[Dict[str, int]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="after")
     def validate_content_or_parts(self) -> "AddMessageRequest":
@@ -287,6 +288,7 @@ async def add_message(
         parts,
         created_at=created_at,
         token_usage=request.token_usage,
+        metadata=request.metadata,
     )
     return Response(
         status="ok",

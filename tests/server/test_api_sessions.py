@@ -167,6 +167,35 @@ async def test_add_message(client: httpx.AsyncClient):
     assert body["result"]["message_id"].startswith("msg_")
 
 
+async def test_add_message_preserves_metadata_in_context(client: httpx.AsyncClient):
+    create_resp = await client.post("/api/v1/sessions", json={})
+    session_id = create_resp.json()["result"]["session_id"]
+
+    await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "role": "assistant",
+            "content": "你可能想问这些，选一个我继续查：",
+            "metadata": {
+                "guided_questions": [
+                    {
+                        "id": "gq_1",
+                        "display_text": "维修电话是多少？",
+                        "canonical_question": "维修电话是多少？",
+                    }
+                ]
+            },
+        },
+    )
+
+    context_resp = await client.get(f"/api/v1/sessions/{session_id}/context")
+    body = context_resp.json()
+
+    assert context_resp.status_code == 200
+    assert body["status"] == "ok"
+    assert body["result"]["messages"][0]["metadata"]["guided_questions"][0]["id"] == "gq_1"
+
+
 async def test_message_feedback_records_assistant_rating(client: httpx.AsyncClient):
     create_resp = await client.post("/api/v1/sessions", json={})
     session_id = create_resp.json()["result"]["session_id"]

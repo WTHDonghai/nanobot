@@ -41,6 +41,7 @@ class Session:
         content: Optional[str] = None,
         parts: Optional[List[Part]] = None,
         token_usage: Optional[Dict[str, int]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Add a message to the session.
 
@@ -61,12 +62,14 @@ class Session:
                 role,
                 parts=parts_dicts,
                 token_usage=token_usage,
+                metadata=metadata,
             )
         return await self._client.add_message(
             self.session_id,
             role,
             content=content,
             token_usage=token_usage,
+            metadata=metadata,
         )
 
     async def commit(

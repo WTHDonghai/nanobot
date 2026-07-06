@@ -23,6 +23,7 @@ import {
   ApiEnvelope,
   ChatExperience,
   ChatMessage,
+  GuidedQuestionSuggestion,
   MessageFeedback,
   RawSessionListItem,
   SessionArchiveResult,
@@ -42,6 +43,7 @@ import {
   makeWelcomeMessages,
   mapSessionMessages,
   mergeCachedMessageMetadata,
+  normalizeGuidedQuestionSuggestions,
   readStoredSessionMessages,
   readStoredSessionTitles,
   unwrapResult,
@@ -101,6 +103,11 @@ type FeedbackResponse = {
   session_id: string;
   message_id: string;
   feedback?: MessageFeedback;
+};
+
+type SendOptions = {
+  text?: string;
+  metadata?: Record<string, unknown>;
 };
 
 type SessionFeedbackResult = {
@@ -1484,11 +1491,15 @@ const ChatApp: React.FC<ChatAppProps> = ({
     void loadSessions(sessionId);
   }, [serverUrl, apiKey, role, selectedAccountId, selectedUserId, sessionId]);
 
-  const handleSend = async () => {
-    if (!input.trim() || loading || !selectedUserId) return;
+  const handleSend = async (options: SendOptions = {}) => {
+    const requestedText = options.text ?? input;
+    if (!requestedText.trim() || loading || !selectedUserId) return;
 
-    const userMsg = input.trim();
+    const userMsg = requestedText.trim();
     const userCreatedAt = new Date().toISOString();
+    const requestMetadata = options.metadata && Object.keys(options.metadata).length > 0
+      ? options.metadata
+      : undefined;
     setSessionError('');
     setHandoffNotice('');
     setInput('');
@@ -1538,7 +1549,12 @@ const ChatApp: React.FC<ChatAppProps> = ({
         method: 'POST',
         credentials: 'same-origin',
         headers,
-        body: JSON.stringify({ message: userMsg, session_id: activeSessionId, user_id: selectedUserId }),
+        body: JSON.stringify({
+          message: userMsg,
+          session_id: activeSessionId,
+          user_id: selectedUserId,
+          ...(requestMetadata ? { metadata: requestMetadata } : {}),
+        }),
       });
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1585,6 +1601,14 @@ const ChatApp: React.FC<ChatAppProps> = ({
               receivedResponseDelta = true;
               streamedContent += delta;
               enqueueBotResponseDelta(botId, delta, latestEventTimestamp);
+              continue;
+            }
+
+            if (evt.event === 'suggestions') {
+              const suggestions = normalizeGuidedQuestionSuggestions(evt.data);
+              if (suggestions.length > 0) {
+                updateBotMessage(botId, { suggestions });
+              }
               continue;
             }
 
@@ -1755,6 +1779,34 @@ const ChatApp: React.FC<ChatAppProps> = ({
         void loadSessions(activeSessionId);
       }
     }
+  };
+
+  const handleGuidedQuestionClick = (messageKey: string, suggestion: GuidedQuestionSuggestion) => {
+    if (suggestion.selected) return;
+
+    const metadata: Record<string, unknown> = {
+      guided_question_id: suggestion.id,
+      guided_source_uris: suggestion.source_uris || [],
+    };
+    if (suggestion.token) {
+      metadata.guided_question_token = suggestion.token;
+    }
+
+    updateChatMessage(messageKey, {
+      suggestions: messages
+        .find((message) => message.key === messageKey)
+        ?.suggestions
+        ?.map((item) => ({
+          ...item,
+          selected: item.id === suggestion.id
+            || item.canonical_question === suggestion.canonical_question,
+        })),
+    });
+
+    void handleSend({
+      text: suggestion.canonical_question || suggestion.display_text,
+      metadata,
+    });
   };
 
   const handleHumanHandoff = async (targetMessage?: ChatMessage) => {
@@ -2115,6 +2167,24 @@ const ChatApp: React.FC<ChatAppProps> = ({
                               references={messageSections.references}
                               onOpenReference={(target, label) => { void openReferencePreview(target, label); }}
                             />
+                          )}
+                          {message.role === 'bot' && message.suggestions && message.suggestions.length > 0 && (
+                            <div className="chat-guided-questions" data-export-ignore="true" aria-label="推荐问题">
+                              {message.suggestions.map((suggestion) => (
+                                <button
+                                  key={suggestion.id || suggestion.canonical_question}
+                                  type="button"
+                                  className={`chat-guided-question-btn ${suggestion.selected ? 'selected' : ''}`}
+                                  onClick={() => handleGuidedQuestionClick(message.key, suggestion)}
+                                  disabled={loading || !selectedUserId || suggestion.selected}
+                                  title={suggestion.canonical_question}
+                                  aria-label={suggestion.selected ? `已选择问题：${suggestion.display_text}` : `发送问题：${suggestion.display_text}`}
+                                  aria-pressed={suggestion.selected}
+                                >
+                                  {suggestion.display_text}
+                                </button>
+                              ))}
+                            </div>
                           )}
                           {message.role === 'bot' && message.key !== 'welcome' && !message.loading && !message.streaming && (
                             <div className="chat-bubble-actions" data-export-ignore="true">

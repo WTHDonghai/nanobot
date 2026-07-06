@@ -8,7 +8,7 @@ Message = role + parts, supports serialization to JSONL.
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from openviking.message.part import ContextPart, Part, TextPart, ToolPart
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
@@ -23,6 +23,7 @@ class Message:
     parts: List[Part]
     created_at: datetime = None
     token_usage: Optional[Dict[str, int]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
     @property
     def content(self) -> str:
@@ -77,6 +78,8 @@ class Message:
             data["token_usage"] = {
                 key: int(value or 0) for key, value in self.token_usage.items()
             }
+        if self.metadata:
+            data["metadata"] = self.metadata
         return data
 
     def _part_to_dict(self, part: Part) -> dict:
@@ -175,10 +178,16 @@ class Message:
             parts=parts,
             created_at=created_at,
             token_usage=data.get("token_usage"),
+            metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else None,
         )
 
     @classmethod
-    def create_user(cls, content: str, msg_id: str = None) -> "Message":
+    def create_user(
+        cls,
+        content: str,
+        msg_id: str = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "Message":
         """Create user message."""
         from uuid import uuid4
 
@@ -187,6 +196,7 @@ class Message:
             role="user",
             parts=[TextPart(text=content)],
             created_at=datetime.now(timezone.utc),
+            metadata=metadata,
         )
 
     @classmethod
@@ -196,6 +206,7 @@ class Message:
         context_refs: List[dict] = None,
         tool_calls: List[dict] = None,
         msg_id: str = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> "Message":
         """Create assistant message."""
         from uuid import uuid4
@@ -230,6 +241,7 @@ class Message:
             role="assistant",
             parts=parts,
             created_at=datetime.now(timezone.utc),
+            metadata=metadata,
         )
 
     def get_context_parts(self) -> List[ContextPart]:

@@ -834,6 +834,61 @@
   line-height: 1.45;
 }
 
+.chat-guided-questions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.chat-guided-question-btn {
+  width: 100%;
+  min-height: 38px;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: left;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, opacity 0.16s ease;
+}
+
+.chat-guided-question-btn:hover:not(:disabled) {
+  border-color: rgba(99, 102, 241, 0.36);
+  background: rgba(99, 102, 241, 0.12);
+  color: var(--primary);
+}
+
+.chat-guided-question-btn.selected {
+  border-color: rgba(99, 102, 241, 0.58);
+  background: rgba(99, 102, 241, 0.16);
+  color: var(--primary);
+  cursor: default;
+}
+
+.chat-guided-question-btn:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.58);
+  outline-offset: 2px;
+}
+
+.chat-guided-question-btn:disabled:not(.selected) {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
 .chat-footer {
   display: flex;
   align-items: center;
@@ -1986,6 +2041,28 @@ html[data-theme="light"] body.chat-reference-resizing .chat-reference-resize-han
 [data-theme="light"] .chat-bubble-reference-index {
   color: var(--light);
   background: rgba(100, 116, 139, 0.12);
+}
+
+[data-theme="light"] .chat-guided-questions {
+  border-top-color: rgba(100, 116, 139, 0.14);
+}
+
+[data-theme="light"] .chat-guided-question-btn {
+  border-color: rgba(100, 116, 139, 0.18);
+  background: rgba(248, 250, 252, 0.76);
+  color: var(--text);
+}
+
+[data-theme="light"] .chat-guided-question-btn:hover:not(:disabled) {
+  border-color: rgba(79, 70, 229, 0.30);
+  background: rgba(79, 70, 229, 0.08);
+  color: var(--primary);
+}
+
+[data-theme="light"] .chat-guided-question-btn.selected {
+  border-color: rgba(79, 70, 229, 0.48);
+  background: rgba(79, 70, 229, 0.12);
+  color: var(--primary);
 }
 
 [data-theme="light"] .chat-bubble-actions {

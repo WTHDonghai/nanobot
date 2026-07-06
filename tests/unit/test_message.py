@@ -613,6 +613,27 @@ class TestMessageFactoryMethods:
         assert msg.content == ""
         assert len(msg.parts) == 0
 
+    def test_message_metadata_roundtrip(self):
+        """Test message UI metadata survives serialization."""
+        msg = Message.create_assistant(
+            "Choose one:",
+            metadata={
+                "guided_questions": [
+                    {
+                        "id": "gq_1",
+                        "display_text": "维修电话是多少？",
+                        "canonical_question": "维修电话是多少？",
+                    }
+                ]
+            },
+        )
+
+        serialized = msg.to_dict()
+        restored = Message.from_dict(serialized)
+
+        assert serialized["metadata"]["guided_questions"][0]["id"] == "gq_1"
+        assert restored.metadata == serialized["metadata"]
+
 
 class TestMessageMethods:
     """Test Message methods."""

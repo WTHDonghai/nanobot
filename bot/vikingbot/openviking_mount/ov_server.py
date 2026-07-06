@@ -1368,6 +1368,7 @@ class VikingClient:
                 role=role,
                 parts=parts,
                 token_usage=message.get("token_usage") if role == "assistant" else None,
+                metadata=message.get("metadata") if isinstance(message.get("metadata"), dict) else None,
             )
             appended_indices.append(index)
 

@@ -1,6 +1,7 @@
 import {
   ApiEnvelope,
   ChatMessage,
+  GuidedQuestionSuggestion,
   RawSessionListItem,
   SessionContextMessage,
   SessionContextPart,
@@ -203,6 +204,36 @@ export const getPrimaryTextFromMessage = (message: SessionContextMessage): strin
   return toSingleLine(textParts.join(' '));
 };
 
+export const normalizeGuidedQuestionSuggestions = (value: unknown): GuidedQuestionSuggestion[] => {
+  if (!Array.isArray(value)) return [];
+
+  return value.reduce<GuidedQuestionSuggestion[]>((items, rawItem) => {
+    if (!rawItem || typeof rawItem !== 'object') return items;
+    const item = rawItem as Record<string, unknown>;
+    const displayText = typeof item.display_text === 'string' ? item.display_text.trim() : '';
+    const canonicalQuestion = typeof item.canonical_question === 'string' ? item.canonical_question.trim() : '';
+    if (!displayText || !canonicalQuestion) return items;
+
+    const token = typeof item.token === 'string' ? item.token.trim() : '';
+    const sourceUris = Array.isArray(item.source_uris)
+      ? item.source_uris.map((uri) => String(uri).trim()).filter(Boolean)
+      : [];
+
+    items.push({
+      id: typeof item.id === 'string' && item.id.trim()
+        ? item.id.trim()
+        : `${canonicalQuestion}-${items.length}`,
+      display_text: displayText,
+      canonical_question: canonicalQuestion,
+      ...(token ? { token } : {}),
+      source_uris: sourceUris,
+      confidence: typeof item.confidence === 'string' ? item.confidence : undefined,
+      selected: item.selected === true,
+    });
+    return items;
+  }, []);
+};
+
 export const deriveSessionTitleFromMessages = (sessionMessages: SessionContextMessage[]): string => {
   const candidate = sessionMessages.find((message) => message.role === 'user' && getPrimaryTextFromMessage(message))
     || sessionMessages.find((message) => getPrimaryTextFromMessage(message));
@@ -263,6 +294,66 @@ export const normalizeMarkdownForDisplay = (value: string): string => {
     .join('\n\n');
 };
 
+const isGuidedQuestionPrompt = (text: string): boolean => {
+  const normalized = toSingleLine(text);
+  return normalized === '我找到几个可能相关的问题，可以点一个继续查询：'
+    || normalized === '你可能想问这些，选一个我继续查：'
+    || normalized === '関連しそうな質問をいくつか見つけました。選んで続けられます：'
+    || normalized === '聞きたい内容に近いものを選んでください。続けて調べます：'
+    || normalized === 'I found a few related questions you can choose from:'
+    || normalized === 'Pick the closest question and I will keep looking:';
+};
+
+const sameQuestionText = (left?: string, right?: string): boolean => (
+  Boolean(left && right) && toSingleLine(left || '') === toSingleLine(right || '')
+);
+
+const markSelectedGuidedSuggestions = (
+  suggestions: GuidedQuestionSuggestion[],
+  nextUserMessage?: SessionContextMessage,
+): GuidedQuestionSuggestion[] => {
+  if (suggestions.length === 0) return suggestions;
+
+  const nextUserText = nextUserMessage ? getPrimaryTextFromMessage(nextUserMessage) : '';
+  const selectedId = typeof nextUserMessage?.metadata?.guided_question_id === 'string'
+    ? nextUserMessage.metadata.guided_question_id.trim()
+    : '';
+
+  return suggestions.map((suggestion) => ({
+    ...suggestion,
+    selected: suggestion.selected
+      || Boolean(selectedId && suggestion.id === selectedId)
+      || sameQuestionText(suggestion.canonical_question, nextUserText)
+      || sameQuestionText(suggestion.display_text, nextUserText),
+  }));
+};
+
+const restoreGuidedSuggestions = (
+  message: SessionContextMessage,
+  index: number,
+  renderedText: string,
+  nextUserMessage?: SessionContextMessage,
+): GuidedQuestionSuggestion[] | undefined => {
+  const rawSuggestions = message.metadata?.guided_questions;
+  const normalized = markSelectedGuidedSuggestions(
+    normalizeGuidedQuestionSuggestions(rawSuggestions),
+    nextUserMessage,
+  );
+  if (normalized.length > 0) return normalized;
+
+  const nextUserText = nextUserMessage ? getPrimaryTextFromMessage(nextUserMessage) : '';
+  if (message.role === 'assistant' && isGuidedQuestionPrompt(renderedText) && nextUserText) {
+    return [{
+      id: `legacy-guided-${message.id || index}`,
+      display_text: nextUserText,
+      canonical_question: nextUserText,
+      selected: true,
+    }];
+  }
+
+  return undefined;
+};
+
 export const mapSessionMessages = (
   sessionMessages: SessionContextMessage[],
   serverUrl = '',
@@ -272,14 +363,21 @@ export const mapSessionMessages = (
     return makeWelcomeMessages('该会话暂无消息，可以继续提问', welcomeText);
   }
 
-  return sessionMessages.map((message, index) => ({
-    key: message.id || `${message.role}-${index}`,
-    messageId: message.id,
-    role: message.role === 'assistant' ? 'bot' : 'user',
-    text: renderMessageText(message.parts, serverUrl),
-    createdAt: message.created_at,
-    feedback: message.feedback?.value,
-  }));
+  return sessionMessages.map((message, index) => {
+    const text = renderMessageText(message.parts, serverUrl);
+    const nextUserMessage = sessionMessages.slice(index + 1).find((item) => item.role === 'user');
+    return {
+      key: message.id || `${message.role}-${index}`,
+      messageId: message.id,
+      role: message.role === 'assistant' ? 'bot' : 'user',
+      text,
+      createdAt: message.created_at,
+      feedback: message.feedback?.value,
+      suggestions: message.role === 'assistant'
+        ? restoreGuidedSuggestions(message, index, text, nextUserMessage)
+        : undefined,
+    };
+  });
 };
 
 export const mergeCachedMessageMetadata = (
@@ -306,6 +404,9 @@ export const mergeCachedMessageMetadata = (
       ...message,
       messageId: message.messageId ?? cached.messageId,
       feedback: message.feedback ?? cached.feedback,
+      suggestions: message.suggestions && message.suggestions.length > 0
+        ? message.suggestions
+        : cached.suggestions,
       elapsedMs: message.elapsedMs ?? cached.elapsedMs,
       steps: message.steps ?? cached.steps,
       iterationCount: message.iterationCount ?? cached.iterationCount ?? inferIterationCountFromSteps(message.steps ?? cached.steps),
@@ -366,6 +467,7 @@ export const readStoredSessionMessages = (
           createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
           elapsedMs: typeof record.elapsedMs === 'number' ? record.elapsedMs : undefined,
           feedback: record.feedback === 'up' || record.feedback === 'down' ? record.feedback : undefined,
+          suggestions: normalizeGuidedQuestionSuggestions(record.suggestions),
           steps: Array.isArray(record.steps)
             ? record.steps.filter((step): step is string => typeof step === 'string')
             : undefined,

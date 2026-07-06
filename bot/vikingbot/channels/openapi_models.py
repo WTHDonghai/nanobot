@@ -21,6 +21,7 @@ class EventType(str, Enum):
 
     RESPONSE = "response"
     RESPONSE_DELTA = "response_delta"
+    SUGGESTIONS = "suggestions"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     REASONING = "reasoning"
@@ -49,6 +50,20 @@ class ChatRequest(BaseModel):
     context: Optional[List[ChatMessage]] = Field(
         default=None, description="Additional context messages"
     )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict, description="Additional request metadata"
+    )
+
+
+class GuidedQuestionSuggestion(BaseModel):
+    """A verified follow-up question suggestion."""
+
+    id: str = Field(..., description="Suggestion identifier")
+    display_text: str = Field(..., description="Button text shown to the user")
+    canonical_question: str = Field(..., description="Question submitted when clicked")
+    token: str = Field(..., description="Signed capability for this suggestion")
+    source_uris: List[str] = Field(default_factory=list, description="Supporting resource URIs")
+    confidence: str = Field(default="medium", description="Router confidence after validation")
 
 
 class ChatResponse(BaseModel):
@@ -58,6 +73,9 @@ class ChatResponse(BaseModel):
     message: str = Field(..., description="Assistant's response message")
     events: Optional[List[Dict[str, Any]]] = Field(
         default=None, description="Intermediate events (thinking, tool calls)"
+    )
+    suggestions: List[GuidedQuestionSuggestion] = Field(
+        default_factory=list, description="Verified guided question suggestions"
     )
     timestamp: datetime = Field(default_factory=datetime.now, description="Response timestamp")
 

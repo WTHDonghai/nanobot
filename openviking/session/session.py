@@ -576,6 +576,7 @@ class Session:
         parts: List[Part],
         created_at: datetime = None,
         token_usage: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Message:
         """Add a message."""
         msg = Message(
@@ -584,6 +585,7 @@ class Session:
             parts=parts,
             created_at=created_at or datetime.now(timezone.utc),
             token_usage=_normalize_token_usage(token_usage),
+            metadata=metadata if isinstance(metadata, dict) and metadata else None,
         )
         self._messages.append(msg)
 

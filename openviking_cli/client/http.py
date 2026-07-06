@@ -798,6 +798,7 @@ class AsyncHTTPClient(BaseClient):
         parts: list[dict] | None = None,
         created_at: str | None = None,
         token_usage: dict[str, int] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
@@ -822,6 +823,8 @@ class AsyncHTTPClient(BaseClient):
             payload["created_at"] = created_at
         if token_usage is not None:
             payload["token_usage"] = token_usage
+        if metadata is not None:
+            payload["metadata"] = metadata
 
         response = await self._http.post(
             f"/api/v1/sessions/{session_id}/messages",

@@ -354,6 +354,77 @@ async def test_openapi_channel_forwards_response_delta_before_final_response() -
 
 
 @pytest.mark.asyncio
+async def test_openapi_channel_forwards_guided_question_suggestions() -> None:
+    bus = MessageBus()
+    channel = OpenAPIChannel(
+        config=OpenAPIChannelConfig(),
+        bus=bus,
+        workspace_path=Path.cwd(),
+    )
+    pending = PendingResponse()
+    channel._pending["session-1"] = pending
+    suggestions = [
+        {
+            "id": "gq_1",
+            "display_text": "维修电话是多少？",
+            "canonical_question": "维修电话是多少？",
+            "token": "signed-token",
+            "source_uris": ["viking://resources/support/maintenance.md"],
+            "confidence": "high",
+        }
+    ]
+
+    await channel.send(
+        OutboundMessage(
+            session_key=SessionKey(type="cli", channel_id="default", chat_id="session-1"),
+            content="你可能想问这些，选一个我继续查：",
+            event_type=OutboundEventType.RESPONSE,
+            metadata={"guided_questions": suggestions},
+        )
+    )
+
+    final_event = await pending.stream_queue.get()
+    suggestions_event = await pending.stream_queue.get()
+    close_event = await pending.stream_queue.get()
+
+    assert final_event.event == EventType.RESPONSE
+    assert suggestions_event.event == EventType.SUGGESTIONS
+    assert suggestions_event.data == suggestions
+    assert pending.suggestions == suggestions
+    assert close_event is None
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_carries_request_metadata_to_inbound_message() -> None:
+    bus = MessageBus()
+    channel = OpenAPIChannel(
+        config=OpenAPIChannelConfig(),
+        bus=bus,
+        workspace_path=Path.cwd(),
+    )
+
+    response = await channel._handle_chat_stream(
+        ChatRequest(
+            message="维修电话是多少？",
+            session_id="metadata-session",
+            user_id="user-1",
+            metadata={"guided_question_token": "signed-token"},
+        )
+    )
+
+    first_chunk = await response.body_iterator.__anext__()
+    first_event = _decode_sse_chunk(first_chunk)
+    inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+    assert first_event["event"] == "reasoning"
+    assert inbound.content == "维修电话是多少？"
+    assert inbound.metadata["guided_question_token"] == "signed-token"
+    assert inbound.metadata["openviking_session_id"] == "metadata-session"
+
+    await response.body_iterator.aclose()
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_publishes_tool_call_before_execution_starts() -> None:
     config = Config()
     config.agents.mode = AgentMode.FULL

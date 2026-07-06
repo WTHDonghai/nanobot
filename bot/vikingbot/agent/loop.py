@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,11 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from vikingbot.agent.context import ContextBuilder
+from vikingbot.agent.guided_questions import (
+    build_guided_questions,
+    should_attempt_guided_questions,
+    verify_guided_question_token,
+)
 from vikingbot.agent.intent_router import (
     IntentRoute,
     classify_intent,
@@ -170,6 +176,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._openviking_sync_tasks: dict[str, asyncio.Task[None]] = {}
         self._streamed_response_text: dict[str, str] = {}
+        self._guided_question_token_secret = secrets.token_urlsafe(32)
         self._register_default_tools()
 
     def _should_use_kb_fast_batch_path(self) -> bool:
@@ -380,6 +387,51 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
     def _consume_streamed_response_text(self, session_key: SessionKey) -> str:
         """Return response text already emitted as deltas and clear the marker."""
         return self._streamed_response_text.pop(session_key.safe_name(), "")
+
+    def _is_verified_guided_question_request(self, msg: InboundMessage) -> bool:
+        """Validate a UI suggestion token before letting it bypass intent routing."""
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        token = metadata.get("guided_question_token")
+        if not isinstance(token, str) or not token:
+            return False
+        return verify_guided_question_token(
+            token=token,
+            session_id=msg.session_key.safe_name(),
+            canonical_question=msg.content,
+            secret=self._guided_question_token_secret,
+        )
+
+    @staticmethod
+    def _guided_question_response_text(user_message: str) -> str:
+        reply_language = detect_reply_language(user_message)
+        if reply_language == "zh-CN":
+            return "你可能想问这些，选一个我继续查："
+        if reply_language == "ja":
+            return "聞きたい内容に近いものを選んでください。続けて調べます："
+        return "Pick the closest question and I will keep looking:"
+
+    @staticmethod
+    def _build_persisted_user_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+        """Persist durable guided-question selection metadata without storing tokens."""
+        if not isinstance(metadata, dict):
+            return {}
+
+        result: dict[str, Any] = {}
+        guided_question_id = metadata.get("guided_question_id")
+        if isinstance(guided_question_id, str) and guided_question_id.strip():
+            result["guided_question_id"] = guided_question_id.strip()
+
+        source_uris = metadata.get("guided_source_uris")
+        if isinstance(source_uris, list):
+            normalized_source_uris = [
+                str(uri).strip()
+                for uri in source_uris
+                if str(uri).strip()
+            ]
+            if normalized_source_uris:
+                result["guided_source_uris"] = normalized_source_uris[:10]
+
+        return result
 
     async def _execute_fast_batch_tool(
         self,
@@ -2053,6 +2105,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         *,
         tools_used: list[dict[str, Any]] | None = None,
         token_usage: dict[str, Any] | None = None,
+        assistant_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Persist one completed user/assistant turn locally and to OpenViking when needed."""
         memory_scope = ""
@@ -2076,13 +2129,19 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
             session.metadata["openviking_session_id"] = openviking_session_id
             message_kwargs["openviking_session_id"] = openviking_session_id
 
-        session.add_message("user", msg.content, sender_id=msg.sender_id, **message_kwargs)
+        user_kwargs = dict(message_kwargs)
+        user_metadata = self._build_persisted_user_metadata(msg.metadata)
+        if user_metadata:
+            user_kwargs["metadata"] = user_metadata
+        session.add_message("user", msg.content, sender_id=msg.sender_id, **user_kwargs)
 
         assistant_kwargs = dict(message_kwargs)
         if tools_used:
             assistant_kwargs["tools_used"] = tools_used
         if token_usage is not None:
             assistant_kwargs["token_usage"] = token_usage
+        if assistant_metadata:
+            assistant_kwargs["metadata"] = assistant_metadata
         session.add_message(
             "assistant", assistant_content, sender_id=msg.sender_id, **assistant_kwargs
         )
@@ -2240,55 +2299,121 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
 
             # Retrieval-focused profiles: classify intent before agent loop
             if message_context._is_retrieval_mode():
-                try:
-                    logger.info("[IntentRouter] Classifying user intent...")
-                    decision = await classify_intent(
-                        provider=self.provider,
-                        model=self.fast_model,
-                        user_message=msg.content,
-                        history=session.get_history(),
-                        session_id=session_key.safe_name(),
-                    )
-                    logger.info(
-                        f"[IntentRouter] label={decision.label} route={decision.route} "
-                        f"confidence={decision.confidence} reason={decision.reason}"
-                    )
-
-                    if decision.route != IntentRoute.AGENT:
-                        # Non-retrieval route: generate a direct response
-                        response_text = await generate_route_response(
+                if self._is_verified_guided_question_request(msg):
+                    logger.info("[GuidedQuestions] verified suggestion token; skipping intent router")
+                else:
+                    try:
+                        logger.info("[IntentRouter] Classifying user intent...")
+                        decision = await classify_intent(
                             provider=self.provider,
-                            model=self.model,
-                            route_label=decision.label,
+                            model=self.fast_model,
                             user_message=msg.content,
                             history=session.get_history(),
                             session_id=session_key.safe_name(),
-                            on_delta=self._make_response_delta_callback(
-                                session_key=msg.session_key,
-                                publish_events=should_stream_response,
-                            ),
                         )
-                        response_text = self._normalize_final_output_text(response_text)
-                        await self._persist_session_turn(session, msg, response_text)
-                        await self._publish_missing_response_delta_events(
-                            session_key=msg.session_key,
-                            final_content=response_text,
-                            publish_events=should_stream_response,
+                        logger.info(
+                            f"[IntentRouter] label={decision.label} route={decision.route} "
+                            f"confidence={decision.confidence} reason={decision.reason}"
                         )
 
-                        time_cost = round(time.time() - start_time, 2)
-                        return OutboundMessage(
-                            session_key=msg.session_key,
-                            content=response_text,
-                            metadata=msg.metadata,
-                            time_cost=time_cost,
+                        if decision.route != IntentRoute.AGENT:
+                            if (
+                                should_attempt_guided_questions(msg.content, decision)
+                                and self._has_kb_fast_batch_tools()
+                            ):
+                                guided_questions = []
+
+                                async def search_for_guidance(query: str, limit: int) -> str:
+                                    result, _duration_ms = await self._execute_fast_batch_tool(
+                                        tool_name="openviking_search",
+                                        arguments={
+                                            "query": query,
+                                            "target_uri": "viking://resources/",
+                                            "limit": limit,
+                                        },
+                                        session_key=msg.session_key,
+                                        sender_id=msg.sender_id,
+                                    )
+                                    return result
+
+                                try:
+                                    guided_questions = await build_guided_questions(
+                                        provider=self.provider,
+                                        generation_model=self.model,
+                                        classifier_model=self.fast_model,
+                                        user_message=msg.content,
+                                        history=session.get_history(),
+                                        session_id=session_key.safe_name(),
+                                        search=search_for_guidance,
+                                        token_secret=self._guided_question_token_secret,
+                                    )
+                                except Exception as guided_exc:
+                                    logger.info(
+                                        f"[GuidedQuestions] suggestion generation skipped: {guided_exc}",
+                                        exc_info=True,
+                                    )
+
+                                if guided_questions:
+                                    response_text = self._guided_question_response_text(msg.content)
+                                    guided_question_items = [
+                                        question.to_dict() for question in guided_questions
+                                    ]
+                                    await self._persist_session_turn(
+                                        session,
+                                        msg,
+                                        response_text,
+                                        assistant_metadata={"guided_questions": guided_question_items},
+                                    )
+                                    await self._publish_missing_response_delta_events(
+                                        session_key=msg.session_key,
+                                        final_content=response_text,
+                                        publish_events=should_stream_response,
+                                    )
+                                    response_metadata = dict(msg.metadata or {})
+                                    response_metadata["guided_questions"] = guided_question_items
+
+                                    time_cost = round(time.time() - start_time, 2)
+                                    return OutboundMessage(
+                                        session_key=msg.session_key,
+                                        content=response_text,
+                                        metadata=response_metadata,
+                                        time_cost=time_cost,
+                                    )
+
+                            # Non-retrieval route: generate a direct response
+                            response_text = await generate_route_response(
+                                provider=self.provider,
+                                model=self.model,
+                                route_label=decision.label,
+                                user_message=msg.content,
+                                history=session.get_history(),
+                                session_id=session_key.safe_name(),
+                                on_delta=self._make_response_delta_callback(
+                                    session_key=msg.session_key,
+                                    publish_events=should_stream_response,
+                                ),
+                            )
+                            response_text = self._normalize_final_output_text(response_text)
+                            await self._persist_session_turn(session, msg, response_text)
+                            await self._publish_missing_response_delta_events(
+                                session_key=msg.session_key,
+                                final_content=response_text,
+                                publish_events=should_stream_response,
+                            )
+
+                            time_cost = round(time.time() - start_time, 2)
+                            return OutboundMessage(
+                                session_key=msg.session_key,
+                                content=response_text,
+                                metadata=msg.metadata,
+                                time_cost=time_cost,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"[IntentRouter] Classification failed, falling back to agent loop: {e}",
+                            exc_info=True,
                         )
-                except Exception as e:
-                    logger.warning(
-                        f"[IntentRouter] Classification failed, falling back to agent loop: {e}",
-                        exc_info=True,
-                    )
-                    self._consume_streamed_response_text(msg.session_key)
+                        self._consume_streamed_response_text(msg.session_key)
 
             # Build initial messages (use get_history for LLM-formatted messages)
             messages = await message_context.build_messages(

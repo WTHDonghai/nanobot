@@ -433,6 +433,7 @@ class LocalClient(BaseClient):
         parts: Optional[List[Dict[str, Any]]] = None,
         created_at: Optional[str] = None,
         token_usage: Optional[Dict[str, int]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
@@ -473,6 +474,7 @@ class LocalClient(BaseClient):
             message_parts,
             created_at=msg_created_at,
             token_usage=token_usage,
+            metadata=metadata,
         )
         return {
             "session_id": session_id,

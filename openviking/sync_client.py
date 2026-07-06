@@ -72,6 +72,7 @@ class SyncOpenViking:
         content: str | None = None,
         parts: list[dict] | None = None,
         token_usage: dict[str, int] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
@@ -90,6 +91,7 @@ class SyncOpenViking:
                 content,
                 parts,
                 token_usage=token_usage,
+                metadata=metadata,
             )
         )
 

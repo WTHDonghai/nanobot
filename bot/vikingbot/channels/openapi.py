@@ -64,6 +64,7 @@ class PendingResponse:
     def __init__(self):
         self.events: List[Dict[str, Any]] = []
         self.final_content: Optional[str] = None
+        self.suggestions: List[Dict[str, Any]] = []
         self.event = asyncio.Event()
         self.stream_queue: asyncio.Queue[Optional[ChatStreamEvent]] = asyncio.Queue()
 
@@ -77,6 +78,10 @@ class PendingResponse:
         """Set the final response content."""
         self.final_content = content
         self.event.set()
+
+    def set_suggestions(self, suggestions: list[dict[str, Any]]):
+        """Store verified suggestions for non-streaming responses."""
+        self.suggestions = suggestions
 
     async def close_stream(self):
         """Close the stream queue."""
@@ -185,6 +190,39 @@ class OpenAPIChannel(BaseChannel):
             )
         return result
 
+    @staticmethod
+    def _extract_guided_questions(metadata: dict[str, Any] | None) -> list[dict[str, Any]]:
+        raw_items = (metadata or {}).get("guided_questions")
+        if not isinstance(raw_items, list):
+            return []
+        suggestions: list[dict[str, Any]] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                continue
+            display_text = str(raw_item.get("display_text") or "").strip()
+            canonical_question = str(raw_item.get("canonical_question") or "").strip()
+            token = str(raw_item.get("token") or "").strip()
+            if not display_text or not canonical_question or not token:
+                continue
+            source_uris = raw_item.get("source_uris")
+            suggestions.append(
+                {
+                    "id": str(raw_item.get("id") or "").strip(),
+                    "display_text": display_text,
+                    "canonical_question": canonical_question,
+                    "token": token,
+                    "source_uris": [
+                        str(uri).strip()
+                        for uri in source_uris
+                        if str(uri).strip()
+                    ]
+                    if isinstance(source_uris, list)
+                    else [],
+                    "confidence": str(raw_item.get("confidence") or "medium").strip() or "medium",
+                }
+            )
+        return suggestions
+
     async def send(self, msg: OutboundMessage) -> None:
         """
         Handle outbound messages - routes to pending responses.
@@ -200,7 +238,11 @@ class OpenAPIChannel(BaseChannel):
         if msg.event_type == OutboundEventType.RESPONSE:
             # Rewrite send:// image references before delivering to clients
             content = self._replace_bot_resource_links(msg.content or "")
+            suggestions = self._extract_guided_questions(msg.metadata)
             await pending.add_event("response", content)
+            if suggestions:
+                pending.set_suggestions(suggestions)
+                await pending.add_event("suggestions", suggestions)
             pending.set_final(content)
             await pending.close_stream()
         elif msg.event_type == OutboundEventType.RESPONSE_DELTA:
@@ -529,13 +571,15 @@ class OpenAPIChannel(BaseChannel):
             if request.context:
                 # Context is handled separately by session manager
                 pass
+            metadata = dict(request.metadata or {})
+            metadata["openviking_session_id"] = session_id
 
             # Create and publish inbound message
             msg = InboundMessage(
                 session_key=session_key,
                 sender_id=user_id,
                 content=content,
-                metadata={"openviking_session_id": session_id},
+                metadata=metadata,
             )
 
             await self.bus.publish_inbound(msg)
@@ -553,6 +597,7 @@ class OpenAPIChannel(BaseChannel):
                 session_id=session_id,
                 message=response_content,
                 events=pending.events if pending.events else None,
+                suggestions=pending.suggestions,
             )
 
         except HTTPException:
@@ -597,12 +642,14 @@ class OpenAPIChannel(BaseChannel):
                     channel_id=self.config.channel_id(),
                     chat_id=session_id,
                 )
+                metadata = dict(request.metadata or {})
+                metadata["openviking_session_id"] = session_id
 
                 msg = InboundMessage(
                     session_key=session_key,
                     sender_id=user_id,
                     content=request.message,
-                    metadata={"openviking_session_id": session_id},
+                    metadata=metadata,
                 )
 
                 await self.bus.publish_inbound(msg)

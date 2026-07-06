@@ -168,6 +168,7 @@ class AsyncOpenViking:
         parts: list[dict] | None = None,
         created_at: str | None = None,
         token_usage: dict[str, int] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Add a message to a session.
 
@@ -188,6 +189,7 @@ class AsyncOpenViking:
             parts=parts,
             created_at=created_at,
             token_usage=token_usage,
+            metadata=metadata,
         )
 
     async def commit_session(
