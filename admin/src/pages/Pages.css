@@ -56,6 +56,9 @@ code { font-family: monospace; font-size: 0.9em; background: rgba(255,255,255,0.
 .session-row { cursor: pointer; }
 .session-row.active td { background: rgba(99,102,241,0.08); }
 .session-table-metric { display: inline-flex; min-width: 20px; margin-right: 8px; }
+.session-feedback-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 6px; min-width: 0; }
+.session-feedback-cell .session-table-metric { margin-right: 0; }
+.session-feedback-primary { color: var(--text); font-weight: 600; white-space: nowrap; }
 .session-highlight, .markdown-search-highlight { background: rgba(245,158,11,0.46); color: var(--text); border-radius: 3px; padding: 0 2px; box-shadow: 0 0 0 1px rgba(245,158,11,0.24); }
 .session-list-table { overflow-x: auto; }
 .session-list-table table { min-width: 920px; }
@@ -345,9 +348,19 @@ code { font-family: monospace; font-size: 0.9em; background: rgba(255,255,255,0.
 }
 
 /* Workspace overview */
-.overview-kpi-grid { grid-template-columns: repeat(4, minmax(180px, 1fr)); }
+.overview-kpi-grid { grid-template-columns: repeat(4, minmax(180px, 1fr)); margin-bottom: 12px; }
 .value-stat-card { min-width: 0; }
 .stat-caption { color: var(--muted); font-size: 0.78rem; line-height: 1.45; margin-top: 10px; }
+.overview-quality-section { margin-bottom: 24px; }
+.overview-quality-section .section-title { margin-bottom: 10px; }
+.overview-quality-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.overview-quality-card { min-width: 0; display: grid; gap: 5px; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: rgba(255,255,255,0.025); color: inherit; text-decoration: none; }
+.overview-quality-card:hover { border-color: rgba(99,102,241,0.45); background: rgba(255,255,255,0.04); }
+.overview-quality-card span { color: var(--muted); font-size: 0.74rem; }
+.overview-quality-card strong { color: var(--text); font-size: 1.1rem; line-height: 1.1; font-weight: 700; overflow-wrap: anywhere; }
+.overview-quality-card small { color: var(--muted); font-size: 0.76rem; line-height: 1.35; overflow-wrap: anywhere; }
+.overview-quality-card.success strong { color: var(--success); }
+.overview-quality-card.warning strong { color: var(--warning); }
 .overview-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); gap: 16px; align-items: start; margin-bottom: 24px; }
 .overview-main, .overview-side { min-width: 0; }
 .overview-trend-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
@@ -426,7 +439,7 @@ code { font-family: monospace; font-size: 0.9em; background: rgba(255,255,255,0.
 .daily-action-link.danger { color: #fca5a5; border-color: rgba(239,68,68,0.32); background: rgba(239,68,68,0.09); }
 .daily-action-link.warning { color: #fcd34d; border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.08); }
 .daily-action-link.neutral { color: #93c5fd; border-color: rgba(59,130,246,0.3); background: rgba(59,130,246,0.08); }
-.overview-status-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
+.overview-status-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 16px; }
 .overview-status-strip div { min-width: 0; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: rgba(255,255,255,0.025); }
 .overview-status-strip span { display: block; color: var(--muted); font-size: 0.74rem; margin-bottom: 5px; }
 .overview-status-strip strong { color: var(--text); font-size: 0.9rem; font-weight: 600; overflow-wrap: anywhere; }
@@ -435,6 +448,7 @@ code { font-family: monospace; font-size: 0.9em; background: rgba(255,255,255,0.
 
 @media (max-width: 1120px) {
   .overview-kpi-grid { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
+  .overview-quality-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .overview-grid { grid-template-columns: 1fr; }
   .overview-trend-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .daily-drilldown { grid-template-columns: 1fr; }
@@ -443,6 +457,7 @@ code { font-family: monospace; font-size: 0.9em; background: rgba(255,255,255,0.
 
 @media (max-width: 680px) {
   .overview-kpi-grid { grid-template-columns: 1fr; }
+  .overview-quality-strip { grid-template-columns: 1fr; }
   .overview-trend-grid { grid-template-columns: 1fr; }
   .daily-picker-head { flex-direction: column; }
   .date-range-controls { grid-template-columns: 1fr; }

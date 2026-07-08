@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { fetchApi } from '../services/api';
+import { feedbackMetricRates, formatFeedbackRate } from './feedbackMetrics';
 import './Pages.css';
 
 type TokenUsage = {
@@ -61,12 +62,6 @@ const toolSuccessRate = (row: Pick<DailyAnalyticsRow, 'tool_call_count' | 'faile
   row.tool_call_count > 0
     ? ((row.tool_call_count - row.failed_tool_call_count) / row.tool_call_count) * 100
     : 100
-);
-
-const satisfactionRate = (row?: Pick<DailyAnalyticsRow, 'feedback_count' | 'positive_feedback_count'> | null) => (
-  row && row.feedback_count > 0
-    ? (row.positive_feedback_count / row.feedback_count) * 100
-    : 0
 );
 
 const formatShortDate = (value: string) => value.slice(5) || value;
@@ -591,6 +586,26 @@ const ValueStatCard: React.FC<{
   );
 };
 
+const feedbackReplyCaption = (numerator: number, denominator: number, suffix: string) => (
+  denominator > 0
+    ? `${formatNumber(numerator)} / ${formatNumber(denominator)} 条回复${suffix}`
+    : '暂无自动响应作为分母'
+);
+
+const QualitySignalCard: React.FC<{
+  label: string;
+  value: string;
+  caption: string;
+  tone?: 'success' | 'warning';
+  to: string;
+}> = ({ label, value, caption, tone, to }) => (
+  <Link className={`overview-quality-card ${tone || ''}`} to={to}>
+    <span>{label}</span>
+    <strong>{value}</strong>
+    <small>{caption}</small>
+  </Link>
+);
+
 const RootDashboard: React.FC = () => {
   const { serverUrl, apiKey } = useAuth();
   const [data, setData] = useState<any>({ accounts: [], health: {}, ready: {} });
@@ -749,7 +764,6 @@ const TenantDashboard: React.FC = () => {
   const feedbackCount = totals?.feedback_count || 0;
   const positiveFeedbackCount = totals?.positive_feedback_count || 0;
   const negativeFeedbackCount = totals?.negative_feedback_count || 0;
-  const totalSatisfactionRate = satisfactionRate(totals);
   const avgTurnsPerSession = sessionCount
     ? ((totals?.user_message_count || 0) / sessionCount).toFixed(1)
     : '0';
@@ -757,6 +771,7 @@ const TenantDashboard: React.FC = () => {
   const activeUsers = totals?.active_users || 0;
   const userQuestions = totals?.user_message_count || 0;
   const assistantReplies = totals?.assistant_message_count || 0;
+  const totalFeedbackMetrics = feedbackMetricRates(totals);
   const totalToolSuccessRate = toolCallCount ? ((toolCallCount - failedToolCount) / toolCallCount) * 100 : 100;
   const avgQuestionsPerUser = safeDivide(userQuestions, activeUsers);
   const latestDaily = [...daily].reverse().find((row) => row.session_count > 0) || daily[daily.length - 1] || null;
@@ -768,7 +783,7 @@ const TenantDashboard: React.FC = () => {
   const selectedDailyFailedTools = selectedDaily?.failed_tool_call_count || 0;
   const selectedDailyFeedback = selectedDaily?.feedback_count || 0;
   const selectedDailyNegativeFeedback = selectedDaily?.negative_feedback_count || 0;
-  const selectedDailySatisfactionRate = satisfactionRate(selectedDaily);
+  const selectedDailyFeedbackMetrics = feedbackMetricRates(selectedDaily);
   const selectedDailySuccessRate = selectedDaily ? toolSuccessRate(selectedDaily) : 100;
 
   return (
@@ -794,19 +809,61 @@ const TenantDashboard: React.FC = () => {
           to={sessionHref({ from_date: fromDate, to_date: toDate, sort_by: 'message_count', sort_order: 'desc' })}
         />
         <ValueStatCard
-          label="满意率"
-          value={feedbackCount ? formatPercent(totalSatisfactionRate) : '-'}
-          caption={`${formatNumber(feedbackCount)} 条反馈，${formatNumber(negativeFeedbackCount)} 条倒赞`}
+          label="显式好评率"
+          value={formatFeedbackRate(totalFeedbackMetrics.explicitPositiveRate)}
+          caption={feedbackCount > 0
+            ? `${formatNumber(positiveFeedbackCount)} / ${formatNumber(feedbackCount)} 条反馈为赞`
+            : `暂无反馈，${formatNumber(assistantReplies)} 条自动响应`}
           tone={negativeFeedbackCount > 0 ? 'warning' : feedbackCount > 0 ? 'success' : undefined}
-          to={feedbackCount > 0 ? sessionHref({
+          to={sessionHref({
             from_date: fromDate,
             to_date: toDate,
-            sort_by: negativeFeedbackCount > 0 ? 'negative_feedback_count' : 'feedback_count',
+            sort_by: 'feedback_count',
             sort_order: 'desc',
-          }) : undefined}
+          })}
         />
       </div>
 
+      <section className="overview-quality-section" aria-labelledby="overview-quality-heading">
+        <div className="section-title" id="overview-quality-heading">质量信号</div>
+        <div className="overview-quality-strip">
+          <QualitySignalCard
+            label="反馈覆盖率"
+            value={formatFeedbackRate(totalFeedbackMetrics.feedbackCoverageRate)}
+            caption={feedbackReplyCaption(feedbackCount, assistantReplies, '有反馈')}
+            to={sessionHref({
+              from_date: fromDate,
+              to_date: toDate,
+              sort_by: 'feedback_count',
+              sort_order: 'desc',
+            })}
+          />
+          <QualitySignalCard
+            label="倒赞率"
+            value={formatFeedbackRate(totalFeedbackMetrics.negativeFeedbackRate)}
+            caption={feedbackReplyCaption(negativeFeedbackCount, assistantReplies, '收到倒赞')}
+            tone={negativeFeedbackCount > 0 ? 'warning' : undefined}
+            to={sessionHref({
+              from_date: fromDate,
+              to_date: toDate,
+              sort_by: 'negative_feedback_count',
+              sort_order: 'desc',
+            })}
+          />
+          <QualitySignalCard
+            label="赞赏率"
+            value={formatFeedbackRate(totalFeedbackMetrics.appreciationRate)}
+            caption={feedbackReplyCaption(positiveFeedbackCount, assistantReplies, '收到赞')}
+            tone={positiveFeedbackCount > 0 ? 'success' : undefined}
+            to={sessionHref({
+              from_date: fromDate,
+              to_date: toDate,
+              sort_by: 'positive_feedback_count',
+              sort_order: 'desc',
+            })}
+          />
+        </div>
+      </section>
 
       <div className="daily-drilldown">
         <div className="daily-picker-panel">
@@ -958,7 +1015,8 @@ const TenantDashboard: React.FC = () => {
                 <div><span>承接问题</span><strong>{formatNumber(selectedDaily.user_message_count)}</strong></div>
                 <div><span>自动响应</span><strong>{formatNumber(selectedDaily.assistant_message_count)}</strong></div>
                 <div><span>工具成功率</span><strong className={selectedDailyFailedTools > 0 ? 'warning' : 'success'}>{selectedDailyToolCalls ? formatPercent(selectedDailySuccessRate) : '-'}</strong></div>
-                <div><span>满意率</span><strong className={selectedDailyNegativeFeedback > 0 ? 'warning' : selectedDailyFeedback > 0 ? 'success' : ''}>{selectedDailyFeedback ? formatPercent(selectedDailySatisfactionRate) : '-'}</strong></div>
+                <div><span>显式好评率</span><strong className={selectedDailyNegativeFeedback > 0 ? 'warning' : selectedDailyFeedback > 0 ? 'success' : ''}>{formatFeedbackRate(selectedDailyFeedbackMetrics.explicitPositiveRate)}</strong></div>
+                <div><span>反馈覆盖率</span><strong>{formatFeedbackRate(selectedDailyFeedbackMetrics.feedbackCoverageRate)}</strong></div>
                 <div><span>Token / 问题</span><strong>{formatNumber(Math.round(safeDivide(selectedDailyTokens, selectedDailyQuestions)))}</strong></div>
               </div>
 
@@ -1012,16 +1070,8 @@ const TenantDashboard: React.FC = () => {
 
       <div className="overview-status-strip" aria-label="工作区运行状态">
         <div>
-          <span>区间活跃用户</span>
-          <strong>{formatNumber(totals?.active_users)}</strong>
-        </div>
-        <div>
           <span>工具成功率</span>
           <strong className={failedToolCount > 0 ? 'warning' : 'success'}>{toolCallCount ? formatPercent(totalToolSuccessRate) : '-'}</strong>
-        </div>
-        <div>
-          <span>有效反馈</span>
-          <strong>{formatNumber(positiveFeedbackCount)} 赞 / {formatNumber(negativeFeedbackCount)} 倒赞</strong>
         </div>
         <div>
           <span>模型连接</span>

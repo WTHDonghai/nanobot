@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import MarkdownRenderer from '../components/markdown/MarkdownRenderer';
 import { fetchApi } from '../services/api';
 import { AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bot, Check, Copy, Eye, MessageSquare, RefreshCw, Search, ThumbsDown, ThumbsUp, Wrench, X } from 'lucide-react';
+import { feedbackMetricRates, formatFeedbackRate } from './feedbackMetrics';
 import './Pages.css';
 
 type TokenUsage = {
@@ -198,6 +199,12 @@ const parseSessionUrlState = (params: URLSearchParams) => {
 const browserTimeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
 const formatNumber = (value: number | undefined) => Number(value || 0).toLocaleString();
+const formatOptionalCount = (value: number | undefined) => (
+  typeof value === 'number' ? formatNumber(value) : '-'
+);
+const formatReplyRatio = (numerator: number, denominator: number | undefined) => (
+  `${formatNumber(numerator)} / ${formatOptionalCount(denominator)} 回复`
+);
 
 const formatTime = (value?: string) => {
   if (!value) return '-';
@@ -234,14 +241,6 @@ const messageText = (message: SessionMessage) => {
 };
 
 const tokenTotal = (usage?: TokenUsage) => usage?.total_tokens || 0;
-
-const satisfactionRate = (item?: Pick<SessionSummary, 'feedback_count' | 'positive_feedback_count'> | null) => (
-  item && (item.feedback_count || 0) > 0
-    ? ((item.positive_feedback_count || 0) / (item.feedback_count || 1)) * 100
-    : 0
-);
-
-const formatPercent = (value: number) => `${value.toFixed(value >= 10 ? 0 : 1)}%`;
 
 const partString = (part: Record<string, unknown>, key: string) => {
   const value = part[key];
@@ -807,6 +806,7 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
   const rawJson = useMemo(() => detail ? JSON.stringify(detail, null, 2) : '', [detail]);
   const feedbackCount = detail?.feedback_count || 0;
   const negativeFeedbackCount = detail?.negative_feedback_count || 0;
+  const detailFeedbackMetrics = feedbackMetricRates(detail);
   const filterOptions = useMemo(() => [
     { value: 'all' as const, label: '全部', count: messages.length || detail?.message_count || 0, show: true },
     { value: 'matches' as const, label: '命中', count: matchedCount, show: Boolean(normalizedQuery) },
@@ -854,9 +854,10 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
             <div className="session-meta-grid">
               <div><span>消息</span><strong>{formatNumber(detail.message_count)}</strong></div>
               <div><span>用户问题</span><strong>{formatNumber(detail.user_message_count)}</strong></div>
-              <div><span>Agent 回复</span><strong>{formatNumber(detail.assistant_message_count)}</strong></div>
+              <div><span>Agent 回复</span><strong>{formatOptionalCount(detail.assistant_message_count)}</strong></div>
               <div><span>工具失败</span><strong>{formatNumber(detail.failed_tool_call_count)}</strong></div>
-              <div><span>满意率</span><strong className={negativeFeedbackCount > 0 ? 'warning' : feedbackCount > 0 ? 'success' : ''}>{feedbackCount ? formatPercent(satisfactionRate(detail)) : '-'}</strong></div>
+              <div><span>显式好评率</span><strong className={negativeFeedbackCount > 0 ? 'warning' : feedbackCount > 0 ? 'success' : ''}>{formatFeedbackRate(detailFeedbackMetrics.explicitPositiveRate)}</strong></div>
+              <div><span>反馈覆盖率</span><strong>{formatFeedbackRate(detailFeedbackMetrics.feedbackCoverageRate)}</strong></div>
               <div><span>Token</span><strong>{formatNumber(tokenTotal(detail.token_usage))}</strong></div>
               <div><span>会话跨度</span><strong>{formatDuration(detail.first_message_at || detail.created_at, detail.last_message_at || detail.updated_at)}</strong></div>
             </div>
@@ -1406,13 +1407,15 @@ const Sessions: React.FC = () => {
         <table>
           <thead>
             <tr>
-              <th>User ID</th><th>Session ID</th><th>最后活跃</th><th>消息</th><th>反馈</th><th>工具</th><th>Token</th><th>操作</th>
+              <th>User ID</th><th>Session ID</th><th>最后活跃</th><th>消息</th><th>反馈指标</th><th>工具</th><th>Token</th><th>操作</th>
             </tr>
           </thead>
           <tbody className={loading && sessions.length > 0 ? 'loading-fade' : ''}>
             {sessions.length > 0 ? sessions.map((session) => {
               const feedbackCount = session.feedback_count || 0;
               const negativeFeedbackCount = session.negative_feedback_count || 0;
+              const positiveFeedbackCount = session.positive_feedback_count || 0;
+              const sessionFeedbackMetrics = feedbackMetricRates(session);
               return (
               <tr
                 className={`session-row ${detail?.session_id === session.session_id && detail?.user_id === session.user_id ? 'active' : ''}`}
@@ -1452,16 +1455,17 @@ const Sessions: React.FC = () => {
                 </td>
                 <td>
                   {feedbackCount > 0 ? (
-                    <>
-                      <span className="session-table-metric">{formatPercent(satisfactionRate(session))}</span>
+                    <div className="session-feedback-cell">
+                      <span className="session-table-metric session-feedback-primary">显式好评 {formatFeedbackRate(sessionFeedbackMetrics.explicitPositiveRate)}</span>
+                      <span className="quality-chip neutral compact">覆盖 {formatReplyRatio(feedbackCount, session.assistant_message_count)}</span>
                       {negativeFeedbackCount > 0 ? (
-                        <span className="quality-chip warning compact">{formatNumber(negativeFeedbackCount)} 倒赞</span>
+                        <span className="quality-chip warning compact">倒赞 {formatReplyRatio(negativeFeedbackCount, session.assistant_message_count)}</span>
                       ) : (
-                        <span className="quality-chip success compact">{formatNumber(feedbackCount)} 赞</span>
+                        <span className="quality-chip success compact">赞 {formatReplyRatio(positiveFeedbackCount, session.assistant_message_count)}</span>
                       )}
-                    </>
+                    </div>
                   ) : (
-                    <span className="muted-text">-</span>
+                    <span className="muted-text">暂无反馈</span>
                   )}
                 </td>
                 <td>
