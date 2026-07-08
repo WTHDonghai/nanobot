@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
-  Eye,
   RefreshCw,
   Save,
   Search,
@@ -531,10 +530,10 @@ const AdminMemories: React.FC = () => {
                     <td>
                       <div className="td-actions">
                         <button
-                          className="btn btn-ghost btn-sm"
+                          className="btn btn-ghost btn-sm list-action-btn"
                           onClick={(e) => { e.stopPropagation(); openDetail(item); }}
                         >
-                          <Eye size={14} /> 查看详情
+                          详情
                         </button>
                       </div>
                     </td>

@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import MarkdownRenderer from '../components/markdown/MarkdownRenderer';
 import { fetchApi } from '../services/api';
-import { AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bot, Check, Copy, Eye, MessageSquare, RefreshCw, Search, ThumbsDown, ThumbsUp, Wrench, X } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bot, Check, Copy, MessageSquare, RefreshCw, Search, ThumbsDown, ThumbsUp, Wrench, X } from 'lucide-react';
 import { feedbackMetricRates, formatFeedbackRate } from './feedbackMetrics';
 import './Pages.css';
 
@@ -203,7 +203,7 @@ const formatOptionalCount = (value: number | undefined) => (
   typeof value === 'number' ? formatNumber(value) : '-'
 );
 const formatReplyRatio = (numerator: number, denominator: number | undefined) => (
-  `${formatNumber(numerator)} / ${formatOptionalCount(denominator)} 回复`
+  `${formatNumber(numerator)}/${formatOptionalCount(denominator)}`
 );
 
 const formatTime = (value?: string) => {
@@ -297,7 +297,12 @@ const writeClipboardText = async (text: string) => {
   }
 };
 
-const CopyButton: React.FC<{ text: string }> = ({ text }) => {
+const CopyButton: React.FC<{
+  text: string;
+  className?: string;
+  iconOnly?: boolean;
+  title?: string;
+}> = ({ text, className = 'code-copy-btn', iconOnly = false, title = '复制内容' }) => {
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
   const resetTimerRef = useRef<number | null>(null);
 
@@ -331,16 +336,36 @@ const CopyButton: React.FC<{ text: string }> = ({ text }) => {
 
   return (
     <button
-      className={`btn btn-ghost btn-sm code-copy-btn ${copied ? 'copied' : ''} ${failed ? 'failed' : ''}`}
+      className={`btn btn-ghost btn-sm ${className} ${copied ? 'copied' : ''} ${failed ? 'failed' : ''}`}
       onClick={handleCopy}
-      title={failed ? '复制失败' : '复制内容'}
+      title={failed ? '复制失败' : title}
+      aria-label={failed ? '复制失败' : title}
       type="button"
     >
       {copied ? <Check size={12} /> : <Copy size={12} />}
-      <span>{copied ? '已复制' : failed ? '失败' : '复制'}</span>
+      {!iconOnly && <span>{copied ? '已复制' : failed ? '失败' : '复制'}</span>}
     </button>
   );
 };
+
+const compactIdentifier = (value: string, head = 10, tail = 6) => {
+  if (value.length <= head + tail + 3) return value;
+  return `${value.slice(0, head)}...${value.slice(-tail)}`;
+};
+
+const CompactValue = ({
+  value,
+  head,
+  tail,
+}: {
+  value: string;
+  head?: number;
+  tail?: number;
+}) => (
+  <span className="session-compact-value" title={value}>
+    <code>{compactIdentifier(value, head, tail)}</code>
+  </span>
+);
 
 const toolStatus = (tool: Record<string, unknown>) => partString(tool, 'tool_status') || 'unknown';
 
@@ -731,6 +756,33 @@ const ConfirmModal = ({ message, onConfirm, onCancel }: {
         <button className="btn btn-danger" onClick={onConfirm}>确认删除</button>
       </div>
     </div>
+  </div>
+);
+
+const SessionRowActions = ({
+  session,
+  onOpen,
+  onDelete,
+}: {
+  session: SessionSummary;
+  onOpen: (session: SessionSummary) => void;
+  onDelete: (session: SessionSummary) => void;
+}) => (
+  <div className="session-actions-inline" onClick={(e) => e.stopPropagation()}>
+    <button
+      className="btn btn-ghost btn-sm list-action-btn session-action-btn"
+      onClick={() => onOpen(session)}
+      type="button"
+    >
+      详情
+    </button>
+    <button
+      className="btn btn-danger btn-sm list-action-btn session-action-btn"
+      onClick={() => onDelete(session)}
+      type="button"
+    >
+      删除
+    </button>
   </div>
 );
 
@@ -1404,10 +1456,11 @@ const Sessions: React.FC = () => {
             </select>
           </div>
         </div>
+        <div className="session-table-scroll">
         <table>
           <thead>
             <tr>
-              <th>User ID</th><th>Session ID</th><th>最后活跃</th><th>消息</th><th>反馈指标</th><th>工具</th><th>Token</th><th>操作</th>
+              <th>会话</th><th>最后活跃</th><th>消息</th><th>反馈指标</th><th>工具</th><th>Token</th><th>操作</th>
             </tr>
           </thead>
           <tbody className={loading && sessions.length > 0 ? 'loading-fade' : ''}>
@@ -1433,21 +1486,14 @@ const Sessions: React.FC = () => {
                 tabIndex={0}
                 aria-selected={detail?.session_id === session.session_id && detail?.user_id === session.user_id}
               >
-                <td><code>{session.user_id}</code></td>
                 <td>
-                  <code>{session.session_id}</code>
-                  {tokenTotal(session.token_usage) >= 50000 && (
-                    <span className="quality-chip warning compact" style={{ marginLeft: 6 }}>高 Token</span>
-                  )}
-                  {negativeFeedbackCount > 0 && (
-                    <span className="quality-chip warning compact" style={{ marginLeft: 6 }}>倒赞</span>
-                  )}
-                  {(session.message_count || 0) >= 20 && (
-                    <span className="quality-chip neutral compact" style={{ marginLeft: 6 }}>长会话</span>
-                  )}
+                  <div className="session-identity-cell">
+                    <CompactValue value={session.session_id} head={8} tail={6} />
+                    <span title={session.user_id}>{compactIdentifier(session.user_id, 16, 4)}</span>
+                  </div>
                 </td>
-                <td>{formatTime(session.last_message_at || session.updated_at || session.created_at)}</td>
-                <td>
+                <td className="session-time-cell">{formatTime(session.last_message_at || session.updated_at || session.created_at)}</td>
+                <td className="session-count-cell">
                   <span className="session-table-metric">{formatNumber(session.message_count)}</span>
                   {query.trim() && typeof session.matched_message_count === 'number' && (
                     <span className="quality-chip neutral compact">命中 {formatNumber(session.matched_message_count)}</span>
@@ -1456,39 +1502,43 @@ const Sessions: React.FC = () => {
                 <td>
                   {feedbackCount > 0 ? (
                     <div className="session-feedback-cell">
-                      <span className="session-table-metric session-feedback-primary">显式好评 {formatFeedbackRate(sessionFeedbackMetrics.explicitPositiveRate)}</span>
+                      <span className={`quality-chip compact ${negativeFeedbackCount > 0 ? 'warning' : 'success'}`}>好评 {formatFeedbackRate(sessionFeedbackMetrics.explicitPositiveRate)}</span>
                       <span className="quality-chip neutral compact">覆盖 {formatReplyRatio(feedbackCount, session.assistant_message_count)}</span>
-                      {negativeFeedbackCount > 0 ? (
-                        <span className="quality-chip warning compact">倒赞 {formatReplyRatio(negativeFeedbackCount, session.assistant_message_count)}</span>
-                      ) : (
-                        <span className="quality-chip success compact">赞 {formatReplyRatio(positiveFeedbackCount, session.assistant_message_count)}</span>
-                      )}
+                      <span className={`quality-chip compact ${positiveFeedbackCount > 0 ? 'success' : 'neutral'}`}>赞 {formatNumber(positiveFeedbackCount)}</span>
+                      <span className={`quality-chip compact ${negativeFeedbackCount > 0 ? 'warning' : 'neutral'}`}>倒赞 {formatNumber(negativeFeedbackCount)}</span>
                     </div>
                   ) : (
-                    <span className="muted-text">暂无反馈</span>
+                    <span className="quality-chip neutral compact">暂无反馈</span>
                   )}
                 </td>
-                <td>
+                <td className="session-count-cell">
                   <span className="session-table-metric">{formatNumber(session.tool_call_count)}</span>
                   {(session.failed_tool_call_count || 0) > 0 && (
                     <span className="quality-chip danger compact">{formatNumber(session.failed_tool_call_count)} 失败</span>
                   )}
                 </td>
-                <td>{formatNumber(tokenTotal(session.token_usage))}</td>
+                <td className="session-number-cell">{formatNumber(tokenTotal(session.token_usage))}</td>
                 <td className="td-actions">
-                  <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); openDetail(session); }}><Eye size={14} /> 查看</button>
-                  <button className="btn btn-danger btn-sm" onClick={(e) => { e.stopPropagation(); setDeleteTarget(session); }}>删除</button>
+                  <SessionRowActions
+                    session={session}
+                    onOpen={openDetail}
+                    onDelete={setDeleteTarget}
+                  />
                 </td>
               </tr>
             ); }) : (
               <tr>
-                <td colSpan={8} className="empty">
-                  {loading ? '正在读取会话列表...' : (selectedAcc ? '暂无会话' : '请先选择账号')}
+                <td colSpan={7}>
+                  <div className={`session-table-state ${loading ? '' : 'session-table-empty'}`}>
+                    {loading && <div className="loader" />}
+                    <span>{loading ? '正在读取会话列表' : (selectedAcc ? '暂无会话' : '请先选择账号')}</span>
+                  </div>
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+        </div>
         <div className="session-pagination">
           <div className="muted-text">
             {sessionTotal > 0

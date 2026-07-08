@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { fetchApi } from '../services/api';
-import { Plus, Trash2, Key, ChevronDown, ChevronRight, Copy, Check, AlertTriangle } from 'lucide-react';
+import { Plus, ChevronDown, ChevronRight, Copy, Check, AlertTriangle } from 'lucide-react';
 import './Pages.css';
 
 // ─── Generic Modal ────────────────────────────────────────────────────────────
@@ -113,12 +113,11 @@ const UserRow = ({ accountId, user, onRefresh, onError, serverUrl, apiKey }: any
 
   return (
     <>
-      <tr>
+      <tr className="account-user-row">
         <td><code>{user.user_id}</code></td>
         <td>
           <select
-            className="select"
-            style={{ width: 'auto', padding: '6px 10px', fontSize: '0.8rem' }}
+            className="select account-role-select"
             value={user.role}
             onChange={(e) => handleSetRole(e.target.value)}
             disabled={loading === 'role'}
@@ -128,12 +127,12 @@ const UserRow = ({ accountId, user, onRefresh, onError, serverUrl, apiKey }: any
             <option value="root">root</option>
           </select>
         </td>
-        <td className="td-actions">
-          <button className="btn btn-ghost btn-sm" onClick={handleRegenKey} disabled={loading === 'regen'} title="重置 Key">
-            <Key size={14} />
+        <td className="td-actions account-action-cell">
+          <button className="btn btn-ghost btn-sm list-action-btn" onClick={handleRegenKey} disabled={loading === 'regen'} title="重置 Key">
+            重置 Key
           </button>
-          <button className="btn btn-danger btn-sm" onClick={handleDelete} disabled={loading === 'delete'} title="删除用户">
-            <Trash2 size={14} />
+          <button className="btn btn-danger btn-sm list-action-btn" onClick={handleDelete} disabled={loading === 'delete'} title="删除用户">
+            删除
           </button>
         </td>
       </tr>
@@ -210,30 +209,30 @@ const AccountRow = ({ account, onRefresh, onError, serverUrl, apiKey }: any) => 
 
   return (
     <>
-      <tr>
-        <td>
-          <button className="btn btn-ghost btn-sm" onClick={() => setExpanded(!expanded)} style={{ fontFamily: 'monospace' }}>
+      <tr className="account-row">
+        <td className="account-id-cell">
+          <button className="btn btn-ghost btn-sm account-expand-btn" onClick={() => setExpanded(!expanded)}>
             {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             {account.account_id}
           </button>
         </td>
-        <td style={{ color: 'var(--muted)' }}>{account.created_at ? new Date(account.created_at).toLocaleString() : '-'}</td>
+        <td className="account-date-cell">{account.created_at ? new Date(account.created_at).toLocaleString() : '-'}</td>
         <td><span className="badge badge-user">{account.user_count} 用户</span></td>
-        <td className="td-actions">
-          <button className="btn btn-danger btn-sm" onClick={() => setConfirmDelete(true)}>删除账号</button>
+        <td className="td-actions account-action-cell">
+          <button className="btn btn-danger btn-sm list-action-btn" onClick={() => setConfirmDelete(true)}>删除</button>
         </td>
       </tr>
 
       {expanded && (
-        <tr>
-          <td colSpan={4} style={{ padding: 0, background: 'var(--bg3)' }}>
-            <div style={{ padding: '16px 20px 20px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-                <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--light)' }}>用户列表 ({users.length})</span>
+        <tr className="account-expanded-row">
+          <td colSpan={4} className="account-expanded-cell">
+            <div className="account-expanded-panel">
+              <div className="account-expanded-header">
+                <span>用户列表 ({users.length})</span>
                 <button className="btn btn-success btn-sm" onClick={() => setModalType('addUser')}>+ 添加用户</button>
               </div>
               {usersLoading ? <div className="loader" style={{ width: 16, height: 16 }} /> : (
-                <table style={{ width: '100%', fontSize: '0.85rem' }}>
+                <table className="account-nested-table account-users-table">
                   <thead><tr><th>User ID</th><th>角色</th><th>操作</th></tr></thead>
                   <tbody>
                     {users.map(u => <UserRow key={u.user_id} user={u} accountId={account.account_id} onRefresh={loadUsers} onError={onError} serverUrl={serverUrl} apiKey={apiKey} />)}
@@ -321,22 +320,24 @@ const RootAccountsView: React.FC = () => {
 
   return (
     <div>
-      {error && <div style={{ color: 'var(--danger)', marginBottom: 16, padding: 12, border: '1px solid var(--danger)', borderRadius: 8, background: 'rgba(239,68,68,0.1)' }}>{error}</div>}
+      {error && <div className="error-box">{error}</div>}
 
-      <div className="table-wrap">
+      <div className="table-wrap account-list-panel">
         <div className="table-header">
           <span className="table-header-title">所有账号 ({accounts.length})</span>
           <button className="btn btn-primary btn-sm" onClick={() => setModalType('create')}>
             <Plus size={16} style={{ marginRight: 4 }} /> 新建账号
           </button>
         </div>
-        <table>
-          <thead><tr><th>Account ID</th><th>创建时间</th><th>用户数</th><th>操作</th></tr></thead>
-          <tbody>
-            {accounts.map(a => <AccountRow key={a.account_id} account={a} onRefresh={loadAccounts} onError={setError} serverUrl={serverUrl} apiKey={apiKey} />)}
-            {accounts.length === 0 && <tr><td colSpan={4} className="empty">暂无数据</td></tr>}
-          </tbody>
-        </table>
+        <div className="account-table-scroll">
+          <table className="account-list-table account-root-table">
+            <thead><tr><th>Account ID</th><th>创建时间</th><th>用户数</th><th>操作</th></tr></thead>
+            <tbody>
+              {accounts.map(a => <AccountRow key={a.account_id} account={a} onRefresh={loadAccounts} onError={setError} serverUrl={serverUrl} apiKey={apiKey} />)}
+              {accounts.length === 0 && <tr><td colSpan={4} className="empty">暂无数据</td></tr>}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {modalType === 'create' && (
@@ -402,21 +403,23 @@ const TenantUsersView: React.FC = () => {
 
   return (
     <div>
-      {error && <div style={{ color: 'var(--danger)', marginBottom: 16, padding: 12, border: '1px solid var(--danger)', borderRadius: 8, background: 'rgba(239,68,68,0.1)' }}>{error}</div>}
-      <div className="table-wrap">
+      {error && <div className="error-box">{error}</div>}
+      <div className="table-wrap account-list-panel">
         <div className="table-header">
           <span className="table-header-title">工作区组成员 ({users.length})</span>
           <button className="btn btn-success btn-sm" onClick={() => setModalType('addUser')}>
             <Plus size={16} style={{ marginRight: 4 }} /> 添加用户
           </button>
         </div>
-        <table>
-          <thead><tr><th>User ID</th><th>角色</th><th>操作</th></tr></thead>
-          <tbody>
-            {users.map(u => <UserRow key={u.user_id} user={u} accountId={accountId} onRefresh={loadUsers} onError={setError} serverUrl={serverUrl} apiKey={apiKey} />)}
-            {users.length === 0 && <tr><td colSpan={3} className="empty">暂无用户</td></tr>}
-          </tbody>
-        </table>
+        <div className="account-table-scroll">
+          <table className="account-list-table account-users-table">
+            <thead><tr><th>User ID</th><th>角色</th><th>操作</th></tr></thead>
+            <tbody>
+              {users.map(u => <UserRow key={u.user_id} user={u} accountId={accountId} onRefresh={loadUsers} onError={setError} serverUrl={serverUrl} apiKey={apiKey} />)}
+              {users.length === 0 && <tr><td colSpan={3} className="empty">暂无用户</td></tr>}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {modalType === 'addUser' && (
