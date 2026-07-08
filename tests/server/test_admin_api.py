@@ -16,6 +16,7 @@ from openviking.server.api_keys import APIKeyManager
 from openviking.server.app import create_app
 from openviking.server.config import ServerConfig
 from openviking.server.dependencies import set_service
+from openviking.server.identity import RequestContext, Role
 from openviking.service.core import OpenVikingService
 from openviking.service.session_service import MAX_ADMIN_DAILY_BUCKETS
 from openviking_cli.session.user_id import UserIdentifier
@@ -356,6 +357,176 @@ async def test_regenerate_key(admin_client: httpx.AsyncClient):
     assert resp.status_code == 200
 
 
+# ---- Memory admin endpoints ----
+
+
+async def test_admin_memory_view_edit_delete(
+    admin_client: httpx.AsyncClient,
+    admin_service: OpenVikingService,
+):
+    """ADMIN can manage a target user's memories."""
+    acct = _uid()
+    resp = await admin_client.post(
+        "/api/v1/admin/accounts",
+        json={"account_id": acct, "admin_user_id": "alice"},
+        headers=root_headers(),
+    )
+    alice_key = resp.json()["result"]["user_key"]
+
+    await admin_client.post(
+        f"/api/v1/admin/accounts/{acct}/users",
+        json={"user_id": "bob", "role": "user"},
+        headers={"X-API-Key": alice_key},
+    )
+
+    target_ctx = RequestContext(
+        user=UserIdentifier(acct, "bob", "default"),
+        role=Role.USER,
+    )
+    memory_uri = "viking://user/bob/memories/preferences/theme.md"
+    await admin_service.viking_fs.write_file(
+        memory_uri,
+        "# Theme\nBob prefers concise Chinese answers.",
+        ctx=target_ctx,
+    )
+
+    list_resp = await admin_client.get(
+        f"/api/v1/admin/accounts/{acct}/memories?user_id=bob&scope=user",
+        headers={"X-API-Key": alice_key},
+    )
+    assert list_resp.status_code == 200
+    list_body = list_resp.json()["result"]
+    assert list_body["total"] == 1
+    assert list_body["items"][0]["uri"] == memory_uri
+    assert list_body["items"][0]["category"] == "preferences"
+
+    detail_resp = await admin_client.get(
+        f"/api/v1/admin/accounts/{acct}/memories/detail",
+        params={"user_id": "bob", "uri": memory_uri},
+        headers={"X-API-Key": alice_key},
+    )
+    assert detail_resp.status_code == 200
+    assert "concise Chinese answers" in detail_resp.json()["result"]["content"]
+
+    async def fake_write(*, uri, content, ctx, mode="replace", wait=False, timeout=None):
+        assert mode == "replace"
+        assert wait is True
+        await admin_service.viking_fs.write_file(uri, content, ctx=ctx)
+        return {
+            "uri": uri,
+            "context_type": "memory",
+            "semantic_updated": True,
+            "vector_updated": True,
+        }
+
+    admin_service.fs.write = fake_write
+
+    edit_resp = await admin_client.put(
+        f"/api/v1/admin/accounts/{acct}/memories",
+        json={
+            "user_id": "bob",
+            "uri": memory_uri,
+            "content": "# Theme\nBob prefers evidence-first Chinese answers.",
+            "wait": True,
+        },
+        headers={"X-API-Key": alice_key},
+    )
+    assert edit_resp.status_code == 200
+    updated = await admin_service.viking_fs.read_file(memory_uri, ctx=target_ctx)
+    assert "evidence-first" in updated
+
+    delete_resp = await admin_client.request(
+        "DELETE",
+        f"/api/v1/admin/accounts/{acct}/memories",
+        json={"user_id": "bob", "uri": memory_uri},
+        headers={"X-API-Key": alice_key},
+    )
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["result"]["deleted"] is True
+
+    empty_resp = await admin_client.get(
+        f"/api/v1/admin/accounts/{acct}/memories?user_id=bob&scope=user",
+        headers={"X-API-Key": alice_key},
+    )
+    assert empty_resp.status_code == 200
+    assert empty_resp.json()["result"]["total"] == 0
+
+
+async def test_admin_memory_list_all_users_includes_owner_metadata(
+    admin_client: httpx.AsyncClient,
+    admin_service: OpenVikingService,
+):
+    """ADMIN can list registered users' memories without guessing the target user."""
+    acct = _uid()
+    resp = await admin_client.post(
+        "/api/v1/admin/accounts",
+        json={"account_id": acct, "admin_user_id": "alice"},
+        headers=root_headers(),
+    )
+    alice_key = resp.json()["result"]["user_key"]
+
+    for user_id in ("bob", "carol"):
+        await admin_client.post(
+            f"/api/v1/admin/accounts/{acct}/users",
+            json={"user_id": user_id, "role": "user"},
+            headers={"X-API-Key": alice_key},
+        )
+
+    bob_ctx = RequestContext(user=UserIdentifier(acct, "bob", "default"), role=Role.USER)
+    carol_ctx = RequestContext(user=UserIdentifier(acct, "carol", "default"), role=Role.USER)
+    bob_uri = "viking://user/bob/memories/preferences/theme.md"
+    carol_uri = (
+        f"viking://agent/{carol_ctx.user.agent_space_name()}/memories/patterns/onboarding.md"
+    )
+    await admin_service.viking_fs.write_file(
+        bob_uri,
+        "# Theme\nBob prefers compact answers.",
+        ctx=bob_ctx,
+    )
+    await admin_service.viking_fs.write_file(
+        carol_uri,
+        "# Onboarding\nCarol likes guided setup checklists.",
+        ctx=carol_ctx,
+    )
+
+    list_resp = await admin_client.get(
+        f"/api/v1/admin/accounts/{acct}/memories?scope=all",
+        headers={"X-API-Key": alice_key},
+    )
+    assert list_resp.status_code == 200
+    list_body = list_resp.json()["result"]
+    assert list_body["total"] == 2
+    items_by_uri = {item["uri"]: item for item in list_body["items"]}
+    assert items_by_uri[bob_uri]["user_id"] == "bob"
+    assert items_by_uri[bob_uri]["agent_id"] == "default"
+    assert items_by_uri[carol_uri]["user_id"] == "carol"
+    assert items_by_uri[carol_uri]["agent_id"] == "default"
+
+    search_resp = await admin_client.get(
+        f"/api/v1/admin/accounts/{acct}/memories?scope=all&q=carol",
+        headers={"X-API-Key": alice_key},
+    )
+    assert search_resp.status_code == 200
+    search_body = search_resp.json()["result"]
+    assert search_body["total"] == 1
+    assert search_body["items"][0]["uri"] == carol_uri
+
+    detail_resp = await admin_client.get(
+        f"/api/v1/admin/accounts/{acct}/memories/detail",
+        params={
+            "user_id": items_by_uri[carol_uri]["user_id"],
+            "agent_id": items_by_uri[carol_uri]["agent_id"],
+            "uri": carol_uri,
+        },
+        headers={"X-API-Key": alice_key},
+    )
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()["result"]
+    assert detail["user_id"] == "carol"
+    assert detail["agent_id"] == "default"
+    assert "guided setup" in detail["content"]
+
+
 # ---- Session audit and analytics ----
 
 
@@ -399,7 +570,10 @@ async def test_admin_session_audit_and_daily_analytics(admin_client: httpx.Async
     assistant_message_id = assistant_resp.json()["result"]["message_id"]
     feedback_resp = await admin_client.put(
         f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
-        json={"value": "down"},
+        json={
+            "value": "down",
+            "reason_tags": ["信息不准确"],
+        },
         headers={"X-API-Key": bob_key},
     )
     assert feedback_resp.status_code == 200
@@ -422,6 +596,7 @@ async def test_admin_session_audit_and_daily_analytics(admin_client: httpx.Async
     assert sessions[0]["feedback_count"] == 1
     assert sessions[0]["positive_feedback_count"] == 0
     assert sessions[0]["negative_feedback_count"] == 1
+    assert sessions[0]["feedback_memory_skipped_count"] == 1
 
     detail_resp = await admin_client.get(
         f"/api/v1/admin/accounts/{acct}/sessions/{session_id}?user_id=bob",
@@ -431,9 +606,14 @@ async def test_admin_session_audit_and_daily_analytics(admin_client: httpx.Async
     detail = detail_resp.json()["result"]
     assert [message["role"] for message in detail["messages"]] == ["user", "assistant"]
     assert detail["messages"][1]["token_usage"]["total_tokens"] == 20
+    assert detail["messages"][1]["feedback"]["value"] == "down"
+    assert detail["messages"][1]["feedback"]["reason_tags"] == ["信息不准确"]
+    assert "comment" not in detail["messages"][1]["feedback"]
     assert detail["feedback"][assistant_message_id]["value"] == "down"
+    assert "comment" not in detail["feedback"][assistant_message_id]
     assert detail["feedback_count"] == 1
     assert detail["negative_feedback_count"] == 1
+    assert detail["feedback_memory_skipped_count"] == 1
 
     analytics_resp = await admin_client.get(
         f"/api/v1/admin/accounts/{acct}/analytics/daily?user_id=bob",
@@ -614,7 +794,7 @@ async def test_admin_session_audit_sorts_by_value_fields(admin_client: httpx.Asy
             f"/api/v1/sessions/{session_ids['failed']}/messages/"
             f"{assistant_message_ids['failed']}/feedback"
         ),
-        json={"value": "down"},
+        json={"value": "down", "reason_tags": ["信息不准确"]},
         headers={"X-API-Key": bob_key},
     )
     await admin_client.put(

@@ -8,8 +8,10 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
 from vikingbot.agent.context import ContextBuilder
 from vikingbot.agent.loop import AgentLoop
+from vikingbot.agent.memory import MemoryStore
 from vikingbot.bus.queue import MessageBus
 from vikingbot.config.schema import AgentMode, Config, SessionKey
 from vikingbot.providers.base import LLMProvider, LLMResponse
@@ -69,6 +71,53 @@ class SequenceProvider(LLMProvider):
         return "stub-model"
 
 
+class FakeSandboxManager:
+    def to_workspace_id(self, session_key: SessionKey) -> str:
+        return "workspace-a"
+
+    async def get_sandbox_cwd(self, session_key: SessionKey) -> str:
+        return "/workspace"
+
+
+class FakeMemoryStore:
+    def __init__(
+        self,
+        agent_memory: str = "",
+        delay_seconds: float = 0.0,
+        agent_error: Exception | None = None,
+    ) -> None:
+        self.agent_memory = agent_memory
+        self.delay_seconds = delay_seconds
+        self.agent_error = agent_error
+        self.user_memory_calls = 0
+        self.agent_memory_calls = 0
+
+    async def get_viking_user_profile(self, workspace_id: str, user_id: str) -> str:
+        return ""
+
+    async def get_viking_memory_context(
+        self, current_message: str, workspace_id: str, sender_id: str
+    ) -> str:
+        self.user_memory_calls += 1
+        return "<memory>User memory should only appear in full mode.</memory>"
+
+    async def get_viking_agent_memory_context(
+        self,
+        current_message: str,
+        *,
+        agent_id: str | None = None,
+        owner_user_id: str | None = None,
+    ) -> str:
+        self.agent_memory_calls += 1
+        if self.delay_seconds:
+            await asyncio.sleep(self.delay_seconds)
+        if self.agent_error:
+            raise self.agent_error
+        assert agent_id == "default"
+        assert owner_user_id == "default"
+        return self.agent_memory
+
+
 def test_kb_initial_search_prompt_prefers_focused_resource_scoped_lookup() -> None:
     config = Config()
     builder = ContextBuilder(Path("."), config=config)
@@ -124,7 +173,7 @@ def test_explicit_default_controls_knowledge_base_mode_without_legacy_profile(tm
     builder = ContextBuilder(tmp_path, config=config)
 
     assert not hasattr(config.agents, "capability_profile")
-    assert builder._is_retrieval_mode() is True
+    assert builder._is_knowledge_base_mode() is True
     assert "For this knowledge-base request" in builder.build_retrieval_initial_search_prompt()
 
 
@@ -142,6 +191,126 @@ def test_retrieval_final_response_prompt_forbids_unsupported_facts(tmp_path: Pat
     assert "Do not use model knowledge to complete missing parts." in prompt
     assert "Do not add unstated details" in prompt
     assert "answer only the supported part" in prompt
+
+
+def test_knowledge_base_messages_include_agent_memory_hints_not_user_memory(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> tuple[list[dict], FakeMemoryStore, dict]:
+        config = Config()
+        builder = ContextBuilder(
+            tmp_path,
+            sandbox_manager=FakeSandboxManager(),
+            sender_id="guest-user",
+            config=config,
+        )
+        memory = FakeMemoryStore(
+            "<memory><abstract>Use 报修 as the focused search keyword.</abstract></memory>"
+        )
+        builder._memory = memory
+
+        messages = await builder.build_messages(
+            history=[],
+            current_message="报修要准备什么信息？",
+            session_key=SessionKey(type="web", channel_id="guest", chat_id="chat-1"),
+        )
+        return messages, memory, builder.agent_memory_read_stats
+
+    messages, memory, stats = asyncio.run(run_case())
+    contents = [str(message.get("content", "")) for message in messages]
+    joined = "\n".join(contents)
+
+    assert memory.agent_memory_calls == 1
+    assert memory.user_memory_calls == 0
+    assert "Agent memory hints from helpful feedback" in joined
+    assert "not factual evidence" in joined
+    assert "Use 报修 as the focused search keyword." in joined
+    assert "You do not need to use tool to search again" not in joined
+    assert "For this knowledge-base request" in contents[-1]
+    assert stats["status"] == "ok"
+    assert stats["result_count"] == 0
+    assert stats["duration_ms"] >= 0
+
+
+def test_knowledge_base_agent_memory_timeout_skips_hints(tmp_path: Path) -> None:
+    async def run_case() -> tuple[list[dict], FakeMemoryStore, dict]:
+        config = Config()
+        config.ov_server.agent_memory_read_timeout_ms = 1
+        builder = ContextBuilder(
+            tmp_path,
+            sandbox_manager=FakeSandboxManager(),
+            sender_id="guest-user",
+            config=config,
+        )
+        memory = FakeMemoryStore(
+            "<memory><abstract>This should be skipped on timeout.</abstract></memory>",
+            delay_seconds=0.2,
+        )
+        builder._memory = memory
+
+        messages = await builder.build_messages(
+            history=[],
+            current_message="报修要准备什么信息？",
+            session_key=SessionKey(type="web", channel_id="guest", chat_id="chat-timeout"),
+        )
+        return messages, memory, builder.agent_memory_read_stats
+
+    messages, memory, stats = asyncio.run(run_case())
+    joined = "\n".join(str(message.get("content", "")) for message in messages)
+
+    assert memory.agent_memory_calls == 1
+    assert stats["status"] == "timeout"
+    assert stats["timeout_ms"] == 100
+    assert stats["duration_ms"] >= 0
+    assert "Agent memory hints from helpful feedback" not in joined
+    assert "This should be skipped on timeout." not in joined
+    assert "For this knowledge-base request" in str(messages[-1].get("content", ""))
+
+
+def test_knowledge_base_agent_memory_error_is_tracked_not_empty(tmp_path: Path) -> None:
+    async def run_case() -> tuple[list[dict], FakeMemoryStore, dict]:
+        config = Config()
+        builder = ContextBuilder(
+            tmp_path,
+            sandbox_manager=FakeSandboxManager(),
+            sender_id="guest-user",
+            config=config,
+        )
+        memory = FakeMemoryStore(agent_error=RuntimeError("memory backend unavailable"))
+        builder._memory = memory
+
+        messages = await builder.build_messages(
+            history=[],
+            current_message="报修要准备什么信息？",
+            session_key=SessionKey(type="web", channel_id="guest", chat_id="chat-error"),
+        )
+        return messages, memory, builder.agent_memory_read_stats
+
+    messages, memory, stats = asyncio.run(run_case())
+    joined = "\n".join(str(message.get("content", "")) for message in messages)
+
+    assert memory.agent_memory_calls == 1
+    assert stats["status"] == "error"
+    assert stats["duration_ms"] >= 0
+    assert "Agent memory hints from helpful feedback" not in joined
+    assert "For this knowledge-base request" in str(messages[-1].get("content", ""))
+
+
+def test_agent_memory_store_propagates_lookup_errors(tmp_path: Path, monkeypatch) -> None:
+    async def fail_create(*args, **kwargs):
+        raise RuntimeError("memory backend unavailable")
+
+    monkeypatch.setattr("vikingbot.agent.memory.VikingClient.create", fail_create)
+    store = MemoryStore(tmp_path)
+
+    with pytest.raises(RuntimeError, match="memory backend unavailable"):
+        asyncio.run(
+            store.get_viking_agent_memory_context(
+                "报修",
+                agent_id="support-agent",
+                owner_user_id="support-owner",
+            )
+        )
 
 
 def test_retrieval_finalizer_appends_reference_document_link_for_knowledge_base_mode() -> None:

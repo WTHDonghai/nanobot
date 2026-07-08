@@ -373,6 +373,7 @@ export const mapSessionMessages = (
       text,
       createdAt: message.created_at,
       feedback: message.feedback?.value,
+      feedbackDetail: message.feedback,
       suggestions: message.role === 'assistant'
         ? restoreGuidedSuggestions(message, index, text, nextUserMessage)
         : undefined,
@@ -404,6 +405,7 @@ export const mergeCachedMessageMetadata = (
       ...message,
       messageId: message.messageId ?? cached.messageId,
       feedback: message.feedback ?? cached.feedback,
+      feedbackDetail: message.feedbackDetail ?? cached.feedbackDetail,
       suggestions: message.suggestions && message.suggestions.length > 0
         ? message.suggestions
         : cached.suggestions,
@@ -455,6 +457,7 @@ export const readStoredSessionMessages = (
         const role = record.role === 'user' || record.role === 'bot' ? record.role : null;
         const text = typeof record.text === 'string' ? record.text : null;
         if (!role || text === null) return items;
+        const feedbackDetail = parseStoredFeedbackDetail(record.feedbackDetail);
 
         items.push({
           key: typeof record.key === 'string' ? record.key : `${sessionId}-${index}`,
@@ -468,6 +471,7 @@ export const readStoredSessionMessages = (
           elapsedMs: typeof record.elapsedMs === 'number' ? record.elapsedMs : undefined,
           feedback: record.feedback === 'up' || record.feedback === 'down' ? record.feedback : undefined,
           suggestions: normalizeGuidedQuestionSuggestions(record.suggestions),
+          feedbackDetail,
           steps: Array.isArray(record.steps)
             ? record.steps.filter((step): step is string => typeof step === 'string')
             : undefined,
@@ -488,4 +492,49 @@ export const readStoredSessionMessages = (
   } catch {
     return {};
   }
+};
+
+const parseStoredFeedbackDetail = (value: unknown): ChatMessage['feedbackDetail'] => {
+  if (!value || typeof value !== 'object') return undefined;
+
+  const record = value as Record<string, unknown>;
+  const detail: NonNullable<ChatMessage['feedbackDetail']> = {};
+  if (record.message_id && typeof record.message_id === 'string') {
+    detail.message_id = record.message_id;
+  }
+  if (record.value === 'up' || record.value === 'down') {
+    detail.value = record.value;
+  }
+  if (record.created_at && typeof record.created_at === 'string') {
+    detail.created_at = record.created_at;
+  }
+  if (record.updated_at && typeof record.updated_at === 'string') {
+    detail.updated_at = record.updated_at;
+  }
+  if (Array.isArray(record.reason_tags)) {
+    const tags = record.reason_tags.filter((tag): tag is string => typeof tag === 'string');
+    if (tags.length > 0) detail.reason_tags = tags;
+  }
+  if (
+    record.memory_status === 'pending'
+    || record.memory_status === 'completed'
+    || record.memory_status === 'failed'
+    || record.memory_status === 'skipped'
+  ) {
+    detail.memory_status = record.memory_status;
+  }
+  if (record.memory_task_id && typeof record.memory_task_id === 'string') {
+    detail.memory_task_id = record.memory_task_id;
+  }
+  if (typeof record.memory_extracted_count === 'number') {
+    detail.memory_extracted_count = record.memory_extracted_count;
+  }
+  if (record.memory_error && typeof record.memory_error === 'string') {
+    detail.memory_error = record.memory_error;
+  }
+  if (record.memory_updated_at && typeof record.memory_updated_at === 'string') {
+    detail.memory_updated_at = record.memory_updated_at;
+  }
+
+  return Object.keys(detail).length > 0 ? detail : undefined;
 };

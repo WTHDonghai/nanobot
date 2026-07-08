@@ -282,6 +282,7 @@ class SessionCompressor:
         strict_extract_errors: bool = False,
         latest_archive_overview: str = "",
         memory_scope: str = ALL_MEMORY_SCOPE,
+        feedback: str = "",
     ) -> List[Context]:
         """Extract long-term memories from messages."""
         if not messages:
@@ -292,6 +293,7 @@ class SessionCompressor:
         context = {
             "messages": messages,
             "summary": latest_archive_overview or "",
+            "feedback": feedback or "",
         }
         if not ctx:
             return []

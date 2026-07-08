@@ -167,7 +167,7 @@ class KbResponseMixin:
         evidence segments, include their nearby explanatory text and images in
         the same final reply without an extra image-aware rewrite.
         """
-        if not self.context._is_retrieval_mode() or not draft_content:
+        if not self.context._is_knowledge_base_mode() or not draft_content:
             return draft_content
 
         finalize_start_time = time.time()
@@ -248,7 +248,7 @@ class KbResponseMixin:
 
     def _build_reference_links(self, messages: list[dict]) -> list[str]:
         """Build Markdown links for concrete read document evidence used in retrieval answers."""
-        if not self.context._is_retrieval_mode():
+        if not self.context._is_knowledge_base_mode():
             return []
 
         read_uris = self._extract_selected_evidence_uris_from_prompts(messages)

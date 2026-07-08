@@ -173,6 +173,7 @@ All configurations are under the `bot` field in `ov.conf`, with default values f
   - If you don't use the locally started OpenViking Server, you can configure the url and the corresponding root user's API Key here
     - root_api_key: In a multi-tenant scenario, the API KEY must have root privileges; otherwise, the bot cannot automatically register multiple OpenViking users, which is used to implement memory isolation.
     - account_id: Defaults to default, which is the account ID of OpenViking. All users under an OpenViking account share resources.
+    - agent_memory_read_timeout_ms: Timeout for reading Agent Memory during knowledge-base answers. Defaults to 1200ms and is clamped to 100ms through 5000ms; on timeout, memory hints are skipped and the answer continues normally.
 - `tools.human_handoff`: Human handoff configuration.
   - `entry_url`: URL opened by the "contact human support" action.
     The code default is an obvious placeholder URL; set this in `ov.conf` for production.

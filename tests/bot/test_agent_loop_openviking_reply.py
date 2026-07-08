@@ -436,6 +436,329 @@ def test_run_agent_loop_uses_fast_batch_without_fallback() -> None:
     assert all(call["tools"] is None for call in provider.calls)
 
 
+def test_fast_batch_uses_agent_memory_hints_for_retrieval() -> None:
+    class FakeMemoryStore:
+        def __init__(self) -> None:
+            self.agent_memory_calls = 0
+            self.user_memory_calls = 0
+
+        async def get_viking_agent_memory_context(
+            self,
+            current_message,
+            *,
+            agent_id=None,
+            owner_user_id=None,
+        ):
+            self.agent_memory_calls += 1
+            assert current_message == "报修"
+            assert agent_id == "support-agent"
+            assert owner_user_id == "support-owner"
+            return (
+                '<memory index="1">\n'
+                "  <abstract>优先使用维护报修、报修信息作为检索关键词。</abstract>\n"
+                "  <overview>回答时先说明需要准备的信息，再补充报修渠道。</overview>\n"
+                "  <uri>viking://agent/demo/memories/patterns/repair.md</uri>\n"
+                "</memory>"
+            )
+
+        async def get_viking_memory_context(self, current_message, workspace_id, sender_id):
+            self.user_memory_calls += 1
+            return "<memory>User memory should not be used in KB fast batch.</memory>"
+
+    config = Config()
+    config.ov_server.agent_id = "support-agent"
+    config.ov_server.agent_memory_owner_user_id = "support-owner"
+    provider = StubProvider(
+        [
+            LLMResponse(
+                content='{"sections":[1],"coverage":"full","missing":"","next_query":""}'
+            ),
+            LLMResponse(content="报修时需准备酒店名称、问题描述和联系人信息。"),
+        ]
+    )
+    memory = FakeMemoryStore()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=config,
+            max_iterations=5,
+            sandbox_manager=SimpleNamespace(
+                to_workspace_id=lambda _session_key: "workspace-a",
+            ),
+        )
+        loop.context._memory = memory
+        loop.tools.get_definitions = lambda: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_search",
+                    "description": "Search docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_read",
+                    "description": "Read docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+        loop.tools.execute = AsyncMock(
+            side_effect=[
+                (
+                    "OpenViking search query: 报修\n"
+                    "Target URI: viking://resources/\n"
+                    "Requested limit: 8\n"
+                    "Total matches: 1\n\n"
+                    "Documents:\n"
+                    "1. [document] viking://resources/demo/repair.md\n"
+                    "   Content preview omitted. Use openviking_read for evidence.\n"
+                ),
+                "## 维护报修\n报修需准备酒店名称、问题描述、联系人姓名及联系方式。",
+            ]
+        )
+
+        final_content, tools_used, _token_usage, iteration = asyncio.run(
+            loop._run_agent_loop(
+                messages=[{"role": "user", "content": "报修"}],
+                session_key=SessionKey(
+                    type="cli",
+                    channel_id="default",
+                    chat_id="kb-fast-memory",
+                ),
+                publish_events=False,
+            )
+        )
+
+    assert iteration == 1
+    assert final_content.startswith("报修时需准备")
+    assert memory.agent_memory_calls == 1
+    assert memory.user_memory_calls == 0
+    assert [tool["tool_name"] for tool in tools_used] == [
+        "openviking_search",
+        "openviking_read",
+    ]
+
+    search_args = loop.tools.execute.await_args_list[0].args[1]
+    assert search_args["target_uri"] == "viking://resources/"
+    assert search_args["query"].startswith("报修")
+    assert "维护报修" in search_args["query"]
+    assert "不作为答案事实" in search_args["query"]
+
+    evidence_prompt = provider.calls[0]["messages"][1]["content"]
+    assert "Agent memory hints for retrieval only" in evidence_prompt
+    assert "优先使用维护报修" in evidence_prompt
+    assert "Candidate sections" in evidence_prompt
+
+    answer_system_prompts = "\n".join(
+        str(message.get("content") or "")
+        for message in provider.calls[1]["messages"]
+        if message.get("role") == "system"
+    )
+    assert "Agent memory hints from helpful feedback" in answer_system_prompts
+    assert "not factual evidence" in answer_system_prompts
+
+
+def test_fast_batch_reuses_existing_agent_memory_hints_without_duplicate_read() -> None:
+    class FakeMemoryStore:
+        def __init__(self) -> None:
+            self.agent_memory_calls = 0
+
+        async def get_viking_agent_memory_context(self, *args, **kwargs):
+            self.agent_memory_calls += 1
+            return ""
+
+    provider = StubProvider(
+        [
+            LLMResponse(
+                content='{"sections":[1],"coverage":"full","missing":"","next_query":""}'
+            ),
+            LLMResponse(content="报修时需准备酒店名称、问题描述和联系人信息。"),
+        ]
+    )
+    memory = FakeMemoryStore()
+    existing_hints = (
+        "## Agent memory hints from helpful feedback\n"
+        '<memory index="1">\n'
+        "  <abstract>优先使用维护报修作为检索关键词。</abstract>\n"
+        "</memory>"
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=Config(),
+            max_iterations=5,
+            sandbox_manager=SimpleNamespace(
+                to_workspace_id=lambda _session_key: "workspace-a",
+            ),
+        )
+        loop.context._memory = memory
+        loop.tools.get_definitions = lambda: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_search",
+                    "description": "Search docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_read",
+                    "description": "Read docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+        loop.tools.execute = AsyncMock(
+            side_effect=[
+                (
+                    "OpenViking search query: 报修\n"
+                    "Target URI: viking://resources/\n"
+                    "Requested limit: 8\n"
+                    "Total matches: 1\n\n"
+                    "Documents:\n"
+                    "1. [document] viking://resources/demo/repair.md\n"
+                    "   Content preview omitted. Use openviking_read for evidence.\n"
+                ),
+                "## 维护报修\n报修需准备酒店名称、问题描述、联系人姓名及联系方式。",
+            ]
+        )
+
+        final_content, _tools_used, _token_usage, iteration = asyncio.run(
+            loop._run_agent_loop(
+                messages=[
+                    {"role": "system", "content": existing_hints},
+                    {"role": "user", "content": "报修"},
+                ],
+                session_key=SessionKey(
+                    type="cli",
+                    channel_id="default",
+                    chat_id="kb-fast-memory-reuse",
+                ),
+                publish_events=False,
+            )
+        )
+
+    assert iteration == 1
+    assert final_content.startswith("报修时需准备")
+    assert memory.agent_memory_calls == 0
+    search_args = loop.tools.execute.await_args_list[0].args[1]
+    assert "优先使用维护报修" in search_args["query"]
+    assert loop.context.agent_memory_read_stats["status"] == "reused"
+
+
+def test_fast_batch_does_not_retry_after_empty_agent_memory_read() -> None:
+    class FakeMemoryStore:
+        def __init__(self) -> None:
+            self.agent_memory_calls = 0
+
+        async def get_viking_agent_memory_context(self, *args, **kwargs):
+            self.agent_memory_calls += 1
+            return ""
+
+    provider = StubProvider(
+        [
+            LLMResponse(
+                content='{"sections":[1],"coverage":"full","missing":"","next_query":""}'
+            ),
+            LLMResponse(content="报修时需准备酒店名称、问题描述和联系人信息。"),
+        ]
+    )
+    memory = FakeMemoryStore()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=Config(),
+            max_iterations=5,
+            sandbox_manager=SimpleNamespace(
+                to_workspace_id=lambda _session_key: "workspace-a",
+            ),
+        )
+        loop.context._memory = memory
+        loop.tools.get_definitions = lambda: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_search",
+                    "description": "Search docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_read",
+                    "description": "Read docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+        loop.tools.execute = AsyncMock(
+            side_effect=[
+                (
+                    "OpenViking search query: 报修\n"
+                    "Target URI: viking://resources/\n"
+                    "Requested limit: 8\n"
+                    "Total matches: 1\n\n"
+                    "Documents:\n"
+                    "1. [document] viking://resources/demo/repair.md\n"
+                    "   Content preview omitted. Use openviking_read for evidence.\n"
+                ),
+                "## 维护报修\n报修需准备酒店名称、问题描述、联系人姓名及联系方式。",
+            ]
+        )
+        session_key = SessionKey(
+            type="cli",
+            channel_id="default",
+            chat_id="kb-fast-empty-memory",
+        )
+
+        empty_hints = asyncio.run(
+            loop.context._build_knowledge_base_agent_memory(session_key, "报修")
+        )
+        final_content, _tools_used, _token_usage, iteration = asyncio.run(
+            loop._run_agent_loop(
+                messages=[{"role": "user", "content": "报修"}],
+                session_key=session_key,
+                publish_events=False,
+            )
+        )
+
+    assert empty_hints == ""
+    assert iteration == 1
+    assert final_content.startswith("报修时需准备")
+    assert memory.agent_memory_calls == 1
+    assert loop.context.agent_memory_read_stats["status"] == "empty"
+
+
 def test_run_agent_loop_separates_kb_draft_from_final_user_reply() -> None:
     config = Config()
 

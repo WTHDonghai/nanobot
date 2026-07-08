@@ -11,6 +11,7 @@ from loguru import logger
 
 import openviking as ov
 from vikingbot.config.loader import load_config
+from vikingbot.openviking_identity import resolve_openviking_agent_id
 from vikingbot.openviking_mount.user_apikey_manager import UserApiKeyManager
 from vikingbot.utils.helpers import get_images_path
 
@@ -34,6 +35,7 @@ class VikingClient:
         openviking_config = config.ov_server
         self.openviking_config = openviking_config
         self.ov_path = config.ov_data_path
+        resolved_agent_id = agent_id or resolve_openviking_agent_id(config)
         if openviking_config.mode == "local":
             self.client = ov.AsyncHTTPClient(url=openviking_config.server_url)
             self.agent_id = "default"
@@ -42,16 +44,16 @@ class VikingClient:
             self.admin_user_id = "default"
             self._apikey_manager = None
         else:
-            if agent_id and "#" in agent_id:
-                agent_id = agent_id.split("#", 1)[0]
+            if resolved_agent_id and "#" in resolved_agent_id:
+                resolved_agent_id = resolved_agent_id.split("#", 1)[0]
             self.client = ov.AsyncHTTPClient(
                 url=openviking_config.server_url,
                 api_key=openviking_config.root_api_key,
                 account=openviking_config.account_id,
                 user=openviking_config.admin_user_id,
-                agent_id=agent_id,
+                agent_id=resolved_agent_id,
             )
-            self.agent_id = agent_id
+            self.agent_id = resolved_agent_id
             self.account_id = openviking_config.account_id
             self.admin_user_id = openviking_config.admin_user_id
             self._apikey_manager = None

@@ -5,6 +5,10 @@ from loguru import logger
 
 from vikingbot.config.loader import load_config
 from vikingbot.config.schema import SessionKey
+from vikingbot.openviking_identity import (
+    resolve_agent_memory_identity,
+    resolve_openviking_agent_id,
+)
 
 from ...session import Session
 from ..base import Hook, HookContext
@@ -31,7 +35,7 @@ async def get_global_client() -> VikingClient:
     """Get or create the global singleton VikingClient."""
     global _global_client
     if _global_client is None:
-        _global_client = await VikingClient.create(None)
+        _global_client = await VikingClient.create(resolve_openviking_agent_id())
     return _global_client
 
 
@@ -193,7 +197,7 @@ class OpenVikingPostCallHook(Hook):
             if openviking_config.mode == "local":
                 skill_memory_uri = f"viking://agent/ffb1327b18bf/memories/skills/{skill_name}.md"
             else:
-                agent_space_name = ov_client.get_agent_space_name(openviking_config.admin_user_id)
+                agent_space_name = resolve_agent_memory_identity(config).agent_space_name
                 skill_memory_uri = (
                     f"viking://agent/{agent_space_name}/memories/skills/{skill_name}.md"
                 )

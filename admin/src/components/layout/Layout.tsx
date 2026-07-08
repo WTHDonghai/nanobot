@@ -2,7 +2,7 @@ import React from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
-import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database, Sun, Moon, PanelLeftClose, PanelLeft, Search } from 'lucide-react';
+import { LayoutGrid, Users, MessagesSquare, Bot, Activity, LogOut, Database, Sun, Moon, PanelLeftClose, PanelLeft, Search, Brain } from 'lucide-react';
 import BrandMark from '../branding/BrandMark';
 import './Layout.css';
 
@@ -21,6 +21,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const rootItems = [
     { path: '/dashboard', label: '总览', icon: <LayoutGrid size={18} /> },
     { path: '/accounts', label: '全部租户与账号', icon: <Users size={18} /> },
+    { path: '/memories', label: '全局记忆管理', icon: <Brain size={18} /> },
     { path: '/sessions', label: '全局会话监控', icon: <MessagesSquare size={18} /> },
     { path: '/system', label: '系统监控与接口', icon: <Activity size={18} /> },
   ];
@@ -28,6 +29,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const adminItems = [
     { path: '/dashboard', label: '工作区概览', icon: <LayoutGrid size={18} /> },
     { path: '/accounts', label: '账号组成员', icon: <Users size={18} /> },
+    { path: '/memories', label: '记忆管理', icon: <Brain size={18} /> },
     { path: '/resources', label: '资源库管理', icon: <Database size={18} /> },
     { path: '/recall-test', label: '检索召回测试', icon: <Search size={18} /> },
     { path: '/sessions', label: '工作区会话', icon: <MessagesSquare size={18} /> },

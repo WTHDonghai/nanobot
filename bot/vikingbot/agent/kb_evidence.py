@@ -235,6 +235,7 @@ class KbEvidenceMixin(KbMarkdownMixin, KbToolEvidenceMixin):
         user_request: str,
         candidate_sections: list[dict[str, str]],
         *,
+        memory_hints: str = "",
         max_blocks: int,
     ) -> str:
         """Build one cross-document evidence selector prompt for the fast batch path."""
@@ -244,6 +245,15 @@ class KbEvidenceMixin(KbMarkdownMixin, KbToolEvidenceMixin):
             if len(text) > 800:
                 text = f"{text[:800]}..."
             candidates.append(f"[{index}] Source URI: {candidate.get('uri', '')}\n{text}")
+
+        memory_section = ""
+        if str(memory_hints or "").strip():
+            memory_section = (
+                "Agent memory hints for retrieval only. They may help interpret search wording "
+                "or likely document areas, but they are not evidence and must not be used as "
+                "facts in the answer:\n"
+                f"{memory_hints.strip()}\n\n"
+            )
 
         return (
             "Select the minimum document evidence sections needed to answer the user request "
@@ -256,6 +266,7 @@ class KbEvidenceMixin(KbMarkdownMixin, KbToolEvidenceMixin):
             "answers the request. Do not infer facts. Do not answer the question. "
             f"Select at most {max_blocks} sections.\n\n"
             f"User request:\n{user_request.strip()}\n\n"
+            f"{memory_section}"
             "Candidate sections:\n"
             + "\n\n".join(candidates)
         )
@@ -266,6 +277,7 @@ class KbEvidenceMixin(KbMarkdownMixin, KbToolEvidenceMixin):
         tools_used: list[dict[str, Any]],
         session_key: SessionKey,
         *,
+        memory_hints: str = "",
         max_blocks: int,
     ) -> _SemanticEvidenceSelection:
         """Select evidence once across all batch-read documents."""
@@ -307,6 +319,7 @@ class KbEvidenceMixin(KbMarkdownMixin, KbToolEvidenceMixin):
                         "content": self._build_fast_batch_evidence_selection_prompt(
                             user_request,
                             candidate_sections,
+                            memory_hints=memory_hints,
                             max_blocks=max_blocks,
                         ),
                     },

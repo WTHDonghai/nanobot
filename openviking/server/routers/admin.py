@@ -3,16 +3,17 @@
 """Admin endpoints for OpenViking multi-tenant HTTP Server."""
 
 from datetime import datetime, time, timezone, tzinfo
-from typing import Optional
+from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, HTTPException, Path, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from openviking.server.auth import require_role
 from openviking.server.dependencies import get_service
 from openviking.server.identity import RequestContext, Role
 from openviking.server.models import Response
+from openviking.session.memory.utils.content import deserialize_content
 from openviking.storage.viking_fs import get_viking_fs
 from openviking_cli.exceptions import PermissionDeniedError
 from openviking_cli.session.user_id import UserIdentifier
@@ -22,6 +23,10 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 USER_ID_PATTERN = r"^[A-Za-z0-9_-]+$"
+MEMORY_DERIVED_FILENAMES = {".abstract.md", ".overview.md", ".relations.json"}
+USER_MEMORY_CATEGORIES = {"profile", "preferences", "entities", "events"}
+AGENT_MEMORY_CATEGORIES = {"cases", "patterns", "tools", "skills"}
+ALL_MEMORY_CATEGORIES = USER_MEMORY_CATEGORIES | AGENT_MEMORY_CATEGORIES
 
 
 class CreateAccountRequest(BaseModel):
@@ -38,6 +43,28 @@ class SetRoleRequest(BaseModel):
     role: str
 
 
+class AdminMemoryUpdateRequest(BaseModel):
+    """Update an existing memory file through the admin surface."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(..., pattern=USER_ID_PATTERN)
+    agent_id: str = Field("default", pattern=USER_ID_PATTERN)
+    uri: str
+    content: str
+    wait: bool = True
+
+
+class AdminMemoryDeleteRequest(BaseModel):
+    """Delete an existing memory file through the admin surface."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(..., pattern=USER_ID_PATTERN)
+    agent_id: str = Field("default", pattern=USER_ID_PATTERN)
+    uri: str
+
+
 def _get_api_key_manager(request: Request):
     """Get APIKeyManager from app state."""
     manager = getattr(request.app.state, "api_key_manager", None)
@@ -50,6 +77,65 @@ def _check_account_access(ctx: RequestContext, account_id: str) -> None:
     """ADMIN can only operate on their own account."""
     if ctx.role == Role.ADMIN and ctx.account_id != account_id:
         raise PermissionDeniedError(f"ADMIN can only manage account: {ctx.account_id}")
+
+
+def _target_memory_ctx(account_id: str, user_id: str, agent_id: str = "default") -> RequestContext:
+    return RequestContext(
+        user=UserIdentifier(account_id, user_id, agent_id or "default"),
+        role=Role.ROOT,
+    )
+
+
+def _memory_scope_from_uri(uri: str) -> str:
+    if uri.startswith("viking://user/"):
+        return "user"
+    if uri.startswith("viking://agent/"):
+        return "agent"
+    return ""
+
+
+def _memory_category_from_uri(uri: str) -> str:
+    marker = "/memories/"
+    if marker not in uri:
+        return ""
+    relative = uri.split(marker, 1)[1].strip("/")
+    if relative == "profile.md":
+        return "profile"
+    return relative.split("/", 1)[0]
+
+
+def _is_memory_file_uri(uri: str) -> bool:
+    name = uri.rstrip("/").rsplit("/", 1)[-1]
+    return (
+        "/memories/" in uri
+        and uri.endswith(".md")
+        and name not in MEMORY_DERIVED_FILENAMES
+        and not name.startswith(".")
+    )
+
+
+def _allowed_memory_roots(target_ctx: RequestContext, scope: str) -> list[str]:
+    roots: list[str] = []
+    if scope in {"all", "user"}:
+        roots.append(f"viking://user/{target_ctx.user.user_space_name()}/memories")
+    if scope in {"all", "agent"}:
+        roots.append(f"viking://agent/{target_ctx.user.agent_space_name()}/memories")
+    return roots
+
+
+def _ensure_memory_uri_allowed(uri: str, target_ctx: RequestContext) -> None:
+    if not _is_memory_file_uri(uri):
+        raise HTTPException(status_code=400, detail="URI must be a memory markdown file")
+    roots = _allowed_memory_roots(target_ctx, "all")
+    if not any(uri == root or uri.startswith(f"{root}/") for root in roots):
+        raise PermissionDeniedError("Memory URI is outside the requested user/agent scope")
+
+
+def _content_excerpt(content: str, max_len: int = 220) -> str:
+    text = " ".join((content or "").split())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
 
 
 def _parse_timezone(value: str) -> tzinfo:
@@ -267,6 +353,217 @@ async def regenerate_key(
     manager = _get_api_key_manager(request)
     new_key = await manager.regenerate_key(account_id, user_id)
     return Response(status="ok", result={"user_key": new_key})
+
+
+# ---- Memory admin endpoints ----
+
+
+@router.get("/accounts/{account_id}/memories")
+async def list_account_memories(
+    request: Request,
+    account_id: str = Path(..., description="Account ID"),
+    user_id: Optional[str] = Query(None, pattern=USER_ID_PATTERN, description="Optional target user ID"),
+    agent_id: str = Query("default", pattern=USER_ID_PATTERN, description="Target agent ID"),
+    scope: Literal["all", "user", "agent"] = Query("all", description="Memory scope"),
+    category: Optional[str] = Query(None, description="Memory category filter"),
+    q: str = Query("", description="Search text in URI, category, or content"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN),
+):
+    """List memory files for one target user/agent namespace or every user in an account."""
+    _check_account_access(ctx, account_id)
+    normalized_category = (category or "").strip().lower()
+    if normalized_category and normalized_category not in ALL_MEMORY_CATEGORIES:
+        raise HTTPException(status_code=422, detail="Unknown memory category")
+
+    service = get_service()
+    normalized_user_id = (user_id or "").strip()
+    normalized_agent_id = (agent_id or "default").strip() or "default"
+    if normalized_user_id:
+        target_user_ids = [normalized_user_id]
+    else:
+        manager = _get_api_key_manager(request)
+        target_user_ids = [
+            str(user.get("user_id") or "").strip()
+            for user in manager.get_users(account_id)
+            if str(user.get("user_id") or "").strip()
+        ]
+    query = q.strip().lower()
+    items: list[dict[str, Any]] = []
+
+    for target_user_id in target_user_ids:
+        target_ctx = _target_memory_ctx(account_id, target_user_id, normalized_agent_id)
+        for root in _allowed_memory_roots(target_ctx, scope):
+            try:
+                uris = await service.fs.ls(
+                    root,
+                    ctx=target_ctx,
+                    recursive=True,
+                    simple=True,
+                    output="original",
+                    node_limit=2000,
+                    level_limit=20,
+                )
+            except Exception:
+                continue
+
+            for uri in uris:
+                if not isinstance(uri, str) or not _is_memory_file_uri(uri):
+                    continue
+                item_category = _memory_category_from_uri(uri)
+                if normalized_category and item_category != normalized_category:
+                    continue
+
+                try:
+                    raw_content = await service.fs.read(uri, ctx=target_ctx)
+                except Exception:
+                    raw_content = ""
+                content = deserialize_content(raw_content)
+                searchable = (
+                    f"{target_user_id}\n{normalized_agent_id}\n{uri}\n{item_category}\n{content}"
+                ).lower()
+                if query and query not in searchable:
+                    continue
+
+                try:
+                    stat = await service.fs.stat(uri, ctx=target_ctx)
+                except Exception:
+                    stat = {}
+
+                items.append(
+                    {
+                        "uri": uri,
+                        "user_id": target_user_id,
+                        "agent_id": normalized_agent_id,
+                        "scope": _memory_scope_from_uri(uri),
+                        "category": item_category,
+                        "name": uri.rstrip("/").rsplit("/", 1)[-1],
+                        "preview": _content_excerpt(content),
+                        "content_length": len(content),
+                        "updated_at": stat.get("modTime") or stat.get("updated_at") or "",
+                        "size": stat.get("size", 0),
+                    }
+                )
+
+    items.sort(
+        key=lambda item: (
+            str(item.get("updated_at") or ""),
+            item["user_id"],
+            item["agent_id"],
+            item["uri"],
+        ),
+        reverse=True,
+    )
+    total = len(items)
+    total_pages = (total + page_size - 1) // page_size if total else 0
+    response_page = min(page, total_pages) if total_pages else 1
+    start = (response_page - 1) * page_size
+    end = start + page_size
+
+    return Response(
+        status="ok",
+        result={
+            "items": items[start:end],
+            "total": total,
+            "page": response_page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "scope": scope,
+            "category": normalized_category,
+            "user_id": normalized_user_id,
+            "agent_id": normalized_agent_id,
+            "target_user_ids": target_user_ids,
+        },
+    )
+
+
+@router.get("/accounts/{account_id}/memories/detail")
+async def get_account_memory_detail(
+    account_id: str = Path(..., description="Account ID"),
+    uri: str = Query(..., description="Memory URI"),
+    user_id: str = Query(..., pattern=USER_ID_PATTERN, description="Target user ID"),
+    agent_id: str = Query("default", pattern=USER_ID_PATTERN, description="Target agent ID"),
+    ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN),
+):
+    """Read one memory file."""
+    _check_account_access(ctx, account_id)
+    service = get_service()
+    target_ctx = _target_memory_ctx(account_id, user_id, agent_id)
+    _ensure_memory_uri_allowed(uri, target_ctx)
+
+    raw_content = await service.fs.read(uri, ctx=target_ctx)
+    content = deserialize_content(raw_content)
+    try:
+        stat = await service.fs.stat(uri, ctx=target_ctx)
+    except Exception:
+        stat = {}
+
+    return Response(
+        status="ok",
+        result={
+            "uri": uri,
+            "scope": _memory_scope_from_uri(uri),
+            "category": _memory_category_from_uri(uri),
+            "name": uri.rstrip("/").rsplit("/", 1)[-1],
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "content": content,
+            "content_length": len(content),
+            "updated_at": stat.get("modTime") or stat.get("updated_at") or "",
+            "size": stat.get("size", 0),
+        },
+    )
+
+
+@router.put("/accounts/{account_id}/memories")
+async def update_account_memory(
+    body: AdminMemoryUpdateRequest = Body(...),
+    account_id: str = Path(..., description="Account ID"),
+    ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN),
+):
+    """Replace one memory file and refresh its vector/semantic indexes."""
+    _check_account_access(ctx, account_id)
+    service = get_service()
+    target_ctx = _target_memory_ctx(account_id, body.user_id, body.agent_id)
+    _ensure_memory_uri_allowed(body.uri, target_ctx)
+
+    write_result = await service.fs.write(
+        uri=body.uri,
+        content=body.content,
+        ctx=target_ctx,
+        mode="replace",
+        wait=body.wait,
+    )
+    return Response(
+        status="ok",
+        result={
+            "uri": body.uri,
+            "write": write_result,
+        },
+    )
+
+
+@router.delete("/accounts/{account_id}/memories")
+async def delete_account_memory(
+    body: AdminMemoryDeleteRequest = Body(...),
+    account_id: str = Path(..., description="Account ID"),
+    ctx: RequestContext = require_role(Role.ROOT, Role.ADMIN),
+):
+    """Delete one memory file and clean up matching vector records."""
+    _check_account_access(ctx, account_id)
+    service = get_service()
+    target_ctx = _target_memory_ctx(account_id, body.user_id, body.agent_id)
+    _ensure_memory_uri_allowed(body.uri, target_ctx)
+
+    await service.fs.rm(body.uri, ctx=target_ctx, recursive=False)
+    return Response(
+        status="ok",
+        result={
+            "uri": body.uri,
+            "deleted": True,
+        },
+    )
 
 
 # ---- Analytics and session audit endpoints ----
