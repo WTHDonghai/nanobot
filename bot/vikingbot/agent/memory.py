@@ -2,10 +2,11 @@
 
 from pathlib import Path
 from typing import Any
+
 from loguru import logger
-import time
 
 from vikingbot.config.loader import load_config
+from vikingbot.openviking_identity import resolve_agent_memory_identity
 from vikingbot.openviking_mount.ov_server import VikingClient
 from vikingbot.utils.helpers import ensure_dir
 
@@ -30,9 +31,11 @@ class MemoryStore:
                 user_memories.append(
                     f"<memory index=\"{idx}\">\n"
                     f"  <abstract>{getattr(memory, 'abstract', '')}</abstract>\n"
+                    f"  <overview>{getattr(memory, 'overview', '') or ''}</overview>\n"
                     f"  <uri>{getattr(memory, 'uri', '')}</uri>\n"
                     f"  <is_leaf>{getattr(memory, 'is_leaf', False)}</is_leaf>\n"
                     f"  <score>{getattr(memory, 'score', 0.0)}</score>\n"
+                    f"  <match_reason>{getattr(memory, 'match_reason', '') or ''}</match_reason>\n"
                     f"</memory>"
                 )
             return "\n".join(user_memories)
@@ -69,6 +72,32 @@ class MemoryStore:
         except Exception as e:
             logger.error(f"[READ_USER_MEMORY]: search error. {e}")
             return ""
+
+    async def get_viking_agent_memory_context(
+        self,
+        current_message: str,
+        *,
+        agent_id: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = 5,
+    ) -> str:
+        """Search reusable agent memory without mixing in user facts."""
+        resolved_agent_id = str(agent_id or "").strip()
+        resolved_owner_user_id = str(owner_user_id or "").strip()
+        if not resolved_agent_id or not resolved_owner_user_id:
+            identity = resolve_agent_memory_identity()
+            resolved_agent_id = resolved_agent_id or identity.agent_id
+            resolved_owner_user_id = resolved_owner_user_id or identity.owner_user_id
+        client = await VikingClient.create(agent_id=resolved_agent_id)
+        result = await client.search_memory(
+            query=current_message,
+            user_id=resolved_owner_user_id,
+            agent_user_id=resolved_owner_user_id,
+            limit=limit,
+        )
+        if not result:
+            return ""
+        return self._parse_viking_memory(result.get("agent_memory"))
 
     async def get_viking_user_profile(self, workspace_id: str, user_id: str) -> str:
         client = await VikingClient.create(agent_id=workspace_id)

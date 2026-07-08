@@ -124,6 +124,11 @@ def _feedback_summary_from_meta(meta: SessionMeta) -> Dict[str, Any]:
         "positive_feedback_count": _safe_int(feedback.get("positive_feedback_count")),
         "negative_feedback_count": _safe_int(feedback.get("negative_feedback_count")),
         "latest_feedback_at": str(feedback.get("latest_feedback_at") or ""),
+        "feedback_memory_pending_count": _safe_int(feedback.get("memory_pending_count")),
+        "feedback_memory_completed_count": _safe_int(feedback.get("memory_completed_count")),
+        "feedback_memory_failed_count": _safe_int(feedback.get("memory_failed_count")),
+        "feedback_memory_skipped_count": _safe_int(feedback.get("memory_skipped_count")),
+        "feedback_memory_extracted_count": _safe_int(feedback.get("memory_extracted_count")),
     }
 
 
@@ -475,7 +480,7 @@ class SessionService:
             **self._summarize_messages(messages),
         }
         if include_messages:
-            result["messages"] = [message.to_dict() for message in messages]
+            result["messages"] = session.messages_to_dict(messages)
         return result
 
     async def _list_admin_user_ids(self, account_id: str, user_id: str = "") -> List[str]:

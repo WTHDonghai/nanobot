@@ -176,6 +176,7 @@ bot将连接远程的OpenViking服务器，使用前需启动Openviking Server�
   - 若不使用本地启动的OpenViking Server，可在此配置url和对应的root user的API Key
     - root_api_key: 多租户场景API KEY必须有root权限，否则bot无法自动注册多个OpenViking用户，用于实现memory的隔离
     - account_id: 默认default，ov的账号ID，OpenViking account下所有user共享resources
+    - agent_memory_read_timeout_ms: 知识库回答读取 Agent Memory 的超时时间，默认 1200ms，实际生效范围为 100ms 到 5000ms；超时后跳过记忆提示，继续正常回答
 - tools.human_handoff：转人工配置。
   - entry_url：“联系人工”按钮打开的人工服务入口 URL
     代码默认值是明显的占位 URL；生产环境请在 `ov.conf` 中显式配置

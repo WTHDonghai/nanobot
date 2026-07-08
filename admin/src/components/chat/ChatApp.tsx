@@ -26,6 +26,7 @@ import {
   MessageFeedback,
   RawSessionListItem,
   SessionArchiveResult,
+  SessionContextMessage,
   SessionContextResult,
   SessionSummary,
 } from './types';
@@ -100,13 +101,38 @@ type BotResponseStreamBuffer = {
 type FeedbackResponse = {
   session_id: string;
   message_id: string;
+  deleted?: boolean;
   feedback?: MessageFeedback;
+  summary?: {
+    feedback_count?: number;
+    positive_feedback_count?: number;
+    negative_feedback_count?: number;
+    latest_feedback_at?: string;
+    memory_pending_count?: number;
+    memory_completed_count?: number;
+    memory_failed_count?: number;
+    memory_skipped_count?: number;
+    memory_extracted_count?: number;
+  };
 };
 
 type SessionFeedbackResult = {
   session_id: string;
   feedback?: Record<string, MessageFeedback>;
 };
+
+const NEGATIVE_FEEDBACK_REASONS = [
+  '信息不准确',
+  '没有解决问题',
+  '操作步骤不完整',
+  '答非所问',
+  '缺少系统入口或前置条件',
+  '需要人工协助',
+];
+const NEGATIVE_FEEDBACK_REASON_SET = new Set(NEGATIVE_FEEDBACK_REASONS);
+const MESSAGE_ID_MATCH_WINDOW_MS = 120_000;
+
+const textEquals = (left: string, right: string) => left.trim() === right.trim();
 
 function clampReferenceDrawerWidth(width: number): number {
   const viewportMax = typeof window === 'undefined'
@@ -369,6 +395,82 @@ const ConfirmModal = ({
   </div>
 );
 
+const NegativeFeedbackPanel = ({
+  selectedTags,
+  error,
+  submitting,
+  onToggleTag,
+  onConfirm,
+  onCancel,
+}: {
+  selectedTags: string[];
+  error: string;
+  submitting: boolean;
+  onToggleTag: (tag: string) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) => {
+  const canSubmit = selectedTags.length > 0 && !submitting;
+
+  return (
+    <form
+      className="chat-feedback-panel"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (canSubmit) onConfirm();
+      }}
+    >
+      <div className="chat-feedback-panel-header">
+        <div className="chat-feedback-panel-title">
+          <ThumbsDown size={16} /> 这条回复需要改进的地方
+        </div>
+        <button
+          type="button"
+          className="chat-feedback-panel-close"
+          onClick={onCancel}
+          disabled={submitting}
+          aria-label="关闭反馈选项"
+          title="关闭反馈选项"
+        >
+          <X size={15} />
+        </button>
+      </div>
+      <p className="chat-feedback-helper">
+        请选择一个或多个原因，帮助我们统计问题类型并改进知识库与回答策略。
+      </p>
+      <div className="chat-feedback-tag-list" aria-label="反馈原因">
+        {NEGATIVE_FEEDBACK_REASONS.map((tag) => {
+          const selected = selectedTags.includes(tag);
+          return (
+            <button
+              key={tag}
+              type="button"
+              className={`chat-feedback-tag ${selected ? 'selected' : ''}`}
+              onClick={() => onToggleTag(tag)}
+              aria-pressed={selected}
+              disabled={submitting}
+              autoFocus={selectedTags.length === 0 && tag === NEGATIVE_FEEDBACK_REASONS[0]}
+            >
+              {tag}
+            </button>
+          );
+        })}
+      </div>
+      {error && <div className="chat-feedback-error" role="alert">{error}</div>}
+      <div className="chat-feedback-panel-footer">
+        <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={submitting}>取消</button>
+        <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
+          {submitting ? (
+            <>
+              <Loader2 size={14} className="chat-status-icon" /> 提交中...
+            </>
+          ) : '提交反馈'}
+        </button>
+      </div>
+    </form>
+  );
+};
+
 const RenameModal = ({
   value,
   defaultTitle,
@@ -520,6 +622,11 @@ const ChatApp: React.FC<ChatAppProps> = ({
   const [activeActionMenu, setActiveActionMenu] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [activeNegativeFeedbackKey, setActiveNegativeFeedbackKey] = useState<string | null>(null);
+  const [negativeFeedbackTags, setNegativeFeedbackTags] = useState<string[]>([]);
+  const [negativeFeedbackSubmitting, setNegativeFeedbackSubmitting] = useState(false);
+  const [negativeFeedbackError, setNegativeFeedbackError] = useState('');
+  const [feedbackSubmittingKey, setFeedbackSubmittingKey] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [referencePreview, setReferencePreview] = useState<ReferencePreviewState | null>(null);
   const [referenceDrawerWidth, setReferenceDrawerWidth] = useState(() => clampReferenceDrawerWidth(440));
@@ -558,7 +665,7 @@ const ChatApp: React.FC<ChatAppProps> = ({
   ) => sourceMessages.map((message) => {
     if (!message.messageId) return message;
     const item = feedback[message.messageId];
-    return item?.value ? { ...message, feedback: item.value } : message;
+    return item?.value ? { ...message, feedback: item.value, feedbackDetail: item } : message;
   });
 
   const finishBotResponseStream = (messageKey: string) => {
@@ -1099,8 +1206,11 @@ const ChatApp: React.FC<ChatAppProps> = ({
   async function resolveLatestBotMessageId(
     targetSessionId: string,
     finalText: string,
+    createdAt?: string,
+    options: { allowLatestFallback?: boolean } = {},
   ): Promise<string | undefined> {
     try {
+      const { allowLatestFallback = false } = options;
       const response = await fetchApi<ApiEnvelope<SessionContextResult>>(
         serverUrl,
         apiKey,
@@ -1110,13 +1220,122 @@ const ChatApp: React.FC<ChatAppProps> = ({
       const context = unwrapResult(response, '同步回复 ID 失败');
       const assistantMessages = (context.messages || [])
         .filter((message) => message.role === 'assistant' && message.id);
-      const matched = [...assistantMessages]
-        .reverse()
-        .find((message) => renderMessageText(message.parts, serverUrl).trim() === finalText.trim());
-      return matched?.id || assistantMessages[assistantMessages.length - 1]?.id;
+      const textMatches = assistantMessages.filter(
+        (message) => textEquals(renderMessageText(message.parts, serverUrl), finalText),
+      );
+      if (textMatches.length > 0) {
+        const resolvedMatch = resolveUniqueAssistantMessageId(textMatches, createdAt);
+        if (resolvedMatch) return resolvedMatch;
+        if (!allowLatestFallback) return undefined;
+        return textMatches[textMatches.length - 1]?.id;
+      }
+      return allowLatestFallback ? assistantMessages[assistantMessages.length - 1]?.id : undefined;
     } catch {
       return undefined;
     }
+  }
+
+  function resolveUniqueAssistantMessageId(
+    assistantMessages: SessionContextMessage[],
+    createdAt?: string,
+  ): string | undefined {
+    if (assistantMessages.length === 1) return assistantMessages[0]?.id;
+
+    const targetTime = createdAt ? new Date(createdAt).getTime() : Number.NaN;
+    if (!Number.isFinite(targetTime)) return undefined;
+
+    const closeMatches = assistantMessages
+      .map((message) => ({
+        message,
+        delta: Math.abs(new Date(message.created_at || '').getTime() - targetTime),
+      }))
+      .filter((item) => Number.isFinite(item.delta) && item.delta <= MESSAGE_ID_MATCH_WINDOW_MS);
+
+    return closeMatches.length === 1 ? closeMatches[0]?.message.id : undefined;
+  }
+
+  function findPreviousUserMessage(targetMessage: ChatMessage): ChatMessage | undefined {
+    const index = messages.findIndex((message) => message.key === targetMessage.key);
+    if (index <= 0) return undefined;
+
+    return [...messages.slice(0, index)]
+      .reverse()
+      .find((message) => message.role === 'user' && message.text.trim());
+  }
+
+  function resolveAssistantAfterPreviousUser(
+    contextMessages: SessionContextMessage[],
+    targetMessage: ChatMessage,
+  ): string | undefined {
+    const previousUserMessage = findPreviousUserMessage(targetMessage);
+    if (!previousUserMessage) return undefined;
+
+    const assistantMatches: SessionContextMessage[] = [];
+    contextMessages.forEach((contextMessage, index) => {
+      if (
+        contextMessage.role !== 'user'
+        || !textEquals(renderMessageText(contextMessage.parts, serverUrl), previousUserMessage.text)
+      ) {
+        return;
+      }
+
+      const assistantsAfterUser: SessionContextMessage[] = [];
+      for (let cursor = index + 1; cursor < contextMessages.length; cursor += 1) {
+        const nextMessage = contextMessages[cursor];
+        if (!nextMessage || nextMessage.role === 'user') break;
+        if (nextMessage.role === 'assistant' && nextMessage.id) {
+          assistantsAfterUser.push(nextMessage);
+        }
+      }
+      if (assistantsAfterUser.length === 1) {
+        assistantMatches.push(assistantsAfterUser[0]);
+      }
+    });
+
+    return resolveUniqueAssistantMessageId(assistantMatches, targetMessage.createdAt);
+  }
+
+  async function resolveFeedbackMessageIdFromContext(
+    message: ChatMessage,
+    targetSessionId: string,
+  ): Promise<string | undefined> {
+    const response = await fetchApi<ApiEnvelope<SessionContextResult>>(
+      serverUrl,
+      apiKey,
+      `/api/v1/sessions/${encodeURIComponent(targetSessionId)}/context?token_budget=${MAX_SESSION_CONTEXT_BUDGET}`,
+      getSessionRequestOptions(),
+    );
+    const context = unwrapResult(response, '同步回复 ID 失败');
+    const contextMessages = context.messages || [];
+    const assistantMessages = contextMessages.filter(
+      (contextMessage) => contextMessage.role === 'assistant' && contextMessage.id,
+    );
+    const textMatches = assistantMessages.filter(
+      (contextMessage) => textEquals(renderMessageText(contextMessage.parts, serverUrl), message.text),
+    );
+
+    if (textMatches.length > 0) {
+      const resolvedMatch = resolveUniqueAssistantMessageId(textMatches, message.createdAt);
+      if (resolvedMatch) return resolvedMatch;
+    }
+
+    return resolveAssistantAfterPreviousUser(contextMessages, message)
+      || resolveUniqueAssistantMessageId(assistantMessages, message.createdAt);
+  }
+
+  async function resolveFeedbackMessageId(message: ChatMessage, targetSessionId: string): Promise<string> {
+    if (message.messageId) return message.messageId;
+    if (!targetSessionId) {
+      throw new Error('反馈提交失败：当前会话尚未同步');
+    }
+
+    const resolvedMessageId = await resolveFeedbackMessageIdFromContext(message, targetSessionId);
+    if (!resolvedMessageId) {
+      throw new Error('反馈暂不可提交：回复记录尚未同步，请稍后重试');
+    }
+
+    updateChatMessage(message.key, { messageId: resolvedMessageId });
+    return resolvedMessageId;
   }
 
   async function handleNewSession() {
@@ -1712,7 +1931,12 @@ const ChatApp: React.FC<ChatAppProps> = ({
         completeBotResponseStream(botId, finalContent);
       }
       const resolvedMessageId = activeSessionId
-        ? await resolveLatestBotMessageId(activeSessionId, finalContent)
+        ? await resolveLatestBotMessageId(
+          activeSessionId,
+          finalContent,
+          latestEventTimestamp,
+          { allowLatestFallback: false },
+        )
         : undefined;
       const hasPendingResponseStream = Boolean(responseStreamBuffersRef.current[botId]);
       setMessages((prev) => prev.map((message) => (
@@ -1806,30 +2030,207 @@ const ChatApp: React.FC<ChatAppProps> = ({
     }
   };
 
-  const handleMessageFeedback = async (message: ChatMessage, value: 'up' | 'down') => {
-    if (!sessionId || !message.messageId || message.loading || message.streaming) return;
+  const submitMessageFeedback = async (
+    message: ChatMessage,
+    value: 'up' | 'down',
+    details: { reason_tags?: string[] } = {},
+  ) => {
+    const targetSessionId = sessionId;
+    if (!targetSessionId || message.loading || message.streaming || feedbackSubmittingKey === message.key) return;
 
     const previous = message.feedback;
-    updateChatMessage(message.key, { feedback: value });
-    setSessionError('');
+    const previousDetail = message.feedbackDetail;
+    setFeedbackSubmittingKey(message.key);
 
     try {
+      const messageId = await resolveFeedbackMessageId(message, targetSessionId);
+      updateChatMessage(message.key, {
+        messageId,
+        feedback: value,
+        feedbackDetail: {
+          message_id: messageId,
+          value,
+          reason_tags: value === 'down' ? details.reason_tags : undefined,
+        },
+      });
+      setSessionError('');
+      const requestBody = {
+        value,
+        ...(details.reason_tags?.length ? { reason_tags: details.reason_tags } : {}),
+      };
+
       const response = await fetchApi<ApiEnvelope<FeedbackResponse>>(
         serverUrl,
         apiKey,
-        `/api/v1/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(message.messageId)}/feedback`,
+        `/api/v1/sessions/${encodeURIComponent(targetSessionId)}/messages/${encodeURIComponent(messageId)}/feedback`,
         {
           method: 'PUT',
-          body: JSON.stringify({ value }),
+          body: JSON.stringify(requestBody),
           ...getSessionRequestOptions(),
         },
       );
       const result = unwrapResult(response, '反馈提交失败');
-      updateChatMessage(message.key, { feedback: result.feedback?.value || value });
-      void loadSessions(sessionId);
+      updateChatMessage(message.key, {
+        feedback: result.feedback?.value || value,
+        feedbackDetail: result.feedback,
+      });
+      applyFeedbackSummary(targetSessionId, result.summary);
+      return result;
     } catch (err: unknown) {
-      updateChatMessage(message.key, { feedback: previous });
+      updateChatMessage(message.key, { feedback: previous, feedbackDetail: previousDetail });
+      throw err;
+    } finally {
+      setFeedbackSubmittingKey((current) => (current === message.key ? null : current));
+    }
+  };
+
+  const applyFeedbackSummary = (
+    targetSessionId: string,
+    summary?: FeedbackResponse['summary'],
+  ) => {
+    if (!summary) return;
+    const patch = {
+      feedback_count: summary.feedback_count,
+      positive_feedback_count: summary.positive_feedback_count,
+      negative_feedback_count: summary.negative_feedback_count,
+      latest_feedback_at: summary.latest_feedback_at,
+      feedback_memory_pending_count: summary.memory_pending_count,
+      feedback_memory_completed_count: summary.memory_completed_count,
+      feedback_memory_failed_count: summary.memory_failed_count,
+      feedback_memory_skipped_count: summary.memory_skipped_count,
+      feedback_memory_extracted_count: summary.memory_extracted_count,
+    };
+    setActiveSessionMeta((current) => (
+      current?.session_id === targetSessionId ? { ...current, ...patch } : current
+    ));
+    setSessions((current) => current.map((item) => (
+      item.session_id === targetSessionId ? { ...item, ...patch } : item
+    )));
+  };
+
+  const clearMessageFeedback = async (message: ChatMessage) => {
+    const targetSessionId = sessionId;
+    if (!targetSessionId || message.loading || message.streaming || feedbackSubmittingKey === message.key) return;
+
+    const previous = message.feedback;
+    const previousDetail = message.feedbackDetail;
+    setFeedbackSubmittingKey(message.key);
+    setActiveNegativeFeedbackKey((current) => (current === message.key ? null : current));
+    setNegativeFeedbackError('');
+
+    try {
+      const messageId = await resolveFeedbackMessageId(message, targetSessionId);
+      updateChatMessage(message.key, {
+        messageId,
+        feedback: undefined,
+        feedbackDetail: undefined,
+      });
+      setSessionError('');
+
+      const response = await fetchApi<ApiEnvelope<FeedbackResponse>>(
+        serverUrl,
+        apiKey,
+        `/api/v1/sessions/${encodeURIComponent(targetSessionId)}/messages/${encodeURIComponent(messageId)}/feedback`,
+        {
+          method: 'DELETE',
+          ...getSessionRequestOptions(),
+        },
+      );
+      const result = unwrapResult(response, '取消反馈失败');
+      updateChatMessage(message.key, {
+        feedback: undefined,
+        feedbackDetail: undefined,
+      });
+      applyFeedbackSummary(targetSessionId, result.summary);
+      return result;
+    } catch (err: unknown) {
+      updateChatMessage(message.key, { feedback: previous, feedbackDetail: previousDetail });
+      throw err;
+    } finally {
+      setFeedbackSubmittingKey((current) => (current === message.key ? null : current));
+    }
+  };
+
+  const handleMessageFeedback = async (message: ChatMessage, value: 'up' | 'down') => {
+    if (message.feedback === value) {
+      try {
+        await clearMessageFeedback(message);
+      } catch (err: unknown) {
+        setSessionError(err instanceof Error ? err.message : '取消反馈失败，请稍后重试');
+      }
+      return;
+    }
+
+    if (value === 'down') {
+      if (activeNegativeFeedbackKey === message.key) {
+        setActiveNegativeFeedbackKey(null);
+        setNegativeFeedbackTags([]);
+        setNegativeFeedbackError('');
+        return;
+      }
+      setActiveNegativeFeedbackKey(message.key);
+      setNegativeFeedbackTags(
+        (message.feedbackDetail?.reason_tags || [])
+          .filter((tag) => NEGATIVE_FEEDBACK_REASON_SET.has(tag)),
+      );
+      setNegativeFeedbackError('');
+      return;
+    }
+
+    try {
+      setActiveNegativeFeedbackKey((current) => (current === message.key ? null : current));
+      await submitMessageFeedback(message, value);
+    } catch (err: unknown) {
       setSessionError(err instanceof Error ? err.message : '反馈提交失败，请稍后重试');
+    }
+  };
+
+  const toggleNegativeFeedbackTag = (tag: string) => {
+    setNegativeFeedbackTags((prev) => (
+      prev.includes(tag)
+        ? prev.filter((item) => item !== tag)
+        : [...prev, tag]
+    ));
+  };
+
+  const closeNegativeFeedbackPanel = () => {
+    if (negativeFeedbackSubmitting) return;
+    setActiveNegativeFeedbackKey(null);
+    setNegativeFeedbackTags([]);
+    setNegativeFeedbackError('');
+  };
+
+  const confirmNegativeFeedback = async () => {
+    if (!activeNegativeFeedbackKey || negativeFeedbackSubmitting) return;
+
+    const negativeFeedbackTarget = messages.find(
+      (message) => message.key === activeNegativeFeedbackKey,
+    );
+    if (!negativeFeedbackTarget) {
+      closeNegativeFeedbackPanel();
+      return;
+    }
+
+    setNegativeFeedbackSubmitting(true);
+    setNegativeFeedbackError('');
+    try {
+      if (negativeFeedbackTags.length === 0) {
+        setNegativeFeedbackError('请选择一个或多个反馈原因。');
+        return;
+      }
+      await submitMessageFeedback(
+        negativeFeedbackTarget,
+        'down',
+        {
+          reason_tags: negativeFeedbackTags,
+        },
+      );
+      setActiveNegativeFeedbackKey(null);
+      setNegativeFeedbackTags([]);
+    } catch (err: unknown) {
+      setNegativeFeedbackError(err instanceof Error ? err.message : '反馈提交失败，请稍后重试');
+    } finally {
+      setNegativeFeedbackSubmitting(false);
     }
   };
 
@@ -2117,40 +2518,66 @@ const ChatApp: React.FC<ChatAppProps> = ({
                             />
                           )}
                           {message.role === 'bot' && message.key !== 'welcome' && !message.loading && !message.streaming && (
-                            <div className="chat-bubble-actions" data-export-ignore="true">
-                              <div className="chat-feedback-actions" aria-label="回复反馈">
+                            <>
+                              <div className="chat-bubble-actions" data-export-ignore="true">
+                                <div className="chat-feedback-actions" aria-label="回复反馈">
+                                  <button
+                                    type="button"
+                                    className={`chat-feedback-btn ${message.feedback === 'up' ? 'active positive' : ''}`}
+                                    onClick={() => { void handleMessageFeedback(message, 'up'); }}
+                                    disabled={!sessionId || feedbackSubmittingKey === message.key}
+                                    title={
+                                      feedbackSubmittingKey === message.key
+                                        ? '正在提交反馈'
+                                        : message.feedback === 'up'
+                                          ? '再次点击取消点赞'
+                                          : '这条回复有帮助'
+                                    }
+                                    aria-label="这条回复有帮助"
+                                    aria-pressed={message.feedback === 'up'}
+                                  >
+                                    <ThumbsUp size={14} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`chat-feedback-btn ${message.feedback === 'down' ? 'active negative' : ''}`}
+                                    onClick={() => { void handleMessageFeedback(message, 'down'); }}
+                                    disabled={!sessionId || feedbackSubmittingKey === message.key}
+                                    title={
+                                      feedbackSubmittingKey === message.key
+                                        ? '正在提交反馈'
+                                        : message.feedback === 'down'
+                                          ? '再次点击取消点踩'
+                                          : '这条回复没有帮助'
+                                    }
+                                    aria-label="这条回复没有帮助"
+                                    aria-pressed={message.feedback === 'down'}
+                                  >
+                                    <ThumbsDown size={14} />
+                                  </button>
+                                </div>
                                 <button
-                                  className={`chat-feedback-btn ${message.feedback === 'up' ? 'active positive' : ''}`}
-                                  onClick={() => { void handleMessageFeedback(message, 'up'); }}
-                                  disabled={busy || !sessionId || !message.messageId}
-                                  title="这条回复有帮助"
-                                  aria-label="这条回复有帮助"
-                                  aria-pressed={message.feedback === 'up'}
+                                  className="chat-export-btn"
+                                  onClick={() => { void handleExportPdf(message, index); }}
+                                  disabled={busy || Boolean(exportingMessageKey)}
+                                  title="导出从顶部到当前回复的 PDF"
+                                  aria-label="导出当前回复之前的会话为 PDF"
                                 >
-                                  <ThumbsUp size={14} />
-                                </button>
-                                <button
-                                  className={`chat-feedback-btn ${message.feedback === 'down' ? 'active negative' : ''}`}
-                                  onClick={() => { void handleMessageFeedback(message, 'down'); }}
-                                  disabled={busy || !sessionId || !message.messageId}
-                                  title="这条回复没有帮助"
-                                  aria-label="这条回复没有帮助"
-                                  aria-pressed={message.feedback === 'down'}
-                                >
-                                  <ThumbsDown size={14} />
+                                  <FileDown size={14} />
+                                  <span>{exportingMessageKey === message.key ? '导出中...' : '导出 PDF'}</span>
                                 </button>
                               </div>
-                              <button
-                                className="chat-export-btn"
-                                onClick={() => { void handleExportPdf(message, index); }}
-                                disabled={busy || Boolean(exportingMessageKey)}
-                                title="导出从顶部到当前回复的 PDF"
-                                aria-label="导出当前回复之前的会话为 PDF"
-                              >
-                                <FileDown size={14} />
-                                <span>{exportingMessageKey === message.key ? '导出中...' : '导出 PDF'}</span>
-                              </button>
-                            </div>
+                              {activeNegativeFeedbackKey === message.key && (
+                                <NegativeFeedbackPanel
+                                  selectedTags={negativeFeedbackTags}
+                                  error={negativeFeedbackError}
+                                  submitting={negativeFeedbackSubmitting || feedbackSubmittingKey === message.key}
+                                  onToggleTag={toggleNegativeFeedbackTag}
+                                  onConfirm={() => { void confirmNegativeFeedback(); }}
+                                  onCancel={closeNegativeFeedbackPanel}
+                                />
+                              )}
+                            </>
                           )}
                         </>
                       )}

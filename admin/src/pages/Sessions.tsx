@@ -30,6 +30,11 @@ type SessionSummary = {
   positive_feedback_count?: number;
   negative_feedback_count?: number;
   latest_feedback_at?: string;
+  feedback_memory_pending_count?: number;
+  feedback_memory_completed_count?: number;
+  feedback_memory_failed_count?: number;
+  feedback_memory_skipped_count?: number;
+  feedback_memory_extracted_count?: number;
   token_usage?: TokenUsage;
 };
 
@@ -39,7 +44,11 @@ type MessageFeedback = {
   created_at?: string;
   updated_at?: string;
   reason_tags?: string[];
-  comment?: string;
+  memory_status?: 'pending' | 'completed' | 'failed' | 'skipped';
+  memory_task_id?: string;
+  memory_extracted_count?: number;
+  memory_error?: string;
+  memory_updated_at?: string;
 };
 
 type SessionMessage = {
@@ -680,6 +689,33 @@ const FeedbackBadge = ({ feedback }: { feedback?: MessageFeedback }) => {
   return null;
 };
 
+const FeedbackDetail = ({ feedback }: { feedback?: MessageFeedback }) => {
+  const tags = feedback?.reason_tags || [];
+  const memoryStatus = feedback?.memory_status || '';
+  if (tags.length === 0 && !memoryStatus) return null;
+
+  return (
+    <div className="session-feedback-detail">
+      {tags.length > 0 && (
+        <div className="session-feedback-tags">
+          {tags.map((tag) => (
+            <span className="quality-chip warning compact" key={tag}>{tag}</span>
+          ))}
+        </div>
+      )}
+      {memoryStatus && (
+        <div className="session-feedback-memory">
+          记忆提取：{memoryStatus}
+          {typeof feedback?.memory_extracted_count === 'number'
+            ? `，${formatNumber(feedback.memory_extracted_count)} 条`
+            : ''}
+          {feedback?.memory_error ? `，${feedback.memory_error}` : ''}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ConfirmModal = ({ message, onConfirm, onCancel }: {
   message: string; onConfirm: () => void; onCancel: () => void;
 }) => (
@@ -880,6 +916,7 @@ const DetailModal = ({ detail, loading, error, query, serverUrl, onClose }: {
                     ) : tools.length === 0 ? (
                       <div className="session-message-note">该消息没有可展示的文本内容。</div>
                     ) : null}
+                    <FeedbackDetail feedback={feedback} />
                     {!text && !showInlineTools && tools.length > 0 && (
                       <div className="session-message-note">该 Agent 消息只有工具调用，无文本回复。</div>
                     )}

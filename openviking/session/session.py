@@ -35,6 +35,25 @@ _ARCHIVE_WAIT_POLL_SECONDS = 0.1
 FAILED_TOOL_STATUSES = {"error", "failed"}
 AUDIT_SUMMARY_VERSION = 1
 VALID_FEEDBACK_VALUES = {"up", "down"}
+NEGATIVE_FEEDBACK_REASON_TAGS = {
+    "信息不准确",
+    "没有解决问题",
+    "操作步骤不完整",
+    "答非所问",
+    "缺少系统入口或前置条件",
+    "需要人工协助",
+}
+LEGACY_NEGATIVE_FEEDBACK_REASON_TAGS = {
+    "不准确": "信息不准确",
+    "缺少步骤": "操作步骤不完整",
+}
+FEEDBACK_MEMORY_TASK_TYPE = "message_feedback_memory"
+FEEDBACK_MEMORY_STATUSES = {"pending", "completed", "failed", "skipped"}
+
+
+def _canonical_feedback_reason_tag(tag: Any) -> str:
+    value = str(tag).strip()[:80]
+    return LEGACY_NEGATIVE_FEEDBACK_REASON_TAGS.get(value, value)
 
 
 @dataclass
@@ -117,6 +136,11 @@ class SessionMeta:
             "positive_feedback_count": 0,
             "negative_feedback_count": 0,
             "latest_feedback_at": "",
+            "memory_pending_count": 0,
+            "memory_completed_count": 0,
+            "memory_failed_count": 0,
+            "memory_skipped_count": 0,
+            "memory_extracted_count": 0,
         }
     )
     audit_summary_version: int = AUDIT_SUMMARY_VERSION
@@ -152,6 +176,12 @@ class SessionMeta:
         feedback = data.get("feedback_summary", {})
         if not isinstance(feedback, dict):
             feedback = {}
+
+        def feedback_int(key: str) -> int:
+            try:
+                return int(feedback.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                return 0
 
         return cls(
             session_id=data.get("session_id", ""),
@@ -195,14 +225,15 @@ class SessionMeta:
                 "last_message_at": audit.get("last_message_at", ""),
             },
             feedback_summary={
-                "feedback_count": int(feedback.get("feedback_count", 0) or 0),
-                "positive_feedback_count": int(
-                    feedback.get("positive_feedback_count", 0) or 0
-                ),
-                "negative_feedback_count": int(
-                    feedback.get("negative_feedback_count", 0) or 0
-                ),
+                "feedback_count": feedback_int("feedback_count"),
+                "positive_feedback_count": feedback_int("positive_feedback_count"),
+                "negative_feedback_count": feedback_int("negative_feedback_count"),
                 "latest_feedback_at": feedback.get("latest_feedback_at", ""),
+                "memory_pending_count": feedback_int("memory_pending_count"),
+                "memory_completed_count": feedback_int("memory_completed_count"),
+                "memory_failed_count": feedback_int("memory_failed_count"),
+                "memory_skipped_count": feedback_int("memory_skipped_count"),
+                "memory_extracted_count": feedback_int("memory_extracted_count"),
             },
             audit_summary_version=int(data.get("audit_summary_version", 0) or 0),
             audit_summary_complete=bool(data.get("audit_summary_complete", False)),
@@ -392,6 +423,7 @@ class Session:
             self._feedback = self._normalize_feedback_index(json.loads(feedback_content))
         except Exception:
             self._feedback = {}
+        self._refresh_feedback_summary()
 
         self._loaded = True
 
@@ -457,26 +489,60 @@ class Session:
             }
             if isinstance(raw.get("reason_tags"), list):
                 normalized[message_id]["reason_tags"] = [
-                    str(tag) for tag in raw["reason_tags"] if str(tag).strip()
+                    tag
+                    for tag in dict.fromkeys(
+                        _canonical_feedback_reason_tag(tag)
+                        for tag in raw["reason_tags"]
+                    )
+                    if tag in NEGATIVE_FEEDBACK_REASON_TAGS
                 ]
-            comment = raw.get("comment")
-            if isinstance(comment, str) and comment.strip():
-                normalized[message_id]["comment"] = comment.strip()[:1000]
+            memory_status = raw.get("memory_status")
+            if isinstance(memory_status, str) and memory_status in FEEDBACK_MEMORY_STATUSES:
+                normalized[message_id]["memory_status"] = memory_status
+            for key in ["memory_task_id", "memory_error", "memory_updated_at"]:
+                value = raw.get(key)
+                if isinstance(value, str) and value.strip():
+                    normalized[message_id][key] = value.strip()
+            try:
+                extracted_count = int(raw.get("memory_extracted_count", 0) or 0)
+            except (TypeError, ValueError):
+                extracted_count = 0
+            if extracted_count > 0:
+                normalized[message_id]["memory_extracted_count"] = extracted_count
         return normalized
 
     def _refresh_feedback_summary(self) -> None:
         values = list(self._feedback.values())
         latest_feedback_at = ""
+        memory_status_counts = {
+            "pending": 0,
+            "completed": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+        memory_extracted_count = 0
         for item in values:
             updated_at = str(item.get("updated_at") or item.get("created_at") or "")
             if updated_at > latest_feedback_at:
                 latest_feedback_at = updated_at
+            memory_status = item.get("memory_status")
+            if memory_status in memory_status_counts:
+                memory_status_counts[memory_status] += 1
+            try:
+                memory_extracted_count += int(item.get("memory_extracted_count", 0) or 0)
+            except (TypeError, ValueError):
+                pass
 
         self._meta.feedback_summary = {
             "feedback_count": len(values),
             "positive_feedback_count": sum(1 for item in values if item.get("value") == "up"),
             "negative_feedback_count": sum(1 for item in values if item.get("value") == "down"),
             "latest_feedback_at": latest_feedback_at,
+            "memory_pending_count": memory_status_counts["pending"],
+            "memory_completed_count": memory_status_counts["completed"],
+            "memory_failed_count": memory_status_counts["failed"],
+            "memory_skipped_count": memory_status_counts["skipped"],
+            "memory_extracted_count": memory_extracted_count,
         }
 
     @property
@@ -493,6 +559,18 @@ class Session:
     def meta(self) -> SessionMeta:
         """Get session metadata."""
         return self._meta
+
+    def message_to_dict(self, message: Message) -> Dict[str, Any]:
+        """Serialize a message and hydrate its feedback view when present."""
+        data = message.to_dict()
+        feedback = self._feedback.get(message.id)
+        if feedback:
+            data["feedback"] = dict(feedback)
+        return data
+
+    def messages_to_dict(self, messages: List[Message]) -> List[Dict[str, Any]]:
+        """Serialize messages and hydrate feedback for API consumers."""
+        return [self.message_to_dict(message) for message in messages]
 
     # ============= Core methods =============
 
@@ -527,19 +605,12 @@ class Session:
         value: str,
         *,
         reason_tags: Optional[List[str]] = None,
-        comment: str = "",
     ) -> Dict[str, Any]:
         """Create or update one-click feedback for an assistant message."""
         if value not in VALID_FEEDBACK_VALUES:
             raise ValueError("feedback value must be 'up' or 'down'")
 
-        message = next((m for m in self._messages if m.id == message_id), None)
-        if message is None:
-            for archive in await self._list_archive_refs():
-                messages = await self._read_archive_messages(archive["archive_uri"])
-                message = next((m for m in messages if m.id == message_id), None)
-                if message is not None:
-                    break
+        message, previous_user_message = await self._find_message_for_feedback(message_id)
 
         if message is None:
             raise ValueError("message not found")
@@ -555,20 +626,226 @@ class Session:
             "updated_at": now,
         }
         normalized_tags = [
-            str(tag).strip()[:80]
+            _canonical_feedback_reason_tag(tag)
             for tag in (reason_tags or [])
             if str(tag).strip()
         ]
-        if normalized_tags:
-            entry["reason_tags"] = normalized_tags[:8]
-        if comment.strip():
-            entry["comment"] = comment.strip()[:1000]
+        deduped_tags = list(dict.fromkeys(normalized_tags))
+        if value == "down":
+            if not deduped_tags:
+                raise ValueError("feedback reason is required for down feedback")
+            unknown_tags = [
+                tag for tag in deduped_tags if tag not in NEGATIVE_FEEDBACK_REASON_TAGS
+            ]
+            if unknown_tags:
+                raise ValueError("unsupported feedback reason tag")
+            entry["reason_tags"] = deduped_tags[:8]
+
+        memory_messages: Optional[List[Message]] = None
+        memory_task_id = ""
+        if value == "up":
+            existing_status = existing.get("memory_status")
+            should_reuse_memory_state = (
+                existing.get("value") == "up"
+                and existing_status in {"pending", "completed"}
+            )
+            if should_reuse_memory_state:
+                for key in [
+                    "memory_status",
+                    "memory_task_id",
+                    "memory_extracted_count",
+                    "memory_error",
+                    "memory_updated_at",
+                ]:
+                    if key in existing:
+                        entry[key] = existing[key]
+            elif previous_user_message is None:
+                entry["memory_status"] = "skipped"
+                entry["memory_error"] = "No preceding user message found for this answer."
+                entry["memory_updated_at"] = now
+            elif self._session_compressor is None:
+                entry["memory_status"] = "skipped"
+                entry["memory_error"] = "Session compressor is not available."
+                entry["memory_updated_at"] = now
+            else:
+                from openviking.service.task_tracker import get_task_tracker
+
+                task = get_task_tracker().create(
+                    FEEDBACK_MEMORY_TASK_TYPE,
+                    resource_id=f"{self.session_id}:{message_id}",
+                )
+                memory_task_id = task.task_id
+                entry["memory_status"] = "pending"
+                entry["memory_task_id"] = memory_task_id
+                entry["memory_updated_at"] = now
+                memory_messages = [previous_user_message, message]
+        else:
+            entry["memory_status"] = "skipped"
+            entry["memory_updated_at"] = now
 
         self._feedback[message_id] = entry
         self._refresh_feedback_summary()
         await self._save_feedback()
         await self._save_meta()
+        if memory_messages and memory_task_id:
+            asyncio.create_task(
+                self._run_feedback_memory_extraction(
+                    task_id=memory_task_id,
+                    message_id=message_id,
+                    messages=memory_messages,
+                )
+            )
         return entry
+
+    async def clear_message_feedback(self, message_id: str) -> bool:
+        """Remove feedback for an assistant message."""
+        message, _previous_user_message = await self._find_message_for_feedback(message_id)
+
+        if message is None:
+            raise ValueError("message not found")
+        if message.role != "assistant":
+            raise ValueError("feedback can only be recorded for assistant messages")
+
+        deleted = message_id in self._feedback
+        if deleted:
+            self._feedback.pop(message_id, None)
+            self._refresh_feedback_summary()
+            await self._save_feedback()
+            await self._save_meta()
+        return deleted
+
+    async def _find_message_for_feedback(
+        self, message_id: str
+    ) -> tuple[Optional[Message], Optional[Message]]:
+        messages = await self._read_all_feedback_messages()
+        for index, message in enumerate(messages):
+            if message.id != message_id:
+                continue
+            previous_user = next(
+                (candidate for candidate in reversed(messages[:index]) if candidate.role == "user"),
+                None,
+            )
+            return message, previous_user
+        return None, None
+
+    async def _read_all_feedback_messages(self) -> List[Message]:
+        messages: List[Message] = []
+        for archive in sorted(await self._list_archive_refs(), key=lambda item: item["index"]):
+            messages.extend(await self._read_archive_messages(archive["archive_uri"]))
+        messages.extend(self._messages)
+        return messages
+
+    async def _run_feedback_memory_extraction(
+        self,
+        *,
+        task_id: str,
+        message_id: str,
+        messages: List[Message],
+    ) -> None:
+        from openviking.service.task_tracker import get_task_tracker
+
+        tracker = get_task_tracker()
+        tracker.start(task_id)
+        try:
+            if not self._session_compressor:
+                await self._update_feedback_memory_status(
+                    message_id,
+                    task_id,
+                    status="skipped",
+                    error="Session compressor is not available.",
+                )
+                tracker.complete(
+                    task_id,
+                    {
+                        "session_id": self.session_id,
+                        "message_id": message_id,
+                        "memory_status": "skipped",
+                        "memories_extracted": 0,
+                    },
+                )
+                return
+
+            extracted = await self._session_compressor.extract_long_term_memories(
+                messages=messages,
+                user=self.user,
+                session_id=self.session_id,
+                ctx=self.ctx,
+                strict_extract_errors=True,
+                memory_scope="agent",
+                feedback=(
+                    "The user marked this assistant answer as helpful. "
+                    "Prefer extracting reusable agent memories from the paired "
+                    "question and answer when they contain durable guidance."
+                ),
+            )
+            extracted_count = len(extracted)
+            await self._update_feedback_memory_status(
+                message_id,
+                task_id,
+                status="completed",
+                extracted_count=extracted_count,
+            )
+            tracker.complete(
+                task_id,
+                {
+                    "session_id": self.session_id,
+                    "message_id": message_id,
+                    "memory_status": "completed",
+                    "memories_extracted": extracted_count,
+                },
+            )
+        except Exception as e:
+            await self._update_feedback_memory_status(
+                message_id,
+                task_id,
+                status="failed",
+                error=str(e),
+            )
+            tracker.fail(task_id, str(e))
+            logger.exception(
+                f"Positive feedback memory extraction failed for session "
+                f"{self.session_id} message {message_id}"
+            )
+
+    async def _update_feedback_memory_status(
+        self,
+        message_id: str,
+        task_id: str,
+        *,
+        status: str,
+        extracted_count: int = 0,
+        error: str = "",
+    ) -> None:
+        if status not in FEEDBACK_MEMORY_STATUSES:
+            return
+
+        try:
+            feedback_content = await self._viking_fs.read_file(
+                f"{self._session_uri}/feedback.json", ctx=self.ctx
+            )
+            self._feedback = self._normalize_feedback_index(json.loads(feedback_content))
+        except Exception:
+            pass
+
+        entry = dict(self._feedback.get(message_id) or {})
+        if entry.get("memory_task_id") != task_id:
+            return
+
+        entry["memory_status"] = status
+        entry["memory_updated_at"] = get_current_timestamp()
+        if extracted_count > 0:
+            entry["memory_extracted_count"] = int(extracted_count)
+        else:
+            entry.pop("memory_extracted_count", None)
+        if error:
+            entry["memory_error"] = error[:500]
+        else:
+            entry.pop("memory_error", None)
+
+        self._feedback[message_id] = entry
+        self._refresh_feedback_summary()
+        await self._save_feedback()
+        await self._save_meta()
 
     def add_message(
         self,
@@ -1100,7 +1377,7 @@ class Session:
                 latest_archive["overview"] if include_latest_overview else ""
             ),
             "pre_archive_abstracts": included_pre_archive_abstracts,
-            "messages": [m.to_dict() for m in merged_messages],
+            "messages": self.messages_to_dict(merged_messages),
             "estimatedTokens": message_tokens + archive_tokens,
             "stats": {
                 "totalArchives": context["total_archives"],
@@ -1151,9 +1428,9 @@ class Session:
                 "archive_id": archive_id,
                 "abstract": abstract,
                 "overview": overview,
-                "messages": [
-                    m.to_dict() for m in await self._read_archive_messages(archive["archive_uri"])
-                ],
+                "messages": self.messages_to_dict(
+                    await self._read_archive_messages(archive["archive_uri"])
+                ),
             }
 
         raise NotFoundError(archive_id, "session archive")

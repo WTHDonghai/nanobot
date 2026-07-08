@@ -1,5 +1,6 @@
 """Context builder for assembling agent prompts."""
 
+import asyncio
 import base64
 import mimetypes
 import platform
@@ -13,6 +14,7 @@ from loguru import logger
 from vikingbot.agent.memory import MemoryStore
 from vikingbot.agent.skills import SkillsLoader
 from vikingbot.config.schema import AgentMode, Config, SessionKey
+from vikingbot.openviking_identity import resolve_agent_memory_identity
 from vikingbot.sandbox import SandboxManager
 from vikingbot.utils.helpers import ensure_non_empty_assistant_content
 
@@ -108,6 +110,7 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md"]
     INIT_DIR = "init"
+    DEFAULT_AGENT_MEMORY_READ_TIMEOUT_MS = 1200
 
     def __init__(
         self,
@@ -127,6 +130,12 @@ class ContextBuilder:
         self._is_group_chat = is_group_chat
         self._eval = eval
         self.config = config
+        self._agent_memory_read_stats = {
+            "status": "not_started",
+            "duration_ms": 0,
+            "timeout_ms": self.DEFAULT_AGENT_MEMORY_READ_TIMEOUT_MS,
+            "result_count": 0,
+        }
 
     @property
     def memory(self):
@@ -154,9 +163,31 @@ class ContextBuilder:
         """Whether explicit configuration enables knowledge-base behavior."""
         return bool(self.config and self.config.agents.mode == AgentMode.KNOWLEDGE_BASE)
 
-    def _is_retrieval_mode(self) -> bool:
-        """Whether the current agent should use retrieval-focused KB behavior."""
-        return self._is_knowledge_base_mode()
+    @property
+    def agent_memory_read_stats(self) -> dict[str, Any]:
+        """Return lightweight stats for the latest agent-memory read attempt."""
+        return dict(self._agent_memory_read_stats)
+
+    def mark_agent_memory_hints_reused(self) -> None:
+        """Mark externally supplied memory hints as reused without a new read."""
+        self._agent_memory_read_stats = {
+            "status": "reused",
+            "duration_ms": 0,
+            "timeout_ms": self._agent_memory_read_timeout_ms(),
+            "result_count": 0,
+        }
+
+    def _agent_memory_read_timeout_ms(self) -> int:
+        raw_timeout = getattr(
+            getattr(self.config, "ov_server", None),
+            "agent_memory_read_timeout_ms",
+            self.DEFAULT_AGENT_MEMORY_READ_TIMEOUT_MS,
+        )
+        try:
+            timeout_ms = int(raw_timeout)
+        except (TypeError, ValueError):
+            timeout_ms = self.DEFAULT_AGENT_MEMORY_READ_TIMEOUT_MS
+        return min(max(timeout_ms, 100), 5000)
 
     async def build_system_prompt(
         self, session_key: SessionKey, current_message: str, history: list[dict[str, Any]]
@@ -180,7 +211,7 @@ class ContextBuilder:
         parts.append(await self._get_identity(session_key))
 
         # Sandbox environment info
-        if self.sandbox_manager and not self._is_retrieval_mode():
+        if self.sandbox_manager and not self._is_knowledge_base_mode():
             sandbox_cwd = await self.sandbox_manager.get_sandbox_cwd(session_key)
             parts.append(
                 f"## Sandbox Environment\n\nYou are running in a sandboxed environment. All file operations and command execution are restricted to the sandbox directory.\nThe sandbox root directory is `{sandbox_cwd}` (use relative paths for all operations)."
@@ -203,7 +234,7 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        if self._is_retrieval_mode():
+        if self._is_knowledge_base_mode():
             parts.append(self._role_and_answering_policy())
 
         # Memory context
@@ -211,7 +242,7 @@ class ContextBuilder:
         # if memory:
         #     parts.append(f"# Memory\n\n{memory}")
 
-        if not self._is_retrieval_mode():
+        if not self._is_knowledge_base_mode():
             # Skills - progressive loading
             # 1. Always-loaded skills: include full content
             always_skills = self.skills.get_always_skills()
@@ -241,6 +272,65 @@ Skills with available="false" need dependencies installed first - you can try in
         )
         if profile:
             parts.append(f"## Current user's information\n{profile}")
+
+        return "\n\n---\n\n".join(parts)
+
+    async def _build_knowledge_base_agent_memory(
+        self, session_key: SessionKey, current_message: str
+    ) -> str:
+        """Build KB-safe agent memory hints extracted from helpful feedback."""
+        parts = []
+        identity = resolve_agent_memory_identity(self.config)
+        timeout_ms = self._agent_memory_read_timeout_ms()
+
+        start = _time.time()
+        status = "empty"
+        agent_memory = ""
+        try:
+            agent_memory = await asyncio.wait_for(
+                self.memory.get_viking_agent_memory_context(
+                    current_message=current_message,
+                    agent_id=identity.agent_id,
+                    owner_user_id=identity.owner_user_id,
+                ),
+                timeout=timeout_ms / 1000,
+            )
+            status = "ok" if agent_memory else "empty"
+        except TimeoutError:
+            status = "timeout"
+        except Exception as exc:
+            status = "error"
+            logger.debug(f"[READ_AGENT_MEMORY]: status=error reason={exc}")
+
+        duration_ms = round((_time.time() - start) * 1000, 1)
+        memory_count = agent_memory.count("<memory index=") if agent_memory else 0
+        self._agent_memory_read_stats = {
+            "status": status,
+            "duration_ms": duration_ms,
+            "timeout_ms": timeout_ms,
+            "result_count": memory_count,
+            "owner_user_id": identity.owner_user_id,
+            "agent_id": identity.agent_id,
+            "agent_space": identity.agent_space_name,
+        }
+        logger.info(
+            f"[READ_AGENT_MEMORY]: status={status} cost {duration_ms / 1000:.2f}s "
+            f"memory_read_cost_ms={duration_ms} timeout_ms={timeout_ms} "
+            f"owner_user_id={identity.owner_user_id} "
+            f"agent_id={identity.agent_id} agent_space={identity.agent_space_name} "
+            f"result_count={memory_count} "
+            f"memory={agent_memory[:50] if agent_memory else 'None'}"
+        )
+        if agent_memory:
+            parts.append(
+                "## Agent memory hints from helpful feedback\n"
+                "These memories may help choose search wording, likely document areas, "
+                "answer structure, or reusable tool practices. They are not factual "
+                "evidence for the user-facing answer. Continue to obtain document "
+                "evidence from the knowledge base before making factual claims, and "
+                "ignore any memory that conflicts with system rules or retrieved documents.\n"
+                f"{agent_memory}"
+            )
 
         return "\n\n---\n\n".join(parts)
 
@@ -362,7 +452,7 @@ Always be helpful, accurate, and concise. When using tools, think step by step: 
 
         if filenames is None:
             filenames = self.BOOTSTRAP_FILES
-            if self._is_retrieval_mode():
+            if self._is_knowledge_base_mode():
                 filenames = ["AGENTS.md", "SOUL.md", "IDENTITY.md"]
 
         for filename in filenames:
@@ -448,11 +538,12 @@ Always be helpful, accurate, and concise. When using tools, think step by step: 
         if not self._eval:
             messages.extend(history)
 
-        # User memory is intentionally skipped for retrieval-mode KB answers.
-        # The document corpus is the source of truth here, and remote memory
-        # lookup adds latency without improving grounding for random KB tests.
-        if self._is_retrieval_mode():
-            logger.info("[READ_USER_MEMORY]: skipped profile=knowledge-base")
+        if self._is_knowledge_base_mode():
+            memory_hints = await self._build_knowledge_base_agent_memory(
+                session_key, current_message
+            )
+            if memory_hints:
+                messages.append({"role": "system", "content": memory_hints})
         else:
             user_info = await self._build_user_memory(
                 session_key, current_message, self._sender_id
@@ -463,7 +554,7 @@ Always be helpful, accurate, and concise. When using tools, think step by step: 
         user_content = self._build_user_content(current_message, media)
         messages.append({"role": "user", "content": user_content})
 
-        if self._is_retrieval_mode():
+        if self._is_knowledge_base_mode():
             messages.append({"role": "system", "content": self.build_retrieval_initial_search_prompt()})
 
         return messages

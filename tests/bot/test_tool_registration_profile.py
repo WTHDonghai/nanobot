@@ -37,7 +37,7 @@ def test_explicit_knowledge_base_mode_keeps_openviking_qa_tools(tmp_path: Path) 
         config=config,
     )
 
-    assert loop.context._is_retrieval_mode() is True
+    assert loop.context._is_knowledge_base_mode() is True
     assert set(loop.tools.tool_names) == {
         "openviking_read",
         "openviking_list",
@@ -58,7 +58,7 @@ def test_full_mode_is_not_inferred_from_workspace_prompt(
     config.agents.mode = AgentMode.FULL
     builder = ContextBuilder(tmp_path, config=config)
 
-    assert builder._is_retrieval_mode() is False
+    assert builder._is_knowledge_base_mode() is False
 
     registry = ToolRegistry()
     register_default_tools(
@@ -84,7 +84,7 @@ def test_default_mode_stays_restricted_even_with_general_prompt(tmp_path: Path) 
         config=Config(),
     )
 
-    assert loop.context._is_retrieval_mode() is True
+    assert loop.context._is_knowledge_base_mode() is True
     assert "exec" not in loop.tools.tool_names
 
 

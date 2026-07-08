@@ -174,7 +174,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
 
     def _should_use_kb_fast_batch_path(self) -> bool:
         """Use deterministic batch retrieval for KB answers when search/read tools exist."""
-        if not self.context._is_retrieval_mode():
+        if not self.context._is_knowledge_base_mode():
             return False
 
         return self._has_kb_fast_batch_tools()
@@ -247,6 +247,63 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                 "arguments": json.dumps(arguments, ensure_ascii=False),
             },
         }
+
+    @classmethod
+    def _extract_memory_hint_text_for_retrieval(
+        cls,
+        memory_hints: str,
+        *,
+        max_chars: int = 500,
+    ) -> str:
+        """Extract compact memory hint text suitable for a document search query."""
+        if not memory_hints:
+            return ""
+
+        hint_parts: list[str] = []
+        for tag in ["abstract", "overview", "match_reason"]:
+            for match in re.finditer(
+                rf"<{tag}>(.*?)</{tag}>",
+                memory_hints,
+                flags=re.IGNORECASE | re.DOTALL,
+            ):
+                text = re.sub(r"\s+", " ", match.group(1)).strip()
+                if text and text not in hint_parts:
+                    hint_parts.append(text)
+
+        if not hint_parts:
+            cleaned = re.sub(r"<[^>]+>", " ", memory_hints)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            hint_parts = [cleaned] if cleaned else []
+
+        return "；".join(hint_parts)[:max_chars].strip()
+
+    @classmethod
+    def _build_memory_guided_retrieval_query(
+        cls,
+        user_request: str,
+        memory_hints: str,
+    ) -> str:
+        """Use agent memory as retrieval guidance without treating it as answer evidence."""
+        request = str(user_request or "").strip()
+        hint_text = cls._extract_memory_hint_text_for_retrieval(memory_hints)
+        if not request or not hint_text:
+            return request
+        return (
+            f"{request}\n\n"
+            "检索提示（来自历史有用回答的记忆，仅用于选择关键词和文档范围，不作为答案事实）："
+            f"{hint_text}"
+        )
+
+    @staticmethod
+    def _extract_agent_memory_hints_from_messages(messages: list[dict]) -> str:
+        """Return existing agent-memory guidance already attached to the turn."""
+        hints = [
+            str(message.get("content") or "").strip()
+            for message in messages
+            if message.get("role") == "system"
+            and "Agent memory hints from helpful feedback" in str(message.get("content") or "")
+        ]
+        return "\n\n".join(hint for hint in hints if hint)
 
     async def _publish_tool_call_event(
         self,
@@ -585,10 +642,9 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
 
     def _resolve_openviking_agent_owner_user_id(self) -> str:
         """Return the configured stable owner used for shared agent-memory extraction."""
-        user_id = getattr(getattr(self.config, "ov_server", None), "admin_user_id", "")
-        if isinstance(user_id, str) and user_id.strip():
-            return user_id.strip()
-        raise ValueError("Missing ov_server.admin_user_id for agent-scoped OpenViking sync")
+        from vikingbot.openviking_identity import resolve_agent_memory_identity
+
+        return resolve_agent_memory_identity(self.config).owner_user_id
 
     def _resolve_session_memory_scope(self, session, msg: InboundMessage) -> str:
         """Resolve whether this bot session should extract all memories or agent-only memories."""
@@ -770,7 +826,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         Returns:
             tuple of (final_content, tools_used)
         """
-        if self.context._is_retrieval_mode():
+        if self.context._is_knowledge_base_mode():
             if self._should_use_kb_fast_batch_path():
                 return await self._run_kb_fast_batch_loop(
                     messages=messages,
@@ -820,6 +876,33 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         tools_used: list[dict] = []
         user_request = self._extract_user_text(messages)
         retrieval_query = user_request.strip()
+        agent_memory_hints = self._extract_agent_memory_hints_from_messages(messages)
+        agent_memory_stats = self.context.agent_memory_read_stats
+
+        if not agent_memory_hints:
+            if agent_memory_stats.get("status") == "not_started":
+                try:
+                    agent_memory_hints = await self.context._build_knowledge_base_agent_memory(
+                        session_key,
+                        user_request,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
+                        f"stage=memory status=unavailable reason={exc}"
+                    )
+                if agent_memory_hints:
+                    messages.append({"role": "system", "content": agent_memory_hints})
+                agent_memory_stats = self.context.agent_memory_read_stats
+        else:
+            if agent_memory_stats.get("status") == "not_started":
+                self.context.mark_agent_memory_hints_reused()
+            agent_memory_stats = self.context.agent_memory_read_stats
+        if agent_memory_hints:
+            retrieval_query = self._build_memory_guided_retrieval_query(
+                user_request,
+                agent_memory_hints,
+            )
 
         if publish_events:
             await self.bus.publish_outbound(
@@ -834,6 +917,10 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
             f"[KB_TRACE] session={trace_session} retrieval_path=fast_batch "
             f"search_limit={self.KB_FAST_BATCH_SEARCH_LIMIT} "
             f"read_limit={self.KB_FAST_BATCH_READ_LIMIT} "
+            f"memory_hints={'yes' if agent_memory_hints else 'no'} "
+            f"memory_read_status={agent_memory_stats.get('status', 'unknown')} "
+            f"memory_read_cost_ms={agent_memory_stats.get('duration_ms', 0)} "
+            f"memory_read_timeout_ms={agent_memory_stats.get('timeout_ms', 0)} "
             f"allow_grounded_history_reuse={allow_grounded_history_reuse}"
         )
 
@@ -985,6 +1072,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
             user_request,
             concrete_read_records,
             session_key,
+            memory_hints=agent_memory_hints,
             max_blocks=self.KB_FAST_BATCH_MAX_EVIDENCE_BLOCKS,
         )
         evidence_selection_duration_ms = (time.time() - evidence_selection_start) * 1000
@@ -1080,7 +1168,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         coverage_missing = ""
         coverage_next_query = ""
         has_grounded_history_candidate = allow_grounded_history_reuse
-        trace_enabled = self.context._is_retrieval_mode()
+        trace_enabled = self.context._is_knowledge_base_mode()
         trace_session = session_key.safe_name()
         trace_profile = "knowledge-base" if trace_enabled else "general"
 
@@ -1181,7 +1269,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                     )
             elif (
                 publish_events
-                and self.context._is_retrieval_mode()
+                and self.context._is_knowledge_base_mode()
                 and not has_sufficient_kb_evidence
                 and not response.has_tool_calls
             ):
@@ -1458,7 +1546,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                         {"role": "system", "content": self.context.build_tool_reflection_prompt()}
                     )
             else:
-                if self.context._is_retrieval_mode() and not has_sufficient_kb_evidence:
+                if self.context._is_knowledge_base_mode() and not has_sufficient_kb_evidence:
                     # Grounded-history reuse requires the structured answer tool.
                     # Plain text without current-turn evidence remains insufficient.
                     has_grounded_history_candidate = False
@@ -1493,7 +1581,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                 break
 
         if final_content is None or (isinstance(final_content, str) and not final_content.strip()):
-            if self.context._is_retrieval_mode() and has_kb_read_evidence:
+            if self.context._is_knowledge_base_mode() and has_kb_read_evidence:
                 if trace_enabled:
                     logger.info(
                         f"[KB_TRACE] session={trace_session} empty_final_with_selected_evidence "
@@ -1546,8 +1634,8 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         self, tool_name: str, arguments: dict | None, result: str
     ) -> tuple[bool, str]:
         """Classify whether a tool result is concrete evidence and explain the reason."""
-        if not self.context._is_retrieval_mode():
-            return False, "not_retrieval_mode"
+        if not self.context._is_knowledge_base_mode():
+            return False, "not_knowledge_base_mode"
 
         result_text = result if isinstance(result, str) else str(result or "")
         error_reason = self._classify_tool_error_result(result_text)
@@ -1760,7 +1848,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         self, messages: list[dict], has_kb_read_evidence: bool
     ) -> str:
         """Return the terminal response when retrieval hits the iteration limit."""
-        if not self.context._is_retrieval_mode():
+        if not self.context._is_knowledge_base_mode():
             return f"Reached {self.max_iterations} iterations without completion."
 
         language = self._detect_reply_language(messages)
@@ -1791,12 +1879,14 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         )
         if not evidence_blocks:
             return None
+        agent_memory_hints = self._extract_agent_memory_hints_from_messages(current_turn_messages)
 
         final_messages = [
             {
                 "role": "system",
                 "content": self.context.build_retrieval_final_response_system_prompt(),
             },
+            *([{"role": "system", "content": agent_memory_hints}] if agent_memory_hints else []),
             {
                 "role": "user",
                 "content": (
@@ -1869,7 +1959,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         has_sufficient_kb_evidence: bool,
     ) -> str | None:
         """Select tool-choice mode for the current LLM turn."""
-        if self.context._is_retrieval_mode() and not has_sufficient_kb_evidence and tools:
+        if self.context._is_knowledge_base_mode() and not has_sufficient_kb_evidence and tools:
             return "required"
         return None
 
@@ -2238,8 +2328,8 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                 config=self.config,
             )
 
-            # Retrieval-focused profiles: classify intent before agent loop
-            if message_context._is_retrieval_mode():
+            # Knowledge-base profiles: classify intent before agent loop
+            if message_context._is_knowledge_base_mode():
                 try:
                     logger.info("[IntentRouter] Classifying user intent...")
                     decision = await classify_intent(

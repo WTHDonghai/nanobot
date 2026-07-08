@@ -492,6 +492,8 @@ class OpenVikingConfig(BaseModel):
     account_id: str = "default"
     admin_user_id: str = "default"
     agent_id: str = ""
+    agent_memory_owner_user_id: str = ""
+    agent_memory_read_timeout_ms: int = 1200
 
 
 class WebToolsConfig(BaseModel):

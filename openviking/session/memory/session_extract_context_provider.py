@@ -8,7 +8,7 @@ Session Extract Context Provider - 会话提取 Provider 实现
 
 import json
 import os
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from openviking.server.identity import RequestContext
 from openviking.session.memory.core import ExtractContextProvider
@@ -17,9 +17,19 @@ from openviking.session.memory.tools import (
     add_tool_call_pair_to_messages,
     get_tool,
 )
+from openviking.session.memory_extractor import MemoryCategory
+from openviking.session.memory_scope import (
+    ALL_MEMORY_SCOPE,
+    MemoryScope,
+    category_allowed_in_scope,
+    normalize_memory_scope,
+)
 from openviking.storage.viking_fs import VikingFS
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config import get_openviking_config
+
+if TYPE_CHECKING:
+    from openviking.session.memory.memory_updater import ExtractContext
 
 logger = get_logger(__name__)
 
@@ -27,9 +37,17 @@ logger = get_logger(__name__)
 class SessionExtractContextProvider(ExtractContextProvider):
     """会话提取 Provider - 从会话消息中提取记忆"""
 
-    def __init__(self, messages: Any, latest_archive_overview: str = ""):
+    def __init__(
+        self,
+        messages: Any,
+        latest_archive_overview: str = "",
+        memory_scope: str = ALL_MEMORY_SCOPE,
+        feedback: str = "",
+    ):
         self.messages = messages
         self.latest_archive_overview = latest_archive_overview
+        self.memory_scope: MemoryScope = normalize_memory_scope(memory_scope)
+        self.feedback = feedback.strip()
         self._output_language = self._detect_language()
         self._registry = None  # 延迟加载
         self._schema_directories = None
@@ -69,6 +87,14 @@ class SessionExtractContextProvider(ExtractContextProvider):
 ## Target Output Language
 All memory content MUST be written in {output_language}.
 
+## Memory Scope
+Process only memory types allowed by the `{self.memory_scope}` scope.
+
+{f'''## User Feedback Signal
+{self.feedback}
+Use this as a weighting signal for extraction. Do not store the feedback text itself unless it contains durable guidance.
+
+''' if self.feedback else ''}\
 ## URI Handling
 The system automatically generates URIs based on memory_type and fields. Just provide correct memory_type and fields.
 
@@ -208,7 +234,7 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
         pre_fetch_messages.append(self._build_conversation_message())
 
         # 触发 registry 加载
-        schemas = self._get_registry().list_all(include_disabled=False)
+        schemas = self._list_scoped_schemas()
 
         from openviking.server.identity import ToolContext
 
@@ -336,7 +362,7 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
 
     def get_memory_schemas(self, ctx: RequestContext) -> List[Any]:
         """获取需要参与的 memory schemas（内部自动加载）"""
-        return self._get_registry().list_all(include_disabled=False)
+        return self._list_scoped_schemas()
 
     def get_schema_directories(self) -> List[str]:
         """返回需要加载的 schema 目录"""
@@ -361,3 +387,24 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
                 if os.path.exists(dir_path):
                     self._registry.load_from_directory(dir_path)
         return self._registry
+
+    def _list_scoped_schemas(self) -> List[Any]:
+        """Return enabled schemas allowed by the requested memory scope."""
+        schemas = self._get_registry().list_all(include_disabled=False)
+        if self.memory_scope == ALL_MEMORY_SCOPE:
+            return schemas
+
+        scoped_schemas = []
+        for schema in schemas:
+            try:
+                category = MemoryCategory(str(schema.memory_type))
+            except ValueError:
+                logger.debug(
+                    "Skipping memory schema %s for scoped extraction %s",
+                    getattr(schema, "memory_type", ""),
+                    self.memory_scope,
+                )
+                continue
+            if category_allowed_in_scope(category, self.memory_scope):
+                scoped_schemas.append(schema)
+        return scoped_schemas

@@ -167,7 +167,7 @@ async def test_add_message(client: httpx.AsyncClient):
     assert body["result"]["message_id"].startswith("msg_")
 
 
-async def test_message_feedback_records_assistant_rating(client: httpx.AsyncClient):
+async def test_message_feedback_records_assistant_rating(client: httpx.AsyncClient, service):
     create_resp = await client.post("/api/v1/sessions", json={})
     session_id = create_resp.json()["result"]["session_id"]
 
@@ -181,6 +181,13 @@ async def test_message_feedback_records_assistant_rating(client: httpx.AsyncClie
     )
     assistant_message_id = assistant_resp.json()["result"]["message_id"]
 
+    async def fake_extract_long_term_memories(**_kwargs):
+        return []
+
+    service.sessions._session_compressor.extract_long_term_memories = (
+        fake_extract_long_term_memories
+    )
+
     resp = await client.put(
         f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
         json={"value": "up"},
@@ -192,22 +199,89 @@ async def test_message_feedback_records_assistant_rating(client: httpx.AsyncClie
     assert body["result"]["summary"]["feedback_count"] == 1
     assert body["result"]["summary"]["positive_feedback_count"] == 1
     assert body["result"]["summary"]["negative_feedback_count"] == 0
+    assert body["result"]["summary"]["memory_pending_count"] == 1
 
     update_resp = await client.put(
         f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
-        json={"value": "down"},
+        json={
+            "value": "down",
+            "reason_tags": ["信息不准确", "操作步骤不完整"],
+        },
     )
     assert update_resp.status_code == 200
     update_result = update_resp.json()["result"]
     assert update_result["summary"]["feedback_count"] == 1
     assert update_result["summary"]["positive_feedback_count"] == 0
     assert update_result["summary"]["negative_feedback_count"] == 1
+    assert update_result["summary"]["memory_pending_count"] == 0
+    assert update_result["summary"]["memory_skipped_count"] == 1
+    assert update_result["feedback"]["reason_tags"] == ["信息不准确", "操作步骤不完整"]
+    assert "comment" not in update_result["feedback"]
 
     feedback_resp = await client.get(f"/api/v1/sessions/{session_id}/feedback")
     assert feedback_resp.status_code == 200
     feedback_result = feedback_resp.json()["result"]
     assert feedback_result["feedback"][assistant_message_id]["value"] == "down"
+    assert "comment" not in feedback_result["feedback"][assistant_message_id]
     assert feedback_result["summary"]["negative_feedback_count"] == 1
+    assert feedback_result["summary"]["memory_skipped_count"] == 1
+
+    context_resp = await client.get(f"/api/v1/sessions/{session_id}/context")
+    assert context_resp.status_code == 200
+    context_messages = context_resp.json()["result"]["messages"]
+    assistant_record = next(
+        message for message in context_messages if message["id"] == assistant_message_id
+    )
+    assert assistant_record["feedback"]["value"] == "down"
+    assert assistant_record["feedback"]["reason_tags"] == ["信息不准确", "操作步骤不完整"]
+    assert "comment" not in assistant_record["feedback"]
+
+    clear_resp = await client.delete(
+        f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
+    )
+    assert clear_resp.status_code == 200
+    clear_result = clear_resp.json()["result"]
+    assert clear_result["deleted"] is True
+    assert clear_result["summary"]["feedback_count"] == 0
+    assert clear_result["summary"]["positive_feedback_count"] == 0
+    assert clear_result["summary"]["negative_feedback_count"] == 0
+    assert clear_result["summary"]["memory_skipped_count"] == 0
+
+    cleared_feedback_resp = await client.get(f"/api/v1/sessions/{session_id}/feedback")
+    assert cleared_feedback_resp.status_code == 200
+    cleared_feedback_result = cleared_feedback_resp.json()["result"]
+    assert assistant_message_id not in cleared_feedback_result["feedback"]
+    assert cleared_feedback_result["summary"]["feedback_count"] == 0
+
+    cleared_context_resp = await client.get(f"/api/v1/sessions/{session_id}/context")
+    assert cleared_context_resp.status_code == 200
+    cleared_assistant_record = next(
+        message
+        for message in cleared_context_resp.json()["result"]["messages"]
+        if message["id"] == assistant_message_id
+    )
+    assert "feedback" not in cleared_assistant_record
+
+    clear_again_resp = await client.delete(
+        f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
+    )
+    assert clear_again_resp.status_code == 200
+    assert clear_again_resp.json()["result"]["deleted"] is False
+    assert clear_again_resp.json()["result"]["summary"]["feedback_count"] == 0
+
+    missing_reason_resp = await client.put(
+        f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
+        json={"value": "down"},
+    )
+    assert missing_reason_resp.status_code == 400
+    assert missing_reason_resp.json()["error"]["code"] == "INVALID_ARGUMENT"
+
+    unsupported_reason_resp = await client.put(
+        f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
+        json={"value": "down", "reason_tags": ["自由文本原因"]},
+    )
+    assert unsupported_reason_resp.status_code == 400
+    assert unsupported_reason_resp.json()["error"]["code"] == "INVALID_ARGUMENT"
 
     user_message_id = user_resp.json()["result"]["message_id"]
     invalid_resp = await client.put(
@@ -216,6 +290,185 @@ async def test_message_feedback_records_assistant_rating(client: httpx.AsyncClie
     )
     assert invalid_resp.status_code == 400
     assert invalid_resp.json()["error"]["code"] == "INVALID_ARGUMENT"
+
+    invalid_clear_resp = await client.delete(
+        f"/api/v1/sessions/{session_id}/messages/{user_message_id}/feedback",
+    )
+    assert invalid_clear_resp.status_code == 400
+    assert invalid_clear_resp.json()["error"]["code"] == "INVALID_ARGUMENT"
+
+
+async def test_message_feedback_normalizes_legacy_negative_reasons(
+    client: httpx.AsyncClient, service
+):
+    create_resp = await client.post("/api/v1/sessions", json={})
+    session_id = create_resp.json()["result"]["session_id"]
+
+    await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "user", "content": "Can you help?"},
+    )
+    assistant_resp = await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "assistant", "content": "Yes, here is the answer."},
+    )
+    assistant_message_id = assistant_resp.json()["result"]["message_id"]
+
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+    session = service.sessions.session(ctx, session_id)
+    await session.load()
+    await session._viking_fs.write_file(
+        uri=f"{session.uri}/feedback.json",
+        content=json.dumps(
+            {
+                assistant_message_id: {
+                    "message_id": assistant_message_id,
+                    "value": "down",
+                    "reason_tags": ["不准确", "信息不准确", "缺少步骤", "自由填写的意见"],
+                    "comment": "旧版本的自由文本反馈",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }
+            },
+            ensure_ascii=False,
+        ),
+        ctx=session.ctx,
+    )
+
+    feedback_resp = await client.get(f"/api/v1/sessions/{session_id}/feedback")
+    assert feedback_resp.status_code == 200
+    result = feedback_resp.json()["result"]
+    stored_feedback = result["feedback"][assistant_message_id]
+    assert stored_feedback["reason_tags"] == ["信息不准确", "操作步骤不完整"]
+    assert "comment" not in stored_feedback
+    assert result["summary"]["negative_feedback_count"] == 1
+
+    context_resp = await client.get(f"/api/v1/sessions/{session_id}/context")
+    assert context_resp.status_code == 200
+    assistant_record = next(
+        message
+        for message in context_resp.json()["result"]["messages"]
+        if message["id"] == assistant_message_id
+    )
+    assert assistant_record["feedback"]["reason_tags"] == ["信息不准确", "操作步骤不完整"]
+    assert "comment" not in assistant_record["feedback"]
+
+
+async def test_positive_feedback_triggers_agent_memory_task(
+    client: httpx.AsyncClient, service
+):
+    create_resp = await client.post("/api/v1/sessions", json={})
+    session_id = create_resp.json()["result"]["session_id"]
+
+    await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "user", "content": "How should I reset the headset?"},
+    )
+    assistant_resp = await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "assistant", "content": "Hold power for ten seconds."},
+    )
+    assistant_message_id = assistant_resp.json()["result"]["message_id"]
+
+    captured: dict[str, object] = {}
+
+    async def fake_extract_long_term_memories(**kwargs):
+        captured.update(kwargs)
+        return [object()]
+
+    service.sessions._session_compressor.extract_long_term_memories = (
+        fake_extract_long_term_memories
+    )
+
+    resp = await client.put(
+        f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
+        json={"value": "up"},
+    )
+    assert resp.status_code == 200
+    feedback = resp.json()["result"]["feedback"]
+    assert feedback["value"] == "up"
+    assert feedback["memory_task_id"]
+    assert feedback["memory_status"] in {"pending", "completed"}
+
+    task = await _wait_for_task(client, feedback["memory_task_id"])
+    assert task["status"] == "completed"
+    assert task["task_type"] == "message_feedback_memory"
+    assert task["result"]["memory_status"] == "completed"
+    assert task["result"]["memories_extracted"] == 1
+
+    assert captured["memory_scope"] == "agent"
+    assert "marked this assistant answer as helpful" in captured["feedback"]
+    extracted_messages = captured["messages"]
+    assert [message.role for message in extracted_messages] == ["user", "assistant"]
+    assert extracted_messages[0].content == "How should I reset the headset?"
+    assert extracted_messages[1].content == "Hold power for ten seconds."
+
+    feedback_resp = await client.get(f"/api/v1/sessions/{session_id}/feedback")
+    assert feedback_resp.status_code == 200
+    stored_feedback = feedback_resp.json()["result"]["feedback"][assistant_message_id]
+    assert stored_feedback["memory_status"] == "completed"
+    assert stored_feedback["memory_extracted_count"] == 1
+    assert feedback_resp.json()["result"]["summary"]["memory_completed_count"] == 1
+    assert feedback_resp.json()["result"]["summary"]["memory_extracted_count"] == 1
+
+    context_resp = await client.get(f"/api/v1/sessions/{session_id}/context")
+    assert context_resp.status_code == 200
+    assistant_record = next(
+        message
+        for message in context_resp.json()["result"]["messages"]
+        if message["id"] == assistant_message_id
+    )
+    assert assistant_record["feedback"]["value"] == "up"
+    assert assistant_record["feedback"]["memory_status"] == "completed"
+
+
+async def test_positive_feedback_memory_task_records_extraction_failure(
+    client: httpx.AsyncClient, service
+):
+    create_resp = await client.post("/api/v1/sessions", json={})
+    session_id = create_resp.json()["result"]["session_id"]
+
+    await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "user", "content": "How should I reset the headset?"},
+    )
+    assistant_resp = await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "assistant", "content": "Hold power for ten seconds."},
+    )
+    assistant_message_id = assistant_resp.json()["result"]["message_id"]
+
+    captured: dict[str, object] = {}
+
+    async def failing_extract_long_term_memories(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("extract boom")
+
+    service.sessions._session_compressor.extract_long_term_memories = (
+        failing_extract_long_term_memories
+    )
+
+    resp = await client.put(
+        f"/api/v1/sessions/{session_id}/messages/{assistant_message_id}/feedback",
+        json={"value": "up"},
+    )
+    assert resp.status_code == 200
+    feedback = resp.json()["result"]["feedback"]
+    assert feedback["memory_status"] == "pending"
+    assert feedback["memory_task_id"]
+
+    task = await _wait_for_task(client, feedback["memory_task_id"])
+    assert task["status"] == "failed"
+    assert "extract boom" in task["error"]
+    assert captured["strict_extract_errors"] is True
+    assert captured["memory_scope"] == "agent"
+
+    feedback_resp = await client.get(f"/api/v1/sessions/{session_id}/feedback")
+    assert feedback_resp.status_code == 200
+    stored_feedback = feedback_resp.json()["result"]["feedback"][assistant_message_id]
+    assert stored_feedback["memory_status"] == "failed"
+    assert "extract boom" in stored_feedback["memory_error"]
+    assert feedback_resp.json()["result"]["summary"]["memory_failed_count"] == 1
 
 
 async def test_add_multiple_messages(client: httpx.AsyncClient):

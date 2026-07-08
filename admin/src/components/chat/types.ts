@@ -20,6 +20,15 @@ export type SessionSummary = {
   pending_tokens?: number;
   commit_count?: number;
   last_commit_at?: string;
+  feedback_count?: number;
+  positive_feedback_count?: number;
+  negative_feedback_count?: number;
+  latest_feedback_at?: string;
+  feedback_memory_pending_count?: number;
+  feedback_memory_completed_count?: number;
+  feedback_memory_failed_count?: number;
+  feedback_memory_skipped_count?: number;
+  feedback_memory_extracted_count?: number;
 };
 
 export type SessionContextPart = {
@@ -64,6 +73,7 @@ export type ChatMessage = {
   steps?: string[];
   iterationCount?: number;
   feedback?: 'up' | 'down';
+  feedbackDetail?: MessageFeedback;
 };
 
 export type MessageFeedback = {
@@ -72,5 +82,9 @@ export type MessageFeedback = {
   created_at?: string;
   updated_at?: string;
   reason_tags?: string[];
-  comment?: string;
+  memory_status?: 'pending' | 'completed' | 'failed' | 'skipped';
+  memory_task_id?: string;
+  memory_extracted_count?: number;
+  memory_error?: string;
+  memory_updated_at?: string;
 };

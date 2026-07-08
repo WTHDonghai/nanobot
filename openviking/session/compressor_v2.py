@@ -41,6 +41,8 @@ class SessionCompressorV2:
         ctx: Optional[RequestContext] = None,
         messages: Optional[List] = None,
         latest_archive_overview: str = "",
+        memory_scope: str = "all",
+        feedback: str = "",
     ) -> ExtractLoop:
         """Create new ExtractLoop instance with current ctx.
 
@@ -59,6 +61,8 @@ class SessionCompressorV2:
         context_provider = SessionExtractContextProvider(
             messages=messages,
             latest_archive_overview=latest_archive_overview,
+            memory_scope=memory_scope,
+            feedback=feedback,
         )
 
         return ExtractLoop(
@@ -85,6 +89,8 @@ class SessionCompressorV2:
         ctx: Optional[RequestContext] = None,
         strict_extract_errors: bool = False,
         latest_archive_overview: str = "",
+        memory_scope: str = "all",
+        feedback: str = "",
     ) -> List[Context]:
         """Extract long-term memories from messages using v2 templating system.
 
@@ -130,6 +136,8 @@ class SessionCompressorV2:
                 ctx=ctx,
                 messages=messages,
                 latest_archive_overview=latest_archive_overview,
+                memory_scope=memory_scope,
+                feedback=feedback,
             )
             if lock_manager:
                 # 基于 provider 的 schemas 生成目录列表

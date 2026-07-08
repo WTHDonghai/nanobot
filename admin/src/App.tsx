@@ -11,6 +11,7 @@ import SystemInfo from './pages/SystemInfo';
 import Resources from './pages/Resources';
 import RecallTest from './pages/RecallTest';
 import TestBot from './pages/TestBot';
+import AdminMemories from './pages/AdminMemories';
 
 const getRouterBase = () => {
   if (typeof window !== 'undefined' && window.location.pathname.startsWith('/guest')) {
@@ -53,6 +54,7 @@ const AdminAppRoutes = () => {
                 <Route path="/sessions" element={<Sessions />} />
                 {role !== 'root' && <Route path="/bot" element={<BotChat />} />}
                 <Route path="/system" element={<SystemInfo />} />
+                {role !== 'user' && <Route path="/memories" element={<AdminMemories />} />}
                 <Route path="/resources" element={<Resources />} />
                 {role !== 'root' && <Route path="/recall-test" element={<RecallTest />} />}
                 <Route path="*" element={<Navigate to={defaultPage} replace />} />

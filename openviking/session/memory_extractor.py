@@ -283,6 +283,7 @@ class MemoryExtractor:
                 messages, fallback_language=fallback_language
             )
             history_summary = str(context.get("summary") or "")
+            user_feedback = str(context.get("feedback") or "")
 
             prompt = render_prompt(
                 "compression.memory_extraction",
@@ -290,7 +291,7 @@ class MemoryExtractor:
                     "summary": history_summary,
                     "recent_messages": formatted_messages,
                     "user": user._user_id,
-                    "feedback": "",
+                    "feedback": user_feedback,
                     "output_language": output_language,
                 },
             )
@@ -307,6 +308,7 @@ class MemoryExtractor:
                 "output_language": output_language,
                 "summary_len": len(history_summary),
                 "recent_messages_len": len(formatted_messages),
+                "feedback_len": len(user_feedback),
                 "summary": history_summary,
                 "recent_messages": formatted_messages,
             }

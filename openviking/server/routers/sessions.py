@@ -87,7 +87,6 @@ class FeedbackRequest(BaseModel):
 
     value: Literal["up", "down"]
     reason_tags: Optional[List[str]] = None
-    comment: Optional[str] = None
 
 
 class CommitSessionRequest(BaseModel):
@@ -333,7 +332,6 @@ async def set_message_feedback(
             message_id,
             request.value,
             reason_tags=request.reason_tags,
-            comment=request.comment or "",
         )
     except ValueError as exc:
         return JSONResponse(
@@ -350,6 +348,38 @@ async def set_message_feedback(
             "session_id": session_id,
             "message_id": message_id,
             "feedback": entry,
+            "summary": session.meta.feedback_summary,
+        },
+    )
+
+
+@router.delete("/{session_id}/messages/{message_id}/feedback")
+async def clear_message_feedback(
+    session_id: str = Path(..., description="Session ID"),
+    message_id: str = Path(..., description="Message ID"),
+    _ctx: RequestContext = Depends(get_request_context),
+):
+    """Remove feedback from an assistant message."""
+    service = get_service()
+    session = service.sessions.session(_ctx, session_id)
+    await session.load()
+    try:
+        deleted = await session.clear_message_feedback(message_id)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content=Response(
+                status="error",
+                error=ErrorInfo(code="INVALID_ARGUMENT", message=str(exc)),
+            ).model_dump(),
+        )
+
+    return Response(
+        status="ok",
+        result={
+            "session_id": session_id,
+            "message_id": message_id,
+            "deleted": deleted,
             "summary": session.meta.feedback_summary,
         },
     )
