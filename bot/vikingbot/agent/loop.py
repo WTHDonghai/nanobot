@@ -864,6 +864,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         sender_id: str | None = None,
         allow_grounded_history_reuse: bool = False,
         stream_response_events: bool = False,
+        message_context: ContextBuilder | None = None,
     ) -> tuple[str | None, list[dict], dict[str, int], int]:
         """
         Run the core agent loop: call LLM, execute tools, repeat until done.
@@ -887,6 +888,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                     sender_id=sender_id,
                     allow_grounded_history_reuse=allow_grounded_history_reuse,
                     stream_response_events=stream_response_events,
+                    message_context=message_context,
                 )
             final_content = self._build_iteration_limit_terminal_response(
                 messages=messages,
@@ -921,20 +923,22 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
         sender_id: str | None = None,
         allow_grounded_history_reuse: bool = False,
         stream_response_events: bool = False,
+        message_context: ContextBuilder | None = None,
     ) -> tuple[str | None, list[dict], dict[str, int], int]:
         """Run the deterministic no-fallback KB path: search, batch read, answer."""
         trace_session = session_key.safe_name()
         token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         tools_used: list[dict] = []
+        context = message_context or self.context
         user_request = self._extract_user_text(messages)
         retrieval_query = user_request.strip()
         agent_memory_hints = self._extract_agent_memory_hints_from_messages(messages)
-        agent_memory_stats = self.context.agent_memory_read_stats
+        agent_memory_stats = context.agent_memory_read_stats
 
         if not agent_memory_hints:
             if agent_memory_stats.get("status") == "not_started":
                 try:
-                    agent_memory_hints = await self.context._build_knowledge_base_agent_memory(
+                    agent_memory_hints = await context._build_knowledge_base_agent_memory(
                         session_key,
                         user_request,
                     )
@@ -945,11 +949,11 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                     )
                 if agent_memory_hints:
                     messages.append({"role": "system", "content": agent_memory_hints})
-                agent_memory_stats = self.context.agent_memory_read_stats
+                agent_memory_stats = context.agent_memory_read_stats
         else:
             if agent_memory_stats.get("status") == "not_started":
-                self.context.mark_agent_memory_hints_reused()
-            agent_memory_stats = self.context.agent_memory_read_stats
+                context.mark_agent_memory_hints_reused()
+            agent_memory_stats = context.agent_memory_read_stats
         if agent_memory_hints:
             retrieval_query = self._build_memory_guided_retrieval_query(
                 user_request,
@@ -2532,6 +2536,7 @@ class AgentLoop(LoopTraceMixin, KbEvidenceMixin, KbResponseMixin):
                 sender_id=msg.sender_id,
                 allow_grounded_history_reuse=allow_grounded_history_reuse,
                 stream_response_events=should_stream_response,
+                message_context=message_context,
             )
 
             # Log response preview

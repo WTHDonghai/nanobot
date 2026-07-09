@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from vikingbot.agent.context import ContextBuilder
 from vikingbot.agent.loop import AgentLoop
 from vikingbot.bus.events import InboundMessage
 from vikingbot.bus.queue import MessageBus
@@ -757,6 +758,119 @@ def test_fast_batch_does_not_retry_after_empty_agent_memory_read() -> None:
     assert final_content.startswith("报修时需准备")
     assert memory.agent_memory_calls == 1
     assert loop.context.agent_memory_read_stats["status"] == "empty"
+
+
+def test_fast_batch_reuses_turn_context_empty_agent_memory_without_duplicate_read() -> None:
+    class FakeMemoryStore:
+        def __init__(self) -> None:
+            self.agent_memory_calls = 0
+
+        async def get_viking_user_profile(self, *args, **kwargs):
+            return ""
+
+        async def get_viking_agent_memory_context(self, *args, **kwargs):
+            self.agent_memory_calls += 1
+            return ""
+
+    provider = StubProvider(
+        [
+            LLMResponse(
+                content='{"sections":[1],"coverage":"full","missing":"","next_query":""}'
+            ),
+            LLMResponse(content="报修时需准备酒店名称、问题描述和联系人信息。"),
+        ]
+    )
+    memory = FakeMemoryStore()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "SOUL.md").write_text(
+            "我是知识库助手。回答问题必须基于当前知识库中的文档依据。",
+            encoding="utf-8",
+        )
+        async def get_sandbox_cwd(_session_key):
+            return str(workspace)
+
+        sandbox_manager = SimpleNamespace(
+            to_workspace_id=lambda _session_key: "workspace-a",
+            get_sandbox_cwd=get_sandbox_cwd,
+        )
+        config = Config()
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=provider,
+            workspace=workspace,
+            config=config,
+            max_iterations=5,
+            sandbox_manager=sandbox_manager,
+        )
+        loop.context._memory = memory
+        message_context = ContextBuilder(
+            workspace,
+            sandbox_manager=sandbox_manager,
+            sender_id="guest-a",
+            config=config,
+        )
+        message_context._memory = memory
+        loop.tools.get_definitions = lambda: [
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_search",
+                    "description": "Search docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "openviking_read",
+                    "description": "Read docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+        loop.tools.execute = AsyncMock(
+            side_effect=[
+                (
+                    "OpenViking search query: 报修\n"
+                    "Target URI: viking://resources/\n"
+                    "Requested limit: 8\n"
+                    "Total matches: 1\n\n"
+                    "Documents:\n"
+                    "1. [document] viking://resources/demo/repair.md\n"
+                    "   Content preview omitted. Use openviking_read for evidence.\n"
+                ),
+                "## 维护报修\n报修需准备酒店名称、问题描述、联系人姓名及联系方式。",
+            ]
+        )
+        session_key = SessionKey(
+            type="cli",
+            channel_id="default",
+            chat_id="kb-fast-turn-context-empty-memory",
+        )
+        messages = asyncio.run(
+            message_context.build_messages(
+                history=[],
+                current_message="报修",
+                session_key=session_key,
+            )
+        )
+
+        final_content, _tools_used, _token_usage, iteration = asyncio.run(
+            loop._run_agent_loop(
+                messages=messages,
+                session_key=session_key,
+                publish_events=False,
+                message_context=message_context,
+            )
+        )
+
+    assert iteration == 1
+    assert final_content.startswith("报修时需准备")
+    assert memory.agent_memory_calls == 1
+    assert message_context.agent_memory_read_stats["status"] == "empty"
+    assert loop.context.agent_memory_read_stats["status"] == "not_started"
 
 
 def test_run_agent_loop_separates_kb_draft_from_final_user_reply() -> None:
