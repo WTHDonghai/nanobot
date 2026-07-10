@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenViking Design Doc Maintainer"
+  short_description: "Maintain OpenViking design docs and lifecycle"
+  default_prompt: "Use $openviking-design-doc-maintainer to review and synchronize the Admin session design document set."

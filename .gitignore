@@ -234,5 +234,10 @@ web_modules/
 
 # Output of 'npm pack'
 *.tgz
+# Keep installed agent skills local, but version repository-specific skills.
 .agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/openviking-design-doc-maintainer/
+!.agents/skills/openviking-design-doc-maintainer/**
 skills-lock.json
